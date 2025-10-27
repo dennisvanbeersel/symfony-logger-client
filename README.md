@@ -1,8 +1,8 @@
-# Application Logger - Symfony Bundle
+# AppLogger - Symfony Bundle
 
 <div align="center">
 
-**🛡️ Error Tracking for Symfony Applications**
+**🛡️ Privacy-First Error Tracking for Symfony - Hosted in EU**
 
 [![PHP](https://img.shields.io/badge/php-%5E8.2-blue?style=flat-square)](https://www.php.net/)
 [![Symfony](https://img.shields.io/badge/symfony-6.4%20%7C%207.x-green?style=flat-square)](https://symfony.com/)
@@ -43,6 +43,8 @@ php bin/console cache:clear
 ---
 
 ## 🎯 Why This Bundle?
+
+**AppLogger** ([applogger.eu](https://applogger.eu)) is an EU-hosted, privacy-first error tracking SaaS platform specifically designed for Symfony applications. This bundle provides zero-config integration with production-grade resilience.
 
 Most error tracking solutions have a **critical flaw**: they can slow down or even crash your application when the tracking service is down. This bundle is different.
 
@@ -169,6 +171,32 @@ $elapsed = microtime(true) - $start;   // <1ms
 
 ---
 
+## 📊 What Gets Tracked?
+
+This bundle provides comprehensive monitoring for both backend and frontend:
+
+### PHP Backend Tracking
+- **Exceptions**: All uncaught exceptions via Symfony event subscriber
+- **HTTP Errors**: 4xx and 5xx status codes (404, 500, etc.)
+- **Monolog Integration**: Error-level logs when configured
+- **Context**: Request/response data, user context, server metadata
+- **Breadcrumbs**: User actions leading up to errors
+
+### JavaScript Frontend Tracking
+- **Browser Errors**: Uncaught exceptions and unhandled promise rejections
+- **API Failures**: Failed HTTP requests with status codes
+- **Click Heatmaps**: User interaction coordinates, CSS selectors, viewport dimensions
+- **Session Tracking**: Page views, navigation flows, session duration
+- **User Context**: Browser, platform, screen resolution
+
+### GDPR Compliance
+- **Automatic PII Scrubbing**: Passwords, tokens, sensitive fields removed
+- **IP Anonymization**: Last octet masked (192.168.1.0 instead of 192.168.1.100)
+- **Session Hashing**: User identifiers are cryptographically hashed
+- **EU Data Residency**: All data stored in EU datacenters
+
+---
+
 ## 🚀 Quick Start
 
 ### Installation
@@ -211,7 +239,7 @@ APP_VERSION=1.0.0  # Optional but recommended
 ```yaml
 # config/packages/application_logger.yaml
 application_logger:
-    # Required: Your Application Logger DSN
+    # Required: Your AppLogger DSN (get from applogger.eu dashboard)
     dsn: '%env(APPLICATION_LOGGER_DSN)%'
 
     # Optional: Enable/disable the bundle
@@ -251,6 +279,17 @@ application_logger:
         - credit_card
         - ssn
 
+    # Session Tracking (Required for heatmap)
+    session_tracking:
+        enabled: true         # Enable automatic session tracking (default: true)
+        hash_user_id: true    # Hash user identifiers for privacy (GDPR-compliant)
+
+    # Heatmap Click Tracking
+    heatmap:
+        enabled: true         # Enable click heatmap tracking (default: true)
+        batch_size: 10        # Send clicks in batches of N (1-50, default: 10)
+        batch_timeout: 5000   # Or after N milliseconds (1000-30000, default: 5000)
+
     # JavaScript SDK
     javascript:
         enabled: true         # Enable Twig globals for JS SDK
@@ -269,7 +308,7 @@ application_logger:
 php bin/console cache:clear
 ```
 
-**Done!** All exceptions are now automatically tracked. Visit your Application Logger dashboard to see errors.
+**Done!** All exceptions are now automatically tracked. Visit your AppLogger dashboard at [applogger.eu](https://applogger.eu) to see errors.
 
 ---
 
@@ -291,7 +330,7 @@ The bundle automatically captures:
 
 #### Monolog Integration
 
-Send error-level logs to Application Logger:
+Send error-level logs to AppLogger:
 
 ```yaml
 # config/packages/monolog.yaml
@@ -646,7 +685,7 @@ APPLICATION_LOGGER_ENABLED=false
 
 ### Multiple Projects
 
-Send errors to different Application Logger projects:
+Send errors to different AppLogger projects:
 
 ```yaml
 # config/services.yaml
@@ -830,7 +869,7 @@ npm run test:coverage
 
 | Document | Description |
 |----------|-------------|
-| [Main README](https://github.com/dennisvanbeersel/application-logger) | Platform overview and setup |
+| [AppLogger Website](https://applogger.eu) | Sign up and get your DSN |
 | [API Reference](https://github.com/dennisvanbeersel/application-logger/blob/master/docs/API.md) | REST API documentation |
 | [Architecture](https://github.com/dennisvanbeersel/application-logger/blob/master/docs/ARCHITECTURE.md) | Technical architecture |
 | [Security & Testing](https://github.com/dennisvanbeersel/application-logger/blob/master/docs/SECURITY_AND_TESTING.md) | Security practices and testing guidelines |
@@ -839,7 +878,7 @@ npm run test:coverage
 
 ## 📝 License
 
-Part of the Application Logger project - see main [LICENSE](https://github.com/dennisvanbeersel/application-logger/blob/master/LICENSE) file.
+Part of the AppLogger project - see main [LICENSE](https://github.com/dennisvanbeersel/application-logger/blob/master/LICENSE) file.
 
 ---
 
@@ -864,6 +903,6 @@ Built with ❤️ for the Symfony community.
 [🐛 Report Bug](https://github.com/dennisvanbeersel/symfony-logger-client/issues) •
 [💬 Discussions](https://github.com/dennisvanbeersel/application-logger/discussions)
 
-[⬆ Back to Top](#application-logger---symfony-bundle)
+[⬆ Back to Top](#applogger---symfony-bundle)
 
 </div>
