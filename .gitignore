@@ -1,0 +1,35 @@
+# Dependencies
+/node_modules/
+/vendor/
+
+# Build output
+# Note: /assets/dist/ is committed for distribution (users install via Composer)
+
+# IDE
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+/coverage/
+/.phpunit.cache
+/.phpunit.result.cache
+
+# Linting
+/.php-cs-fixer.cache
+
+# Composer
+# Note: composer.lock is committed for library development but ignored in production
+# composer.lock
+
+# npm
+package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

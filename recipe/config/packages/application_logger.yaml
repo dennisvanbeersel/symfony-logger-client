@@ -1,0 +1,48 @@
+application_logger:
+    # Your Application Logger DSN - Project endpoint URL (set in .env)
+    # Format: https://host/project-id (without API key)
+    dsn: '%env(APPLICATION_LOGGER_DSN)%'
+
+    # API Key for authentication (set in .env)
+    # Sent as X-Api-Key header with each request
+    api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
+
+    # Application version for release tracking
+    release: '%env(default::APP_VERSION)%'
+
+    # Environment (production, staging, development)
+    environment: '%kernel.environment%'
+
+    # Enable error tracking
+    enabled: true
+
+    # Resilience settings (default values - optimized for reliability)
+    # timeout: 2.0              # API timeout in seconds (0.5-5.0)
+    # retry_attempts: 0         # Number of retries (0=fail fast)
+    # async: true               # Fire-and-forget mode
+
+    # Circuit breaker (prevents cascade failures)
+    # circuit_breaker:
+    #     enabled: true
+    #     failure_threshold: 5
+    #     timeout: 60
+    #     half_open_attempts: 1
+
+    # Minimum error level to capture
+    # capture_level: error      # debug, info, warning, error, critical
+
+    # Security: Fields to scrub from error reports
+    # scrub_fields:
+    #     - password
+    #     - token
+    #     - api_key
+    #     - secret
+    #     - authorization
+
+    # JavaScript SDK integration
+    javascript:
+        enabled: true
+        # debug: '%kernel.debug%'  # Enable console logging in dev
+
+    # Debug mode (development only)
+    debug: '%kernel.debug%'

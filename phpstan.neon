@@ -1,0 +1,17 @@
+parameters:
+    level: 6
+    paths:
+        - src
+        - tests
+
+    # Exclude generated and vendor files
+    excludePaths:
+        - vendor/*
+        - node_modules/*
+        - assets/*
+
+    # Treat PHP native types as strict
+    treatPhpDocTypesAsCertain: false
+
+    # Report all possible errors
+    reportUnmatchedIgnoredErrors: true

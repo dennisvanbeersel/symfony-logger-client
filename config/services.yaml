@@ -1,0 +1,110 @@
+services:
+    _defaults:
+        autowire: false
+        autoconfigure: false
+        public: false
+
+    # Circuit Breaker - prevents repeated calls to failing service
+    ApplicationLogger\Bundle\Service\CircuitBreaker:
+        arguments:
+            $enabled: '%application_logger.circuit_breaker.enabled%'
+            $failureThreshold: '%application_logger.circuit_breaker.failure_threshold%'
+            $timeout: '%application_logger.circuit_breaker.timeout%'
+            $maxHalfOpenAttempts: '%application_logger.circuit_breaker.half_open_attempts%'
+            $cache: '@cache.app'
+
+    # API Client - sends errors to platform with resilience features
+    ApplicationLogger\Bundle\Service\ApiClient:
+        arguments:
+            $dsn: '%application_logger.dsn%'
+            $apiKey: '%application_logger.api_key%'
+            $timeout: '%application_logger.timeout%'
+            $retryAttempts: '%application_logger.retry_attempts%'
+            $async: '%application_logger.async%'
+            $circuitBreaker: '@ApplicationLogger\Bundle\Service\CircuitBreaker'
+            $logger: '@?logger'
+            $debug: '%application_logger.debug%'
+
+    # Context Collector - gathers request/user/server context
+    ApplicationLogger\Bundle\Service\ContextCollector:
+        arguments:
+            $scrubFields: '%application_logger.scrub_fields%'
+            $release: '%application_logger.release%'
+            $environment: '%application_logger.environment%'
+            $requestStack: '@request_stack'
+
+    # Breadcrumb Collector - tracks user actions
+    ApplicationLogger\Bundle\Service\BreadcrumbCollector:
+        arguments:
+            $maxBreadcrumbs: '%application_logger.max_breadcrumbs%'
+
+    # Exception Subscriber - captures uncaught exceptions
+    ApplicationLogger\Bundle\EventSubscriber\ExceptionSubscriber:
+        arguments:
+            $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
+            $contextCollector: '@ApplicationLogger\Bundle\Service\ContextCollector'
+            $breadcrumbCollector: '@ApplicationLogger\Bundle\Service\BreadcrumbCollector'
+            $debug: '%application_logger.debug%'
+        tags:
+            - { name: kernel.event_subscriber }
+
+    # Session Tracking Subscriber - automatically tracks user sessions
+    ApplicationLogger\Bundle\EventSubscriber\SessionTrackingSubscriber:
+        arguments:
+            $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
+            $config:
+                enabled: '%application_logger.session_tracking.enabled%'
+                track_page_views: '%application_logger.session_tracking.track_page_views%'
+                idle_timeout: '%application_logger.session_tracking.idle_timeout%'
+                ignored_routes: '%application_logger.session_tracking.ignored_routes%'
+                ignored_paths: '%application_logger.session_tracking.ignored_paths%'
+            $security: '@?security.helper'
+            $logger: '@?logger'
+        tags:
+            - { name: kernel.event_subscriber }
+
+    # Monolog Handler - integrates with Monolog logging
+    ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler:
+        arguments:
+            $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
+            $contextCollector: '@ApplicationLogger\Bundle\Service\ContextCollector'
+            $breadcrumbCollector: '@ApplicationLogger\Bundle\Service\BreadcrumbCollector'
+            $captureLevel: '%application_logger.capture_level%'
+
+    # Twig Extension - provides application_logger_init() function
+    ApplicationLogger\Bundle\Twig\ApplicationLoggerExtension:
+        arguments:
+            $config:
+                enabled: '%application_logger.javascript.enabled%'
+                dsn: '%application_logger.dsn%'
+                api_key: '%application_logger.api_key%'
+                environment: '%application_logger.javascript.environment%'
+                release: '%application_logger.javascript.release%'
+                debug: '%application_logger.javascript.debug%'
+                scrub_fields: '%application_logger.javascript.scrub_fields%'
+            $security: '@?security.helper'
+            $logger: '@?logger'
+        tags:
+            - { name: twig.extension }
+
+    # JavaScript Injection Subscriber - auto-injects SDK on HTML pages
+    ApplicationLogger\Bundle\EventSubscriber\JavaScriptInjectionSubscriber:
+        arguments:
+            $autoInject: '%application_logger.javascript.auto_inject%'
+            $enabled: '%application_logger.javascript.enabled%'
+            $twigExtension: '@ApplicationLogger\Bundle\Twig\ApplicationLoggerExtension'
+        tags:
+            - { name: kernel.event_subscriber }
+
+    # Aliases for easier access
+    application_logger.api_client:
+        alias: ApplicationLogger\Bundle\Service\ApiClient
+        public: true
+
+    application_logger.breadcrumbs:
+        alias: ApplicationLogger\Bundle\Service\BreadcrumbCollector
+        public: true
+
+    application_logger.context_collector:
+        alias: ApplicationLogger\Bundle\Service\ContextCollector
+        public: true

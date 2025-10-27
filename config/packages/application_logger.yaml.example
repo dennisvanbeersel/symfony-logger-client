@@ -1,0 +1,132 @@
+# ApplicationLogger Bundle Configuration Example
+# Copy this file to your project's config/packages/application_logger.yaml
+
+application_logger:
+    # REQUIRED: Data Source Name - Project endpoint URL
+    # Get this from your ApplicationLogger dashboard when creating a project
+    # Format: https://your-host.com/project-id
+    dsn: '%env(APPLICATION_LOGGER_DSN)%'
+
+    # REQUIRED: API Key for authentication
+    # Get this from your ApplicationLogger dashboard (Project Settings > API Keys)
+    api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
+
+    # Enable/disable error tracking globally
+    enabled: true
+
+    # Application version/release identifier (optional)
+    # Useful for tracking errors across deployments
+    release: null # e.g., 'v1.2.3' or '%env(APP_VERSION)%'
+
+    # Environment name
+    environment: '%kernel.environment%' # production, staging, development, etc.
+
+    # Performance & Resilience Configuration
+    # Maximum timeout for API requests in seconds (default: 2s for fast failure)
+    timeout: 2.0
+
+    # Number of retry attempts (0 = fail fast, recommended for resilience)
+    retry_attempts: 0
+
+    # Circuit Breaker - prevents cascade failures when API is down
+    circuit_breaker:
+        enabled: true
+        failure_threshold: 5  # Open circuit after 5 consecutive failures
+        timeout: 60           # Keep circuit open for 60 seconds
+        half_open_attempts: 1 # Allow 1 test request in half-open state
+
+    # Capture Settings
+    # Minimum Monolog level to capture
+    capture_level: error # debug|info|notice|warning|error|critical|alert|emergency
+
+    # Field names to scrub from error data (security)
+    scrub_fields:
+        - password
+        - token
+        - api_key
+        - secret
+        - authorization
+        - credit_card
+        - ssn
+
+    # Maximum number of breadcrumbs to track
+    max_breadcrumbs: 50
+
+    # JavaScript SDK Configuration - ZERO CONFIG BY DEFAULT!
+    javascript:
+        # Enable JavaScript error tracking
+        enabled: true
+
+        # Automatically inject JavaScript SDK on all HTML pages
+        # Set to false if you want manual control via {{ application_logger_init() }}
+        auto_inject: true
+
+        # Enable JavaScript SDK debug mode (console.log)
+        debug: false # Set to true for troubleshooting
+
+        # Environment name for JavaScript errors (defaults to kernel.environment)
+        environment: null # or override with specific value
+
+        # Release version for JavaScript errors (defaults to root release config)
+        release: null # or override with specific value
+
+        # Additional fields to scrub in JavaScript errors
+        # These are MERGED with the root scrub_fields
+        scrub_fields: []
+            # - custom_field
+            # - another_field
+
+    # Session Tracking Configuration
+    # Required for heatmap tracking and analytics
+    session_tracking:
+        # Enable automatic session tracking (GDPR-compliant using session hashes)
+        # Default: true (required for heatmap functionality)
+        enabled: true
+
+        # Automatically track page views as session events
+        track_page_views: true
+
+        # Session idle timeout in seconds (default: 30 minutes)
+        idle_timeout: 1800
+
+        # Route names to ignore for session tracking
+        ignored_routes:
+            - '_profiler'
+            - '_wdt'
+            - '_preview_error'
+
+        # URL paths to ignore for session tracking (prefix match)
+        ignored_paths:
+            - '/api/'
+            - '/_fragment'
+            - '/healthcheck'
+
+    # Heatmap Click Tracking Configuration
+    # Tracks user clicks for visual heatmap analysis
+    heatmap:
+        # Enable heatmap click tracking
+        # Default: true (requires session_tracking.enabled to be true)
+        enabled: true
+
+        # Number of clicks to batch before sending to API
+        # Higher = fewer API calls, lower = more real-time data
+        # Default: 10 clicks
+        batch_size: 10
+
+        # Maximum time in milliseconds to wait before sending batch
+        # Default: 5000ms (5 seconds)
+        # Clicks are sent when either batch_size is reached OR timeout expires
+        batch_timeout: 5000
+
+    # Advanced Options
+    # Use async HTTP client (fire-and-forget for maximum resilience)
+    async: true
+
+    # Enable PHP debug logging
+    debug: false
+
+# Environment Variables (.env or .env.local)
+# Add these to your .env.local file (do not commit!):
+#
+# APPLICATION_LOGGER_DSN=https://your-host.com/your-project-id
+# APPLICATION_LOGGER_API_KEY=your-api-key

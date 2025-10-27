@@ -1,0 +1,43 @@
+# Git attributes for proper distribution
+
+# Auto-detect text files
+* text=auto
+
+# Exclude development files from export (composer archive/github releases)
+/.git attributes export-ignore
+/.github export-ignore
+/tests export-ignore
+/.php-cs-fixer.dist.php export-ignore
+/phpstan.neon export-ignore
+/phpunit.xml.dist export-ignore
+/eslint.config.js export-ignore
+/rollup.config.js export-ignore
+/package.json export-ignore
+/package-lock.json export-ignore
+/node_modules export-ignore
+/.gitignore export-ignore
+/.gitattributes export-ignore
+/BUNDLE_ANALYSIS.md export-ignore
+
+# Include assets/src for AssetMapper
+/assets/src/** -export-ignore
+
+# Ensure line endings
+*.php text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.twig text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary

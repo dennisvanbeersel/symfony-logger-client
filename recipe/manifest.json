@@ -1,0 +1,12 @@
+{
+    "bundles": {
+        "ApplicationLogger\\Bundle\\ApplicationLoggerBundle": ["all"]
+    },
+    "copy-from-recipe": {
+        "config/": "%CONFIG_DIR%/"
+    },
+    "env": {
+        "APPLICATION_LOGGER_DSN": "https://your-logger-host.com/your-project-id",
+        "APPLICATION_LOGGER_API_KEY": "your-api-key-here"
+    }
+}

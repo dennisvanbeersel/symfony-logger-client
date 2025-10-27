@@ -1,0 +1,42 @@
+{#
+/**
+ * ApplicationLogger JavaScript SDK Initialization
+ *
+ * Include this template in your base layout (e.g., base.html.twig) to automatically
+ * initialize the JavaScript error tracking.
+ *
+ * Usage:
+ *   {% include '@ApplicationLogger/init.html.twig' %}
+ *
+ * Optional: Pass custom configuration
+ *   {% include '@ApplicationLogger/init.html.twig' with {
+ *       debug: true,
+ *       scrubFields: ['password', 'creditCard']
+ *   } %}
+ */
+#}
+<script type="module">
+    import ApplicationLogger from '@application-logger/bundle';
+
+    // Initialize ApplicationLogger
+    const logger = new ApplicationLogger({
+        dsn: '{{ app_logger_dsn }}',
+        release: '{{ app_logger_release|default('') }}',
+        environment: '{{ app_logger_environment|default('production') }}',
+        debug: {{ debug|default(app_logger_debug|default(false)) ? 'true' : 'false' }},
+        {% if scrubFields is defined %}
+        scrubFields: {{ scrubFields|json_encode|raw }},
+        {% endif %}
+    });
+
+    // Start capturing errors
+    logger.init();
+
+    // Note: User context is intentionally NOT set here for GDPR compliance.
+    // Session tracking uses anonymized session hashes instead of user identifiers.
+    // If you need to track custom context, use tags or extra data:
+    // logger.setTags({ userRole: 'admin', subscription: 'premium' });
+
+    // Make logger available globally for manual error reporting
+    window.appLogger = logger;
+</script>
