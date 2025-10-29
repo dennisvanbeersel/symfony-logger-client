@@ -200,6 +200,12 @@ class Configuration implements ConfigurationInterface
                     ->info('Enable PHP debug logging')
                 ->end()
             ->end()
+            ->validate()
+                ->ifTrue(function (array $v): bool {
+                    return $v['heatmap']['enabled'] && !$v['session_tracking']['enabled'];
+                })
+                ->thenInvalid('Heatmap tracking requires session tracking to be enabled. Set session_tracking.enabled to true.')
+            ->end()
         ;
 
         return $treeBuilder;

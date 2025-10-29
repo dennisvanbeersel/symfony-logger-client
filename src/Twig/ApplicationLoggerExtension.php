@@ -141,8 +141,12 @@ class ApplicationLoggerExtension extends AbstractExtension
             return ''; // Silently fail - resilience priority
         }
 
+        // Get CSP nonce from request attributes
+        $nonce = $this->getCspNonce();
+        $nonceAttr = $nonce ? ' nonce="'.htmlspecialchars($nonce, \ENT_QUOTES, 'UTF-8').'"' : '';
+
         return <<<HTML
-<script type="module">
+<script type="module"{$nonceAttr}>
     import ApplicationLogger from '@application-logger/logger';
 
     const logger = new ApplicationLogger({$configJson});
@@ -193,8 +197,12 @@ HTML;
             return ''; // Silently fail
         }
 
+        // Get CSP nonce from request attributes
+        $nonce = $this->getCspNonce();
+        $nonceAttr = $nonce ? ' nonce="'.htmlspecialchars($nonce, \ENT_QUOTES, 'UTF-8').'"' : '';
+
         return <<<HTML
-<script type="module">
+<script type="module"{$nonceAttr}>
     // Set user context after initialization
     if (window.appLogger) {
         window.appLogger.setUser({$userJson});
@@ -256,6 +264,37 @@ HTML;
             return $sessionId;
         } catch (\Throwable) {
             // Silently fail - session ID is optional for JS SDK
+            return null;
+        }
+    }
+
+    /**
+     * Get CSP nonce from request attributes.
+     *
+     * Returns null if no nonce is available (e.g., project doesn't use CSP).
+     */
+    private function getCspNonce(): ?string
+    {
+        try {
+            if (null === $this->requestStack) {
+                return null;
+            }
+
+            $request = $this->requestStack->getCurrentRequest();
+
+            if (null === $request) {
+                return null;
+            }
+
+            $nonce = $request->attributes->get('csp_nonce');
+
+            if (null === $nonce || !\is_string($nonce) || '' === $nonce) {
+                return null;
+            }
+
+            return $nonce;
+        } catch (\Throwable) {
+            // Silently fail - CSP nonce is optional
             return null;
         }
     }
