@@ -121,6 +121,7 @@ class ExceptionSubscriber implements EventSubscriberInterface
 
                 // Optional fields (all snake_case to match API)
                 'level' => 'error',
+                'source' => 'backend',
                 'environment' => $context['environment'] ?? 'production',
                 'release' => $context['release'] ?? null,
                 'session_hash' => $sessionHash,
@@ -149,6 +150,7 @@ class ExceptionSubscriber implements EventSubscriberInterface
                 'line' => $exception->getLine(),
                 'stack_trace' => [],
                 'level' => 'error',
+                'source' => 'backend',
                 'timestamp' => new \DateTimeImmutable(),
                 'http_status_code' => 500, // Default to 500 for uncaught exceptions
             ];

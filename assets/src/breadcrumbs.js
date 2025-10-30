@@ -17,10 +17,26 @@ export class BreadcrumbCollector {
             const tagName = target.tagName.toLowerCase();
             let message = `Clicked ${tagName}`;
 
+            // Get className as string (handle SVG elements)
+            const getClassName = (element) => {
+                if (!element.className) return '';
+                // For SVG elements, className is an SVGAnimatedString
+                if (typeof element.className === 'object' && element.className.baseVal !== undefined) {
+                    return element.className.baseVal;
+                }
+                // For HTML elements, className is a string
+                return element.className;
+            };
+
+            const className = getClassName(target);
+
             if (target.id) {
                 message += `#${target.id}`;
-            } else if (target.className) {
-                message += `.${target.className.split(' ')[0]}`;
+            } else if (className) {
+                const firstClass = className.split(' ')[0];
+                if (firstClass) {
+                    message += `.${firstClass}`;
+                }
             }
 
             this.add({
@@ -30,7 +46,7 @@ export class BreadcrumbCollector {
                 data: {
                     tag: tagName,
                     id: target.id,
-                    class: target.className,
+                    class: className,
                 },
             });
         }, true);

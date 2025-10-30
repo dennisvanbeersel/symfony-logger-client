@@ -109,6 +109,7 @@ export class Client {
 
                 // Optional fields (snake_case to match API)
                 level: level || 'error',
+                source: 'frontend',
                 environment: this.config.environment || 'production',
                 release: this.config.release || null,
                 url: window.location.href,
