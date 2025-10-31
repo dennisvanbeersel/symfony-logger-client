@@ -30,9 +30,11 @@ composer require dennisvanbeersel/symfony-logger-client
 # 2. Configure (config/packages/application_logger.yaml)
 application_logger:
     dsn: '%env(APPLICATION_LOGGER_DSN)%'
+    api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
 
-# 3. Add DSN to .env
-APPLICATION_LOGGER_DSN=https://public_key@logger.example.com/project_id
+# 3. Add credentials to .env
+APPLICATION_LOGGER_DSN=https://applogger.eu/your-project-uuid
+APPLICATION_LOGGER_API_KEY=your-64-character-api-key-here
 
 # 4. Clear cache
 php bin/console cache:clear
@@ -185,7 +187,7 @@ This bundle provides comprehensive monitoring for both backend and frontend:
 ### JavaScript Frontend Tracking
 - **Browser Errors**: Uncaught exceptions and unhandled promise rejections
 - **API Failures**: Failed HTTP requests with status codes
-- **Click Heatmaps**: User interaction coordinates, CSS selectors, viewport dimensions
+- **Error-Triggered Session Replay**: Captures user actions (30s/10 clicks before and after errors) with DOM snapshots
 - **Session Tracking**: Page views, navigation flows, session duration
 - **User Context**: Browser, platform, screen resolution
 
@@ -279,16 +281,25 @@ application_logger:
         - credit_card
         - ssn
 
-    # Session Tracking (Required for heatmap)
+    # Session Tracking (Required for session replay)
     session_tracking:
-        enabled: true         # Enable automatic session tracking (default: true)
-        hash_user_id: true    # Hash user identifiers for privacy (GDPR-compliant)
+        enabled: true              # Enable automatic session tracking (default: true)
+        track_page_views: true     # Track page views as session events (default: true)
+        idle_timeout: 1800         # Session idle timeout in seconds (default: 30 min)
 
-    # Heatmap Click Tracking
-    heatmap:
-        enabled: true         # Enable click heatmap tracking (default: true)
-        batch_size: 10        # Send clicks in batches of N (1-50, default: 10)
-        batch_timeout: 5000   # Or after N milliseconds (1000-30000, default: 5000)
+    # Error-Triggered Session Replay
+    session_replay:
+        enabled: true                      # Enable session replay (default: true)
+        buffer_before_error_seconds: 30    # Seconds to buffer before error (5-60, default: 30)
+        buffer_before_error_clicks: 10     # Clicks to buffer before error (1-15, default: 10)
+        buffer_after_error_seconds: 30     # Seconds to buffer after error (5-60, default: 30)
+        buffer_after_error_clicks: 10      # Clicks to buffer after error (1-15, default: 10)
+        click_debounce_ms: 1000            # Click debounce delay (100-5000ms, default: 1000)
+        snapshot_throttle_ms: 1000         # DOM snapshot throttle (500-5000ms, default: 1000)
+        max_snapshot_size: 1048576         # Max snapshot size in bytes (default: 1MB)
+        session_timeout_minutes: 30        # Cross-page session timeout (5-120 min, default: 30)
+        max_buffer_size_mb: 5              # Max localStorage size (1-20MB, default: 5MB)
+        expose_api: true                   # Expose JS API for user control (default: true)
 
     # JavaScript SDK
     javascript:

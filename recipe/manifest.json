@@ -8,5 +8,29 @@
     "env": {
         "APPLICATION_LOGGER_DSN": "https://your-logger-host.com/your-project-id",
         "APPLICATION_LOGGER_API_KEY": "your-api-key-here"
-    }
+    },
+    "post-install-output": [
+        "",
+        "  <bg=blue;fg=white>           ApplicationLogger Bundle installed! 🎉           </>",
+        "",
+        "  <options=bold>Next steps:</>",
+        "",
+        "  1. Configure your credentials in <comment>.env.local</>:",
+        "",
+        "     <comment>APPLICATION_LOGGER_DSN</comment>=https://your-logger-host.com/your-project-id",
+        "     <comment>APPLICATION_LOGGER_API_KEY</comment>=your-api-key-here",
+        "",
+        "  2. The bundle is ready to use with <info>zero additional configuration</>!",
+        "     <info>✓</> PHP errors tracked automatically",
+        "     <info>✓</> JavaScript SDK auto-injected",
+        "     <info>✓</> Session replay enabled (error-triggered, privacy-safe)",
+        "",
+        "  3. Optional: Customize <comment>config/packages/application_logger.yaml</>",
+        "     • Adjust session replay buffers",
+        "     • Configure scrub_fields for PII protection",
+        "     • Enable debug mode for troubleshooting",
+        "",
+        "  📖 <href=https://github.com/dennisvanbeersel/symfony-logger-client>Documentation</>",
+        ""
+    ]
 }

@@ -77,10 +77,10 @@ application_logger:
             # - another_field
 
     # Session Tracking Configuration
-    # Required for heatmap tracking and analytics
+    # Required for session replay and analytics
     session_tracking:
         # Enable automatic session tracking (GDPR-compliant using session hashes)
-        # Default: true (required for heatmap functionality)
+        # Default: true (required for session replay functionality)
         enabled: true
 
         # Automatically track page views as session events
@@ -101,22 +101,71 @@ application_logger:
             - '/_fragment'
             - '/healthcheck'
 
-    # Heatmap Click Tracking Configuration
-    # Tracks user clicks for visual heatmap analysis
-    heatmap:
-        # Enable heatmap click tracking
-        # Default: true (requires session_tracking.enabled to be true)
+    # Session Replay Configuration
+    # Records user interactions (clicks + DOM structure) for error debugging
+    # PRIVACY-FIRST: NO text content, NO form values, NO PII - only visual structure
+    session_replay:
+        # Enable session replay recording
+        # Default: true
         enabled: true
 
-        # Number of clicks to batch before sending to API
-        # Higher = fewer API calls, lower = more real-time data
-        # Default: 10 clicks
-        batch_size: 10
+        # Recording is ERROR-TRIGGERED: only captures when errors occur
+        # Buffers clicks/interactions before and after errors for context
 
-        # Maximum time in milliseconds to wait before sending batch
-        # Default: 5000ms (5 seconds)
-        # Clicks are sent when either batch_size is reached OR timeout expires
-        batch_timeout: 5000
+        # Buffer BEFORE error occurs (time-based, in seconds)
+        # Captures the X seconds of activity BEFORE an error happens
+        # Default: 30 seconds, Maximum: 60 seconds
+        buffer_before_error_seconds: 30
+
+        # Buffer BEFORE error occurs (click-based)
+        # Captures the last X clicks BEFORE an error happens
+        # Default: 10 clicks, Maximum: 15 clicks
+        buffer_before_error_clicks: 10
+
+        # Buffer AFTER error occurs (time-based, in seconds)
+        # Continues recording for X seconds AFTER an error to see user reaction
+        # Default: 30 seconds, Maximum: 60 seconds
+        buffer_after_error_seconds: 30
+
+        # Buffer AFTER error occurs (click-based)
+        # Continues recording for X clicks AFTER an error
+        # Default: 10 clicks, Maximum: 15 clicks
+        buffer_after_error_clicks: 10
+
+        # Click event debouncing (milliseconds between recorded clicks)
+        # Prevents localStorage spam from rapid clicking (e.g., 100 clicks/second)
+        # Only records 1 click per debounce period for performance
+        # Default: 1000ms (1 second), Minimum: 100ms, Maximum: 5000ms
+        click_debounce_ms: 1000
+
+        # DOM snapshot throttling (milliseconds between captures)
+        # Limits frequency of DOM structure captures for performance
+        # Default: 1000ms (1 second), Minimum: 500ms, Maximum: 5000ms
+        snapshot_throttle_ms: 1000
+
+        # Maximum snapshot size (bytes, before compression)
+        # Prevents excessive memory/bandwidth usage
+        # Default: 1048576 (1MB)
+        max_snapshot_size: 1048576
+
+        # Cross-page session timeout (minutes of inactivity)
+        # Session expires after this many minutes without activity
+        # Allows session replay to span multiple page navigations
+        # Default: 30 minutes
+        session_timeout_minutes: 30
+
+        # localStorage quota management (megabytes)
+        # Maximum localStorage space used for buffering
+        # Default: 5MB
+        max_buffer_size_mb: 5
+
+        # Expose API to developers for user control
+        # Allows developers to let users disable session replay via UI
+        # Methods available: window.ApplicationLogger.sessionReplay.disable()
+        #                   window.ApplicationLogger.sessionReplay.enable()
+        #                   window.ApplicationLogger.sessionReplay.isEnabled()
+        # Default: true
+        expose_api: true
 
     # Advanced Options
     # Use async HTTP client (fire-and-forget for maximum resilience)

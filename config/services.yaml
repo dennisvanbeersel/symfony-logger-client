@@ -84,6 +84,7 @@ services:
                 scrub_fields: '%application_logger.javascript.scrub_fields%'
             $security: '@?security.helper'
             $logger: '@?logger'
+            $requestStack: '@request_stack'
         tags:
             - { name: twig.extension }
 

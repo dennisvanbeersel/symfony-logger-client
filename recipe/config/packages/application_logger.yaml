@@ -39,9 +39,28 @@ application_logger:
     #     - secret
     #     - authorization
 
-    # JavaScript SDK integration
+    # Session Tracking (required for session replay and analytics)
+    # session_tracking:
+    #     enabled: true
+    #     track_page_views: true
+    #     idle_timeout: 1800  # 30 minutes
+
+    # Session Replay (error-triggered recording for debugging)
+    # Captures user actions before and after errors - privacy-safe, no PII
+    # session_replay:
+    #     enabled: true
+    #     buffer_before_error_seconds: 30
+    #     buffer_before_error_clicks: 10
+    #     buffer_after_error_seconds: 30
+    #     buffer_after_error_clicks: 10
+    #     click_debounce_ms: 1000         # Anti-spam protection
+    #     snapshot_throttle_ms: 1000      # DOM capture throttle
+    #     max_buffer_size_mb: 5           # localStorage quota
+
+    # JavaScript SDK integration (auto-injected by default)
     javascript:
         enabled: true
+        # auto_inject: true   # Automatically inject SDK on HTML pages
         # debug: '%kernel.debug%'  # Enable console logging in dev
 
     # Debug mode (development only)

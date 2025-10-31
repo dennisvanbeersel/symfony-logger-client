@@ -1,16 +1,28 @@
 /**
  * Client for capturing errors and sending to platform
  *
+ * ERROR-TRIGGERED SESSION REPLAY:
+ * - When error detected, triggers replay buffer capture
+ * - Sends buffered events (before/after error) to backend
+ * - Links replay data to error for debugging
+ *
  * RESILIENCE FEATURES:
  * - Beacon API for page unload events (ensures critical errors are sent)
  * - All error handling wrapped in try-catch
  * - Never crashes on logging errors
  */
 export class Client {
-    constructor(config, transport, breadcrumbs) {
+    /**
+     * @param {Object} config - Configuration options
+     * @param {Transport} transport - Transport layer for API communication
+     * @param {BreadcrumbCollector} breadcrumbs - Breadcrumb tracking
+     * @param {ErrorDetector|null} errorDetector - Error detector for replay capture (optional)
+     */
+    constructor(config, transport, breadcrumbs, errorDetector = null) {
         this.config = config;
         this.transport = transport;
         this.breadcrumbs = breadcrumbs;
+        this.errorDetector = errorDetector;
         this.userContext = null;
         this.tags = {};
         this.extra = {};
@@ -72,11 +84,37 @@ export class Client {
     }
 
     /**
-   * Capture exception
-   */
-    captureException(error, options = {}) {
-        const payload = this.buildPayload(error, 'error', options);
-        this.transport.send(payload);
+     * Capture exception and trigger session replay if enabled
+     *
+     * Flow (with session replay):
+     * 1. Build error payload
+     * 2. If errorDetector enabled, capture replay data first
+     * 3. Send error WITH replay data to backend in single request
+     * 4. If errorDetector disabled, send error without replay data
+     */
+    async captureException(error, options = {}) {
+        try {
+            // Build error payload
+            const payload = this.buildPayload(error, 'error', options);
+
+            // Capture session replay data if enabled (before sending error)
+            let replayData = null;
+            if (this.errorDetector) {
+                const replayCapture = await this.errorDetector.handleError(error, payload);
+                if (replayCapture) {
+                    replayData = {
+                        sessionId: replayCapture.sessionId,
+                        events: replayCapture.events,
+                    };
+                }
+            }
+
+            // Send error to backend (with replay data if captured)
+            await this.transport.send(payload, replayData);
+        } catch (captureError) {
+            // Never crash on error capture
+            console.error('Client: Failed to capture exception', captureError);
+        }
     }
 
     /**

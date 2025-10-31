@@ -79,11 +79,33 @@ export class Transport {
 
     /**
    * Send error payload to platform
+   *
+   * @param {Object} payload - Error payload
+   * @param {Object|null} replayData - Optional session replay data
+   * @param {string} replayData.sessionId - Session ID from SessionManager
+   * @param {Array} replayData.events - Buffered events (before + after error)
    */
-    async send(payload) {
+    async send(payload, replayData = null) {
         try {
+            // Merge replay data into payload if provided
+            let enhancedPayload = payload;
+            if (replayData) {
+                enhancedPayload = {
+                    ...payload,
+                    replay_session_id: replayData.sessionId,
+                    replay_data: replayData.events,
+                };
+
+                if (this.config.debug) {
+                    console.warn('ApplicationLogger: Sending error with replay data', {
+                        sessionId: replayData.sessionId,
+                        eventCount: replayData.events?.length || 0,
+                    });
+                }
+            }
+
             // Scrub sensitive data
-            const scrubbedPayload = this.scrubSensitiveData(payload);
+            const scrubbedPayload = this.scrubSensitiveData(enhancedPayload);
 
             // Check for duplicates
             if (this.isDuplicate(scrubbedPayload)) {
@@ -336,8 +358,14 @@ export class Transport {
             'refresh_token',
         ];
 
-        // Deep clone payload
-        const scrubbed = JSON.parse(JSON.stringify(payload));
+        // Deep clone payload (handle circular references)
+        let scrubbed;
+        try {
+            scrubbed = JSON.parse(JSON.stringify(payload));
+        } catch {
+            // Circular reference detected - work with original and remove circular refs
+            scrubbed = this.removeCircularReferences(payload);
+        }
 
         // Recursively scrub object
         const scrubObject = (obj) => {
@@ -364,6 +392,49 @@ export class Transport {
         };
 
         return scrubObject(scrubbed);
+    }
+
+    /**
+     * Remove circular references from an object.
+     * Uses a WeakSet to track visited objects and prevent infinite loops.
+     *
+     * @param {Object} obj - Object to process
+     * @param {WeakSet} [seen] - Set of already visited objects
+     * @returns {Object} Object with circular references replaced
+     */
+    removeCircularReferences(obj, seen = new WeakSet()) {
+        // Handle primitives and null
+        if (obj === null || typeof obj !== 'object') {
+            return obj;
+        }
+
+        // Handle circular reference
+        if (seen.has(obj)) {
+            return '[Circular Reference]';
+        }
+
+        // Add to seen set
+        seen.add(obj);
+
+        // Handle arrays
+        if (Array.isArray(obj)) {
+            return obj.map(item => this.removeCircularReferences(item, seen));
+        }
+
+        // Handle objects
+        const result = {};
+        for (const key in obj) {
+            if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                try {
+                    result[key] = this.removeCircularReferences(obj[key], seen);
+                } catch {
+                    // Skip properties that throw errors when accessed
+                    result[key] = '[Error accessing property]';
+                }
+            }
+        }
+
+        return result;
     }
 
     /**
@@ -401,15 +472,15 @@ export class Transport {
     }
 
     /**
-     * Send heatmap click data to API (batch)
+     * Send session replay click data to API (batch)
      */
-    async sendHeatmap(sessionId, clicks) {
+    async sendReplayClicks(sessionId, clicks) {
         if (!sessionId || !clicks || clicks.length === 0) {
             return;
         }
 
         try {
-            const url = `${this.dsn.protocol}://${this.dsn.host}/api/v1/sessions/${sessionId}/heatmap`;
+            const url = `${this.dsn.protocol}://${this.dsn.host}/api/v1/sessions/${sessionId}/replay`;
 
             const response = await fetch(url, {
                 method: 'POST',

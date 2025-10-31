@@ -112,14 +112,6 @@ class ApplicationLoggerExtension extends AbstractExtension
             $defaults['sessionId'] = $sessionId;
         }
 
-        // Add heatmap configuration if available
-        if (isset($this->config['heatmap']) && \is_array($this->config['heatmap'])) {
-            $heatmapConfig = $this->config['heatmap'];
-            $defaults['enableHeatmap'] = $heatmapConfig['enabled'] ?? true;
-            $defaults['heatmapBatchSize'] = $heatmapConfig['batch_size'] ?? 10;
-            $defaults['heatmapBatchTimeout'] = $heatmapConfig['batch_timeout'] ?? 5000;
-        }
-
         // Merge with custom options
         $config = array_merge($defaults, $options);
 
