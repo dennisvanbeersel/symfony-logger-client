@@ -84,6 +84,7 @@ describe('ErrorDetector', () => {
                 replayBuffer,
                 sessionManager,
                 onErrorDetectedCallback,
+                null, // transport
                 {
                     debug: true,
                     ignoreErrors: ['NetworkError', 'AbortError'],

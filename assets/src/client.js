@@ -17,12 +17,14 @@ export class Client {
      * @param {Transport} transport - Transport layer for API communication
      * @param {BreadcrumbCollector} breadcrumbs - Breadcrumb tracking
      * @param {ErrorDetector|null} errorDetector - Error detector for replay capture (optional)
+     * @param {SessionManager|null} sessionManager - Session manager for session ID tracking (optional)
      */
-    constructor(config, transport, breadcrumbs, errorDetector = null) {
+    constructor(config, transport, breadcrumbs, errorDetector = null, sessionManager = null) {
         this.config = config;
         this.transport = transport;
         this.breadcrumbs = breadcrumbs;
         this.errorDetector = errorDetector;
+        this.sessionManager = sessionManager;
         this.userContext = null;
         this.tags = {};
         this.extra = {};
@@ -31,10 +33,22 @@ export class Client {
 
     /**
    * Install global error handlers
+   *
+   * Processing order (critical for reliability):
+   * 1. Resurrect nuclear errors from previous page loads (localStorage)
+   * 2. Process buffered errors from current page load (window._appLoggerBuffer)
+   * 3. Install live error handlers for future errors
    */
     install() {
         try {
-            // Handle uncaught errors
+            // 1. Process "resurrected" errors first (from previous sessions)
+            //    These are catastrophic errors that broke JS execution
+            this.processResurrectedErrors();
+
+            // 2. Process any errors that were buffered before SDK loaded (current page)
+            this.processBufferedErrors();
+
+            // 3. Handle uncaught errors (live, from this point forward)
             window.addEventListener('error', (event) => {
                 try {
                     this.captureException(event.error || new Error(event.message), {
@@ -84,33 +98,380 @@ export class Client {
     }
 
     /**
-     * Capture exception and trigger session replay if enabled
+     * Process "resurrected" errors from previous page loads.
      *
-     * Flow (with session replay):
+     * The nuclear error trap (ultra-minimal inline script) captures catastrophic
+     * errors that break JavaScript execution and stores them to localStorage.
+     * On the NEXT page load (when things have "normalized"), we resurrect and
+     * send these errors.
+     *
+     * This handles the "nuclear scenario":
+     * - Syntax errors before SDK loads
+     * - Module import failures
+     * - Blocking runtime errors
+     * - Third-party script failures
+     *
+     * Flow:
+     * 1. Check localStorage for '_appLogger_nuclear'
+     * 2. Parse stored errors
+     * 3. Send each error to API with 'resurrected: true' flag
+     * 4. Clear localStorage after successful send
+     */
+    processResurrectedErrors() {
+        try {
+            const NUCLEAR_KEY = '_appLogger_nuclear';
+            const RESURRECTION_ATTEMPTS_KEY = '_appLogger_resurrection_attempts';
+            const MAX_ATTEMPTS = 5;
+            const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+            // Check if we've tried too many times
+            const attempts = parseInt(localStorage.getItem(RESURRECTION_ATTEMPTS_KEY) || '0', 10);
+            if (attempts >= MAX_ATTEMPTS) {
+                if (this.config.debug) {
+                    console.warn('ApplicationLogger: Max resurrection attempts reached, clearing nuclear errors');
+                }
+                localStorage.removeItem(NUCLEAR_KEY);
+                localStorage.removeItem(RESURRECTION_ATTEMPTS_KEY);
+                return;
+            }
+
+            // Try to load nuclear errors
+            const stored = localStorage.getItem(NUCLEAR_KEY);
+            if (!stored) {
+                // No errors to resurrect
+                return;
+            }
+
+            // Parse stored errors
+            let errors;
+            try {
+                errors = JSON.parse(stored);
+            } catch (parseError) {
+                // Corrupted data - clear it
+                if (this.config.debug) {
+                    console.error('ApplicationLogger: Failed to parse nuclear errors, clearing', parseError);
+                }
+                localStorage.removeItem(NUCLEAR_KEY);
+                return;
+            }
+
+            // Validate array
+            if (!Array.isArray(errors) || errors.length === 0) {
+                localStorage.removeItem(NUCLEAR_KEY);
+                return;
+            }
+
+            if (this.config.debug) {
+                console.warn(`ApplicationLogger: Resurrecting ${errors.length} nuclear error(s) from previous session`);
+            }
+
+            // Filter out old errors (older than MAX_AGE)
+            const now = Date.now();
+            const validErrors = errors.filter(err => {
+                const age = now - (err.t || 0);
+                return age < MAX_AGE_MS;
+            });
+
+            if (validErrors.length === 0) {
+                if (this.config.debug) {
+                    console.warn('ApplicationLogger: All nuclear errors expired, clearing');
+                }
+                localStorage.removeItem(NUCLEAR_KEY);
+                return;
+            }
+
+            // Track successes and failures
+            let succeeded = 0;
+            let failed = 0;
+
+            // Send each error
+            for (const err of validErrors) {
+                try {
+                    // Reconstruct error message
+                    const message = err.m
+                        ? String(err.m)
+                        : 'Nuclear error (catastrophic JavaScript failure)';
+
+                    const error = new Error(message);
+                    error.name = 'NuclearError';
+
+                    // Calculate age
+                    const errorAge = now - (err.t || now);
+
+                    // Capture with resurrection context
+                    this.captureException(error, {
+                        extra: {
+                            resurrected: true,
+                            nuclear: true,
+                            resurrectTimestamp: now,
+                            originalTimestamp: err.t || 0,
+                            errorAge: Math.floor(errorAge / 1000), // seconds
+                            filename: err.f || 'unknown',
+                            lineno: err.l || 0,
+                            colno: err.c || 0,
+                            originalUrl: err.u || 'unknown',
+                            sessionGap: true, // Error from previous page load
+                        },
+                    });
+
+                    succeeded++;
+                } catch (sendError) {
+                    failed++;
+                    if (this.config.debug) {
+                        console.error('ApplicationLogger: Failed to resurrect nuclear error', sendError);
+                    }
+                }
+            }
+
+            // If all succeeded, clear localStorage
+            if (failed === 0) {
+                localStorage.removeItem(NUCLEAR_KEY);
+                localStorage.removeItem(RESURRECTION_ATTEMPTS_KEY);
+
+                if (this.config.debug) {
+                    console.warn(`ApplicationLogger: Successfully resurrected ${succeeded} nuclear error(s)`);
+                }
+            } else {
+                // Some failed - increment attempt counter
+                localStorage.setItem(RESURRECTION_ATTEMPTS_KEY, String(attempts + 1));
+
+                if (this.config.debug) {
+                    console.warn(`ApplicationLogger: Resurrection partial success (${succeeded} succeeded, ${failed} failed), will retry on next load`);
+                }
+            }
+        } catch (error) {
+            // Never crash on resurrection
+            console.error('ApplicationLogger: Failed to process resurrected errors', error);
+        }
+    }
+
+    /**
+     * Process errors that were buffered before SDK loaded.
+     *
+     * The early error buffer (window._appLoggerBuffer) captures errors that occur
+     * before the full SDK loads (during page parsing, module loading, etc.).
+     * This method processes those buffered errors and sends them to the API.
+     */
+    processBufferedErrors() {
+        try {
+            // Check if buffer exists and is valid
+            if (!window._appLoggerBuffer ||
+                !Array.isArray(window._appLoggerBuffer.errors)) {
+                return;
+            }
+
+            const buffered = window._appLoggerBuffer.errors;
+
+            // Nothing to process
+            if (buffered.length === 0) {
+                return;
+            }
+
+            if (this.config.debug) {
+                console.warn(`ApplicationLogger: Processing ${buffered.length} buffered error(s)`);
+            }
+
+            // Clear buffer immediately to prevent reprocessing
+            window._appLoggerBuffer.errors = [];
+
+            // Track processing stats
+            let processed = 0;
+            let failed = 0;
+
+            // Process each buffered error
+            for (const item of buffered) {
+                try {
+                    // Validate item structure
+                    if (!item || typeof item !== 'object') {
+                        failed++;
+                        continue;
+                    }
+
+                    if (item.type === 'error') {
+                        // Reconstruct error object from buffered data
+                        const message = item.error && item.error.message
+                            ? String(item.error.message)
+                            : (item.message ? String(item.message) : 'Unknown buffered error');
+
+                        const error = new Error(message);
+
+                        // Restore error properties if available
+                        if (item.error && typeof item.error === 'object') {
+                            if (item.error.name) {
+                                error.name = String(item.error.name);
+                            }
+                            if (item.error.stack) {
+                                error.stack = String(item.error.stack);
+                            }
+                        }
+
+                        // Capture with buffered context
+                        this.captureException(error, {
+                            extra: {
+                                buffered: true,
+                                bufferedAt: item.timestamp || Date.now(),
+                                filename: item.filename || 'unknown',
+                                lineno: typeof item.lineno === 'number' ? item.lineno : 0,
+                                colno: typeof item.colno === 'number' ? item.colno : 0,
+                            },
+                        });
+
+                        processed++;
+                    } else if (item.type === 'rejection') {
+                        // Handle promise rejection
+                        const reason = item.reason;
+                        let error;
+
+                        if (reason && typeof reason === 'object') {
+                            const message = reason.message
+                                ? String(reason.message)
+                                : 'Unhandled promise rejection';
+
+                            error = new Error(message);
+                            error.name = reason.name ? String(reason.name) : 'UnhandledRejection';
+
+                            if (reason.stack) {
+                                error.stack = String(reason.stack);
+                            }
+                        } else {
+                            // Primitive value or null/undefined
+                            const message = (reason !== null && reason !== undefined)
+                                ? String(reason)
+                                : 'Unhandled promise rejection (undefined)';
+
+                            error = new Error(message);
+                            error.name = 'UnhandledRejection';
+                        }
+
+                        this.captureException(error, {
+                            extra: {
+                                buffered: true,
+                                bufferedAt: item.timestamp || Date.now(),
+                                type: 'unhandledrejection',
+                            },
+                        });
+
+                        processed++;
+                    } else {
+                        // Unknown item type
+                        if (this.config.debug) {
+                            console.warn('ApplicationLogger: Unknown buffered item type:', item.type);
+                        }
+                        failed++;
+                    }
+                } catch (itemError) {
+                    // Failed to process this specific item - continue with others
+                    failed++;
+                    if (this.config.debug) {
+                        console.error('ApplicationLogger: Failed to process buffered item', itemError);
+                    }
+                }
+            }
+
+            if (this.config.debug) {
+                console.warn(`ApplicationLogger: Buffered errors processed (${processed} succeeded, ${failed} failed)`);
+            }
+        } catch (error) {
+            // Never crash on buffer processing
+            console.error('ApplicationLogger: Failed to process buffered errors', error);
+        }
+    }
+
+    /**
+     * Capture exception and trigger TWO-PHASE session replay if enabled
+     *
+     * TWO-PHASE ARCHITECTURE:
+     * Phase 1 (Immediate): Send error + pre-error buffer right away
+     * Phase 2 (Recovery): Continue recording, send recovery session separately
+     *
+     * Flow:
      * 1. Build error payload
-     * 2. If errorDetector enabled, capture replay data first
-     * 3. Send error WITH replay data to backend in single request
-     * 4. If errorDetector disabled, send error without replay data
+     * 2. If session replay enabled:
+     *    a) Call errorDetector.handleError() to mark buffer and get events
+     *    b) Send error + pre-error replay immediately (don't wait)
+     *    c) Start recording recovery session (async, non-blocking)
+     * 3. If session replay disabled: send error only
      */
     async captureException(error, options = {}) {
         try {
             // Build error payload
             const payload = this.buildPayload(error, 'error', options);
 
-            // Capture session replay data if enabled (before sending error)
-            let replayData = null;
-            if (this.errorDetector) {
-                const replayCapture = await this.errorDetector.handleError(error, payload);
-                if (replayCapture) {
-                    replayData = {
-                        sessionId: replayCapture.sessionId,
-                        events: replayCapture.events,
-                    };
-                }
-            }
+            // TWO-PHASE SESSION REPLAY (with defensive null checks)
+            if (this.errorDetector && this.errorDetector.replayBuffer && this.errorDetector.sessionManager) {
+                try {
+                    // CRITICAL: Call handleError() to properly mark the buffer and get events
+                    // This method:
+                    // 1. Marks the current buffer position as "error occurred"
+                    // 2. Gets all buffered events (before error)
+                    // 3. Triggers the onErrorDetected callback
+                    // 4. Returns replay context with events
+                    const replayContext = await this.errorDetector.handleError(error, payload);
 
-            // Send error to backend (with replay data if captured)
-            await this.transport.send(payload, replayData);
+                    // Defensive: Check if we got replay context with events
+                    let replayData = null;
+                    if (replayContext && replayContext.events && replayContext.events.length > 0) {
+                        // Filter to get only pre-error events
+                        const preErrorEvents = replayContext.events.filter(event =>
+                            event.phase === 'before_error' || event.phase === 'error',
+                        );
+
+                        if (preErrorEvents.length > 0) {
+                            replayData = {
+                                sessionId: replayContext.sessionId,
+                                events: preErrorEvents,
+                                phase: 'pre-error', // Mark as phase 1
+                            };
+
+                            if (this.config.debug) {
+                                console.warn('ApplicationLogger: Sending error with pre-error replay (phase 1)', {
+                                    totalEvents: replayContext.events.length,
+                                    preErrorEvents: preErrorEvents.length,
+                                    sessionId: replayData.sessionId,
+                                });
+                            }
+                        } else if (this.config.debug) {
+                            console.warn('ApplicationLogger: No pre-error events in buffer', {
+                                totalEvents: replayContext.events.length,
+                                bufferStats: this.errorDetector.replayBuffer.getStats(),
+                            });
+                        }
+                    } else if (this.config.debug) {
+                        console.warn('ApplicationLogger: No replay context from error detector', {
+                            hasContext: !!replayContext,
+                            hasEvents: !!(replayContext && replayContext.events),
+                            eventCount: replayContext?.events?.length || 0,
+                            bufferStats: this.errorDetector.replayBuffer.getStats(),
+                        });
+                    }
+
+                    // Send error + pre-error replay immediately
+                    await this.transport.send(payload, replayData);
+
+                    // Phase 2: Start recording recovery session (async, non-blocking)
+                    // This runs in the background and sends separately when complete
+                    // Defensive: Check method exists before calling
+                    if (typeof this.errorDetector.startRecoveryRecording === 'function') {
+                        this.errorDetector.startRecoveryRecording(error).catch(recoveryError => {
+                            if (this.config.debug) {
+                                console.error('ApplicationLogger: Recovery recording failed', recoveryError);
+                            }
+                        });
+                    }
+                } catch (replayError) {
+                    // If session replay fails, still send error without replay data
+                    if (this.config.debug) {
+                        console.error('ApplicationLogger: Session replay failed, sending error without replay', replayError);
+                    }
+                    await this.transport.send(payload);
+                }
+            } else {
+                // No session replay - send error only
+                if (this.config.debug && !this.errorDetector) {
+                    console.warn('ApplicationLogger: Session replay disabled (no error detector)');
+                }
+                await this.transport.send(payload);
+            }
         } catch (captureError) {
             // Never crash on error capture
             console.error('Client: Failed to capture exception', captureError);
@@ -154,6 +515,7 @@ export class Client {
                 http_method: this.detectHttpMethod(),
                 http_status_code: this.extractHttpStatusCode(error, options),
                 session_hash: this.getSessionHash(),
+                session_id: this.sessionManager ? this.sessionManager.getSessionId() : null,
                 timestamp: new Date().toISOString(),
                 runtime: `JavaScript ${this.getBrowserInfo()}`,
                 user_agent: navigator.userAgent,

@@ -52,13 +52,20 @@ class MockBreadcrumbCollector {
 class MockErrorDetector {
     constructor() {
         this.handledErrors = [];
+        // Mock replayBuffer and sessionManager to satisfy client.js checks
+        this.replayBuffer = {
+            getStats: () => ({ eventCount: 0, bufferSize: 0 }),
+        };
+        this.sessionManager = {
+            getSessionId: () => 'test-session-id',
+        };
     }
 
     async handleError(error, payload) {
         this.handledErrors.push({ error, payload });
         return {
             errorContext: { message: error.message, timestamp: Date.now() },
-            events: [{ type: 'click', timestamp: Date.now() }],
+            events: [{ type: 'click', timestamp: Date.now(), phase: 'before_error' }],
             sessionId: 'test-session-id',
         };
     }
@@ -85,7 +92,7 @@ describe('Client', () => {
             scrubFields: ['password', 'token'],
         };
 
-        client = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector);
+        client = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector, null);
     });
 
     describe('Constructor', () => {
@@ -98,7 +105,7 @@ describe('Client', () => {
 
         test('initializes with errorDetector when provided', () => {
             mockErrorDetector = new MockErrorDetector();
-            const clientWithDetector = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector);
+            const clientWithDetector = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector, null);
 
             expect(clientWithDetector.errorDetector).toBe(mockErrorDetector);
         });
@@ -168,7 +175,7 @@ describe('Client', () => {
 
         test('triggers errorDetector when available', async () => {
             mockErrorDetector = new MockErrorDetector();
-            client = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector);
+            client = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector, null);
 
             const testError = new Error('Detector test');
             await client.captureException(testError);
@@ -179,7 +186,7 @@ describe('Client', () => {
 
         test('includes replay data when errorDetector provides it', async () => {
             mockErrorDetector = new MockErrorDetector();
-            client = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector);
+            client = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector, null);
 
             await client.captureException(new Error('Replay test'));
 
@@ -248,6 +255,24 @@ describe('Client', () => {
 
             expect(payload.timestamp).toBeDefined();
             expect(new Date(payload.timestamp)).toBeInstanceOf(Date);
+        });
+
+        test('includes session_id when sessionManager provided', () => {
+            const mockSessionManager = {
+                getSessionId: () => 'test-session-uuid-123',
+            };
+            const clientWithSession = new Client(config, mockTransport, mockBreadcrumbs, null, mockSessionManager);
+
+            const payload = clientWithSession.buildPayload(new Error('Test'), 'error');
+
+            expect(payload.session_id).toBe('test-session-uuid-123');
+        });
+
+        test('session_id is undefined when sessionManager not provided', () => {
+            const payload = client.buildPayload(new Error('Test'), 'error');
+
+            // session_id is null before removeNullValues, undefined after (field removed)
+            expect(payload.session_id).toBeUndefined();
         });
 
         test('includes breadcrumbs', () => {
@@ -520,7 +545,7 @@ handler@/path/to/handler.js:20:10`;
     describe('Integration', () => {
         test('full error flow with all features', async () => {
             mockErrorDetector = new MockErrorDetector();
-            client = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector);
+            client = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector, null);
 
             // Setup context
             client.setUser({ id: '123', email: 'test@example.com' });

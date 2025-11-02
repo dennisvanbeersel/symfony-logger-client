@@ -138,6 +138,94 @@ export class Transport {
     }
 
     /**
+     * Send recovery session (Phase 2 of two-phase session replay)
+     *
+     * This is sent separately after the initial error + pre-error data.
+     * Recovery sessions show user actions AFTER the error occurred.
+     *
+     * @param {Object} recoveryPayload - Recovery session payload
+     * @param {string} recoveryPayload.sessionId - Session ID
+     * @param {Array} recoveryPayload.events - Recovery events (after error)
+     * @param {string} [recoveryPayload.capturedAt] - ISO 8601 timestamp
+     * @param {string} [recoveryPayload.url] - Current URL
+     * @param {boolean} [useBeacon=false] - Use sendBeacon API for reliable unload transmission
+     */
+    async sendRecoverySession(recoveryPayload, useBeacon = false) {
+        try {
+            // Use dedicated recovery session endpoint
+            const endpoint = `${this.dsn.protocol}://${this.dsn.host}/api/errors/recovery-session`;
+
+            if (this.config.debug) {
+                console.warn('ApplicationLogger: Sending recovery session', {
+                    sessionId: recoveryPayload.sessionId,
+                    eventCount: recoveryPayload.events?.length || 0,
+                    method: useBeacon ? 'sendBeacon' : 'fetch',
+                });
+            }
+
+            // Use sendBeacon for page unload (synchronous, guaranteed delivery)
+            if (useBeacon && navigator.sendBeacon) {
+                const blob = new Blob([JSON.stringify(recoveryPayload)], {
+                    type: 'application/json',
+                });
+
+                const sent = navigator.sendBeacon(endpoint, blob);
+
+                if (sent) {
+                    if (this.config.debug) {
+                        console.warn('ApplicationLogger: Recovery session queued via sendBeacon');
+                    }
+                    return { success: true, method: 'beacon' };
+                } else {
+                    throw new Error('sendBeacon failed (queue full or too large)');
+                }
+            }
+
+            // Fallback to fetch (normal case)
+            // Create AbortController for timeout
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5-second timeout (longer for recovery)
+
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Api-Key': this.apiKey,
+                    'User-Agent': 'ApplicationLogger-JS-SDK/1.0',
+                },
+                body: JSON.stringify(recoveryPayload),
+                signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                throw new Error(`Recovery session send failed: ${response.status}`);
+            }
+
+            if (this.config.debug) {
+                console.warn('ApplicationLogger: Recovery session sent successfully');
+            }
+
+            return response.json();
+        } catch (error) {
+            console.error('ApplicationLogger: Failed to send recovery session', error);
+
+            // Store in queue for retry (best effort)
+            try {
+                this.storageQueue.enqueue({
+                    type: 'recovery',
+                    payload: recoveryPayload,
+                });
+            } catch (queueError) {
+                console.error('ApplicationLogger: Failed to queue recovery session', queueError);
+            }
+
+            throw error;
+        }
+    }
+
+    /**
    * Process queued errors
    */
     async processQueue() {

@@ -68,13 +68,21 @@ class ApplicationLoggerExtension extends AbstractExtension
             // Build configuration object
             $config = $this->buildConfig($options);
 
-            // Generate initialization script
+            // Generate scripts in defense-in-depth order:
+            // 1. Nuclear trap (ultra-minimal, captures catastrophic errors)
+            $nuclearTrap = $this->generateNuclearTrap();
+
+            // 2. Early error buffer (lightweight, captures early errors)
+            $bufferScript = $this->generateBufferScript();
+
+            // 3. Full SDK initialization (module, deferred)
             $initScript = $this->generateInitScript($config);
 
-            // Add user context script if user is authenticated
+            // 4. User context (if authenticated)
             $userScript = $this->generateUserScript();
 
-            return $initScript.$userScript;
+            // Return in order: nuclear trap → buffer → SDK → user context
+            return $nuclearTrap.$bufferScript.$initScript.$userScript;
         } catch (\Throwable $e) {
             // Never throw - resilience is priority
             $this->logError('Failed to render JavaScript SDK initialization', [
@@ -117,6 +125,169 @@ class ApplicationLoggerExtension extends AbstractExtension
 
         // Remove null values
         return array_filter($config, fn ($value) => null !== $value);
+    }
+
+    /**
+     * Generate ultra-minimal nuclear error trap (inline, executes FIRST).
+     *
+     * This is the FIRST line of defense - captures catastrophic errors that
+     * break JavaScript execution before our SDK can even load.
+     *
+     * Features:
+     * - NO dependencies (survives even if SDK fails to load)
+     * - Stores raw errors to localStorage ONLY
+     * - Will be "resurrected" on next page load
+     * - ~250 bytes minified
+     *
+     * Handles:
+     * - Syntax errors before SDK loads
+     * - Module import failures
+     * - Blocking runtime errors
+     * - Third-party script failures
+     */
+    private function generateNuclearTrap(): string
+    {
+        // Get CSP nonce from request attributes
+        $nonce = $this->getCspNonce();
+        $nonceAttr = $nonce ? ' nonce="'.htmlspecialchars($nonce, \ENT_QUOTES, 'UTF-8').'"' : '';
+
+        // Ultra-minimal, no dependencies, compressed, bulletproof
+        // Handles: errors, promise rejections, localStorage failures, quota exceeded
+        return <<<HTML
+<script{$nonceAttr}>
+(function(){try{if(!window.localStorage)return;var k='_appLogger_nuclear',m=20,s=function(e,t){try{var r=localStorage.getItem(k),n=r?JSON.parse(r):[];if(n.length<m){n.push({m:e,f:t.f||'',l:t.l||0,c:t.c||0,t:Date.now(),u:location.href});localStorage.setItem(k,JSON.stringify(n));}}catch(a){}};window.addEventListener('error',function(e){s(e.message||'',{f:e.filename,l:e.lineno,c:e.colno})},!0);window.addEventListener('unhandledrejection',function(e){s('Unhandled rejection: '+(e.reason&&e.reason.message||String(e.reason||''))+'',{})});}catch(e){}})();
+</script>
+
+HTML;
+    }
+
+    /**
+     * Generate early error buffer script (inline, executes immediately).
+     *
+     * This lightweight script captures errors that occur before the full SDK loads.
+     * It executes synchronously to ensure no errors are missed.
+     */
+    private function generateBufferScript(): string
+    {
+        // Get CSP nonce from request attributes
+        $nonce = $this->getCspNonce();
+        $nonceAttr = $nonce ? ' nonce="'.htmlspecialchars($nonce, \ENT_QUOTES, 'UTF-8').'"' : '';
+
+        return <<<HTML
+<script{$nonceAttr}>
+  // ApplicationLogger Early Error Buffer
+  // Captures errors before the full SDK loads (executes immediately)
+  (function() {
+    'use strict';
+
+    // Prevent duplicate initialization
+    if (window._appLoggerBuffer && window._appLoggerBuffer._initialized) {
+      return;
+    }
+
+    // Initialize buffer (preserve existing errors if any)
+    var existingErrors = window._appLoggerBuffer && Array.isArray(window._appLoggerBuffer.errors)
+      ? window._appLoggerBuffer.errors
+      : [];
+
+    window._appLoggerBuffer = {
+      errors: existingErrors,
+      maxSize: 50,
+      startTime: window._appLoggerBuffer && window._appLoggerBuffer.startTime
+        ? window._appLoggerBuffer.startTime
+        : Date.now(),
+      _initialized: true,
+
+      push: function(item) {
+        try {
+          if (Array.isArray(this.errors) && this.errors.length < this.maxSize) {
+            this.errors.push(item);
+          }
+        } catch (e) {
+          // Silent fail - never crash the buffer
+        }
+      }
+    };
+
+    // Capture uncaught errors
+    window.addEventListener('error', function(event) {
+      try {
+        // Defensive: ensure event exists and has expected shape
+        if (!event) return;
+
+        var errorData = {
+          type: 'error',
+          message: (event.message != null ? String(event.message) : 'Unknown error'),
+          filename: (event.filename != null ? String(event.filename) : 'unknown'),
+          lineno: (typeof event.lineno === 'number' ? event.lineno : 0),
+          colno: (typeof event.colno === 'number' ? event.colno : 0),
+          timestamp: Date.now(),
+          error: null
+        };
+
+        // Safely extract error object if present
+        if (event.error && typeof event.error === 'object') {
+          try {
+            errorData.error = {
+              name: event.error.name != null ? String(event.error.name) : 'Error',
+              message: event.error.message != null ? String(event.error.message) : '',
+              stack: event.error.stack != null ? String(event.error.stack) : ''
+            };
+          } catch (e) {
+            // Error object might not be serializable
+            errorData.error = { name: 'Error', message: 'Could not serialize error', stack: '' };
+          }
+        }
+
+        window._appLoggerBuffer.push(errorData);
+      } catch (e) {
+        // Never crash on error handling
+      }
+    }, true); // Use capture phase to get errors before other handlers
+
+    // Capture unhandled promise rejections
+    window.addEventListener('unhandledrejection', function(event) {
+      try {
+        if (!event) return;
+
+        var reason = event.reason;
+        var reasonData;
+
+        // Handle different types of rejection reasons
+        if (reason == null) {
+          reasonData = { name: 'UnhandledRejection', message: 'undefined', stack: '' };
+        } else if (typeof reason === 'object') {
+          try {
+            reasonData = {
+              name: reason.name != null ? String(reason.name) : 'UnhandledRejection',
+              message: reason.message != null ? String(reason.message) : String(reason),
+              stack: reason.stack != null ? String(reason.stack) : ''
+            };
+          } catch (e) {
+            reasonData = { name: 'UnhandledRejection', message: 'Could not serialize reason', stack: '' };
+          }
+        } else {
+          // Primitive value (string, number, boolean)
+          reasonData = {
+            name: 'UnhandledRejection',
+            message: String(reason),
+            stack: ''
+          };
+        }
+
+        window._appLoggerBuffer.push({
+          type: 'rejection',
+          reason: reasonData,
+          timestamp: Date.now()
+        });
+      } catch (e) {
+        // Never crash on rejection handling
+      }
+    });
+  })();
+</script>
+
+HTML;
     }
 
     /**

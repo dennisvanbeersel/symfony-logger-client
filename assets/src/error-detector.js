@@ -17,14 +17,16 @@ export class ErrorDetector {
      * @param {ReplayBuffer} replayBuffer - Replay buffer instance
      * @param {SessionManager} sessionManager - Session manager instance
      * @param {Function} onErrorDetected - Callback when error detected (receives errorContext)
+     * @param {Transport|null} transport - Transport layer for sending recovery sessions
      * @param {Object} [config] - Configuration options
      * @param {boolean} [config.debug=false] - Enable debug logging
      * @param {Array<string>} [config.ignoreErrors=[]] - Error messages to ignore
      */
-    constructor(replayBuffer, sessionManager, onErrorDetected, config = {}) {
+    constructor(replayBuffer, sessionManager, onErrorDetected, transport = null, config = {}) {
         this.replayBuffer = replayBuffer;
         this.sessionManager = sessionManager;
         this.onErrorDetected = onErrorDetected;
+        this.transport = transport;
         this.config = {
             debug: config.debug || false,
             ignoreErrors: config.ignoreErrors || [],
@@ -34,6 +36,8 @@ export class ErrorDetector {
         this.isInstalled = false;
         this.recentErrors = new Set(); // Prevent duplicate captures
         this.recentErrorsCleanupInterval = null;
+        this.isRecordingRecovery = false; // Prevent concurrent recovery recordings
+        this.recoveryRecordingCleanup = null; // Store cleanup function
 
         // Statistics
         this.stats = {
@@ -41,6 +45,8 @@ export class ErrorDetector {
             errorsIgnored: 0,
             replaysCaptured: 0,
             duplicatesPrevented: 0,
+            recoveryRecordingsStarted: 0,
+            recoveryRecordingsCancelled: 0,
         };
 
         if (this.config.debug) {
@@ -238,6 +244,239 @@ export class ErrorDetector {
             return `${message}:${stackFirstLine}`;
         } catch {
             return `${Date.now()}:${Math.random()}`;
+        }
+    }
+
+    /**
+     * Start recording recovery session after error (Phase 2 of two-phase replay)
+     *
+     * This method is called AFTER the error + pre-error replay has been sent.
+     * It continues recording user actions for the configured duration/clicks,
+     * then sends the recovery session as a separate request.
+     *
+     * EDGE CASES HANDLED:
+     * - Prevents multiple concurrent recovery recordings
+     * - Cleans up previous recording if new error occurs
+     * - Proper cleanup of intervals and event listeners
+     * - Handles page unload gracefully
+     * - Uses sendBeacon for reliable unload transmission
+     * - Handles null/undefined buffer states
+     *
+     * @param {Error} error - The error object
+     * @returns {Promise<void>}
+     */
+    async startRecoveryRecording(error) {
+        try {
+            // EDGE CASE 1: Check if already recording recovery
+            if (this.isRecordingRecovery) {
+                if (this.config.debug) {
+                    console.warn('ErrorDetector: Already recording recovery, cleaning up previous recording');
+                }
+
+                // Clean up previous recording
+                if (this.recoveryRecordingCleanup) {
+                    this.recoveryRecordingCleanup();
+                }
+
+                this.stats.recoveryRecordingsCancelled++;
+            }
+
+            // EDGE CASE 2: Validate dependencies
+            if (!this.replayBuffer || !this.sessionManager) {
+                console.error('ErrorDetector: Cannot start recovery recording - missing dependencies');
+                return;
+            }
+
+            // EDGE CASE 3: Validate error object
+            if (!error || typeof error !== 'object') {
+                console.error('ErrorDetector: Invalid error object for recovery recording');
+                return;
+            }
+
+            this.isRecordingRecovery = true;
+            this.stats.recoveryRecordingsStarted++;
+
+            if (this.config.debug) {
+                console.warn('ErrorDetector: Starting recovery recording (phase 2)');
+            }
+
+            const errorContext = {
+                errorId: null, // Could be set from backend response if needed
+                message: error.message || 'Unknown error',
+                type: error.name || 'Error',
+                timestamp: Date.now(),
+                url: window.location.href,
+            };
+
+            // Mark buffer as recording recovery (after error)
+            // EDGE CASE 4: Validate method exists
+            if (typeof this.replayBuffer.startRecordingAfterError === 'function') {
+                this.replayBuffer.startRecordingAfterError(errorContext);
+            } else {
+                console.error('ErrorDetector: Buffer missing startRecordingAfterError method');
+                this.isRecordingRecovery = false;
+                return;
+            }
+
+            // Wait for recording to complete (time limit or click limit)
+            return new Promise((resolve) => {
+                let checkCompleteInterval = null;
+                let unloadHandler = null;
+                let visibilityHandler = null;
+
+                // Create cleanup function to prevent memory leaks
+                const cleanup = () => {
+                    // Clear interval
+                    if (checkCompleteInterval) {
+                        clearInterval(checkCompleteInterval);
+                        checkCompleteInterval = null;
+                    }
+
+                    // Remove event listeners
+                    if (unloadHandler) {
+                        window.removeEventListener('beforeunload', unloadHandler);
+                        unloadHandler = null;
+                    }
+
+                    if (visibilityHandler) {
+                        document.removeEventListener('visibilitychange', visibilityHandler);
+                        visibilityHandler = null;
+                    }
+
+                    // Clear recovery state
+                    this.isRecordingRecovery = false;
+                    this.recoveryRecordingCleanup = null;
+                };
+
+                // Store cleanup function for external cancellation
+                this.recoveryRecordingCleanup = cleanup;
+
+                const finishRecording = (reason = 'unknown') => {
+                    if (this.config.debug) {
+                        console.warn(`ErrorDetector: Finishing recovery recording (reason: ${reason})`);
+                    }
+
+                    // Clean up listeners FIRST
+                    cleanup();
+
+                    // Get recovery events
+                    // EDGE CASE 5: Validate method exists and returns array
+                    let recoveryEvents = [];
+                    if (this.replayBuffer && typeof this.replayBuffer.getEventsByPhase === 'function') {
+                        recoveryEvents = this.replayBuffer.getEventsByPhase('after_error') || [];
+                    }
+
+                    if (recoveryEvents.length > 0) {
+                        // Use sendBeacon for page unload (more reliable)
+                        const useBeacon = reason === 'page-unload' || reason === 'page-hidden';
+
+                        // Send recovery session separately
+                        this.sendRecoverySession(errorContext, recoveryEvents, useBeacon);
+                    } else if (this.config.debug) {
+                        console.warn('ErrorDetector: No recovery events captured');
+                    }
+
+                    resolve();
+                };
+
+                // Check every second if recording is complete
+                checkCompleteInterval = setInterval(() => {
+                    try {
+                        // EDGE CASE 6: Validate buffer still exists
+                        if (!this.replayBuffer || typeof this.replayBuffer.shouldStopRecording !== 'function') {
+                            finishRecording('buffer-unavailable');
+                            return;
+                        }
+
+                        if (this.replayBuffer.shouldStopRecording()) {
+                            finishRecording('limit-reached');
+                        }
+                    } catch (error) {
+                        console.error('ErrorDetector: Error in recovery check interval', error);
+                        finishRecording('check-error');
+                    }
+                }, 1000);
+
+                // Listen for page unload (use sendBeacon for reliability)
+                unloadHandler = () => {
+                    finishRecording('page-unload');
+                };
+                window.addEventListener('beforeunload', unloadHandler, { once: true });
+
+                // Also listen for visibility change (mobile)
+                visibilityHandler = () => {
+                    if (document.visibilityState === 'hidden') {
+                        finishRecording('page-hidden');
+                    }
+                };
+                document.addEventListener('visibilitychange', visibilityHandler, { once: true });
+
+                // EDGE CASE 7: Safety timeout (absolute maximum)
+                // If something goes wrong, force finish after 2 minutes
+                setTimeout(() => {
+                    if (this.isRecordingRecovery) {
+                        if (this.config.debug) {
+                            console.warn('ErrorDetector: Recovery recording safety timeout (2 minutes)');
+                        }
+                        finishRecording('safety-timeout');
+                    }
+                }, 120000); // 2 minutes absolute maximum
+            });
+        } catch (error) {
+            console.error('ErrorDetector: Failed to start recovery recording', error);
+            this.isRecordingRecovery = false;
+            this.recoveryRecordingCleanup = null;
+        }
+    }
+
+    /**
+     * Send recovery session as separate request (Phase 2)
+     *
+     * @param {Object} errorContext - Error context information
+     * @param {Array} events - Recovery events (after error)
+     * @param {boolean} [useBeacon=false] - Use sendBeacon API for reliable unload transmission
+     */
+    sendRecoverySession(errorContext, events, useBeacon = false) {
+        try {
+            if (events.length === 0) {
+                return; // No recovery data
+            }
+
+            // Format payload to match backend API expectations
+            const recoveryPayload = {
+                sessionId: this.sessionManager.getSessionId(),
+                events: events,
+                capturedAt: new Date().toISOString(),
+                url: window.location.href,
+            };
+
+            // Send via transport if available
+            if (this.transport && typeof this.transport.sendRecoverySession === 'function') {
+                this.transport.sendRecoverySession(recoveryPayload, useBeacon).catch(error => {
+                    console.error('ErrorDetector: Failed to send recovery session via transport', error);
+                });
+
+                if (this.config.debug) {
+                    console.warn('ErrorDetector: Recovery session sent via transport', {
+                        eventCount: events.length,
+                        sessionId: recoveryPayload.sessionId,
+                        method: useBeacon ? 'sendBeacon' : 'fetch',
+                    });
+                }
+            } else {
+                // Fallback: call onErrorDetected callback
+                if (this.onErrorDetected) {
+                    this.onErrorDetected(errorContext, events, { recovery: true });
+                }
+
+                if (this.config.debug) {
+                    console.warn('ErrorDetector: Recovery session sent via callback', {
+                        eventCount: events.length,
+                    });
+                }
+            }
+        } catch (error) {
+            console.error('ErrorDetector: Failed to send recovery session', error);
         }
     }
 

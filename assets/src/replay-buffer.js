@@ -359,6 +359,9 @@ export class ReplayBuffer {
     deserialize(data) {
         try {
             if (!data || typeof data !== 'object') {
+                if (this.config.debug) {
+                    console.warn('ReplayBuffer: No data to deserialize');
+                }
                 return false;
             }
 
@@ -371,10 +374,30 @@ export class ReplayBuffer {
                 this.stats = { ...this.stats, ...data.stats };
             }
 
+            // MIGRATION: Ensure all events have phase property
+            // Old localStorage data might not have phase property
+            let migratedCount = 0;
+            this.buffer = this.buffer.map(event => {
+                if (!event.phase) {
+                    migratedCount++;
+                    // Default to 'before_error' for old events
+                    return { ...event, phase: 'before_error' };
+                }
+                return event;
+            });
+
             if (this.config.debug) {
-                console.warn('ReplayBuffer: Deserialized', {
-                    events: this.buffer.length,
+                const phaseBreakdown = this.buffer.reduce((acc, event) => {
+                    acc[event.phase] = (acc[event.phase] || 0) + 1;
+                    return acc;
+                }, {});
+
+                console.warn('ReplayBuffer: Deserialized from localStorage', {
+                    totalEvents: this.buffer.length,
+                    migratedEvents: migratedCount,
+                    phaseBreakdown,
                     isRecording: this.isRecordingAfterError,
+                    byteSize: this.estimateBufferSize(),
                 });
             }
 

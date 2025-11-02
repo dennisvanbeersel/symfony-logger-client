@@ -83,7 +83,19 @@ class ApplicationLogger {
 
         // Initialize core components
         this.transport = new Transport(this.config);
-        this.breadcrumbs = new BreadcrumbCollector();
+
+        // Initialize breadcrumbs with error capture callback
+        // This enables zero-config error tracking: console.error(err) automatically captures
+        this.breadcrumbs = new BreadcrumbCollector(
+            50, // maxBreadcrumbs
+            (error, options) => {
+                // Debug log
+                if (this.config && this.config.debug) {
+                    console.warn('ApplicationLogger: Auto-capturing error from console.error()', error);
+                }
+                this.captureException(error, options);
+            }, // errorCaptureCallback
+        );
 
         // Initialize session replay components (if enabled)
         this.sessionManager = null;
@@ -96,12 +108,13 @@ class ApplicationLogger {
             this.initializeSessionReplay();
         }
 
-        // Initialize client (with optional errorDetector)
+        // Initialize client (with optional errorDetector and sessionManager)
         this.client = new Client(
             this.config,
             this.transport,
             this.breadcrumbs,
             this.errorDetector,
+            this.sessionManager,
         );
 
         this.initialized = false;
@@ -139,6 +152,7 @@ class ApplicationLogger {
                 this.replayBuffer,
                 this.sessionManager,
                 this.handleReplayCapture.bind(this),
+                this.transport, // Pass transport for recovery session sending
                 {
                     debug: this.config.debug,
                     ignoreErrors: [],
@@ -207,6 +221,11 @@ class ApplicationLogger {
 
     /**
      * Initialize the SDK and start capturing errors
+     *
+     * IMPORTANT: Initialization order matters for reliability:
+     * 1. Breadcrumbs install first (wraps console/fetch before errors occur)
+     * 2. Session replay components (heatmap, error detector)
+     * 3. Error handlers install last (processes buffered errors, then goes live)
      */
     init() {
         if (this.initialized) {
@@ -214,13 +233,20 @@ class ApplicationLogger {
             return;
         }
 
-        // Install error capture
-        this.client.install();
+        // 1. Install breadcrumbs FIRST (wraps console/fetch immediately)
+        // This ensures we capture breadcrumbs for any errors that occur during init
+        this.breadcrumbs.install();
 
-        // Install session replay (if enabled)
+        // 2. Install session replay tracking (if enabled)
         if (this.config.sessionReplayEnabled && this.heatmap) {
             this.heatmap.install();
             this.errorDetector.install();
+
+            // Periodic saves to localStorage (every 5 seconds)
+            // This ensures buffer persists even if page closes unexpectedly
+            this.bufferSaveInterval = setInterval(() => {
+                this.saveBufferToStorage();
+            }, 5000);
 
             // Save buffer to localStorage on page unload
             window.addEventListener('beforeunload', () => {
@@ -235,18 +261,28 @@ class ApplicationLogger {
             });
 
             if (this.config.debug) {
-                console.warn('ApplicationLogger: Session replay enabled (error-triggered)');
+                console.warn('ApplicationLogger: Session replay enabled (error-triggered, periodic saves every 5s)');
             }
         }
+
+        // 3. Install error capture LAST (processes buffered errors, then starts live capture)
+        // Note: breadcrumbs.install() is called again in client.install() but it's idempotent
+        this.client.install();
 
         this.initialized = true;
 
         if (this.config.debug) {
+            const sdkLoadTime = window._appLoggerBuffer?.startTime
+                ? Date.now() - window._appLoggerBuffer.startTime
+                : 'unknown';
+
             console.warn('ApplicationLogger initialized', {
                 environment: this.config.environment,
                 release: this.config.release,
                 sessionReplayEnabled: this.config.sessionReplayEnabled,
                 sessionId: this.sessionManager?.getSessionId(),
+                sdkLoadTime: sdkLoadTime + 'ms',
+                bufferedErrors: window._appLoggerBuffer?.errors?.length || 0,
             });
         }
     }
