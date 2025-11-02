@@ -257,6 +257,7 @@ describe('BreadcrumbCollector', () => {
 
     describe('Console message capture', () => {
         test('captures console.log as info level', () => {
+            /* eslint-disable no-console */
             const originalLog = console.log;
 
             console.log = function(...args) {
@@ -271,6 +272,7 @@ describe('BreadcrumbCollector', () => {
             };
 
             console.log('User logged in', { userId: 123 });
+            /* eslint-enable no-console */
 
             const crumbs = breadcrumbs.get();
             expect(crumbs).toHaveLength(1);

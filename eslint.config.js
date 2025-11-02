@@ -39,6 +39,18 @@ export default [
             'template-curly-spacing': ['error', 'never'],
         },
     },
+    // Test files configuration (Jest environment)
+    {
+        files: ['**/*.test.js', '**/*.spec.js', 'assets/tests/**/*.js'],
+        languageOptions: {
+            globals: {
+                ...globals.browser,
+                ...globals.es2021,
+                ...globals.jest,
+                ...globals.node,
+            },
+        },
+    },
     {
         ignores: [
             'vendor/*',

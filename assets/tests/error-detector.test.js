@@ -435,7 +435,6 @@ describe('ErrorDetector', () => {
 
         test('clears interval on uninstall', () => {
             errorDetector.install();
-            const intervalId = errorDetector.recentErrorsCleanupInterval;
 
             errorDetector.uninstall();
 

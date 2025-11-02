@@ -5,7 +5,6 @@
  * cleanup, and size estimation.
  */
 
-import { jest } from '@jest/globals';
 import { StorageManager } from '../src/storage-manager.js';
 
 // Mock localStorage with quota simulation
@@ -106,7 +105,7 @@ describe('StorageManager', () => {
 
             localStorage.setItem(
                 '_app_logger_replay_buffer',
-                JSON.stringify(bufferData)
+                JSON.stringify(bufferData),
             );
 
             const loaded = storage.load();
@@ -136,7 +135,7 @@ describe('StorageManager', () => {
         test('validates buffer structure', () => {
             localStorage.setItem(
                 '_app_logger_replay_buffer',
-                JSON.stringify({ noBuffer: true })
+                JSON.stringify({ noBuffer: true }),
             );
 
             const loaded = storage.load();
@@ -208,7 +207,7 @@ describe('StorageManager', () => {
 
             const pruned = storage.pruneBuffer(
                 bufferWithError,
-                1024 * 10 // 10KB limit
+                1024 * 10, // 10KB limit
             );
 
             // Error marker should be preserved
@@ -230,7 +229,7 @@ describe('StorageManager', () => {
             };
             localStorage.setItem(
                 '_app_logger_replay_metadata',
-                JSON.stringify(oldMetadata)
+                JSON.stringify(oldMetadata),
             );
 
             storage.cleanup();
@@ -250,7 +249,7 @@ describe('StorageManager', () => {
             };
             localStorage.setItem(
                 '_app_logger_replay_metadata',
-                JSON.stringify(recentMetadata)
+                JSON.stringify(recentMetadata),
             );
 
             storage.cleanup();
@@ -305,7 +304,7 @@ describe('StorageManager', () => {
 
             localStorage.setItem(
                 '_app_logger_replay_metadata',
-                JSON.stringify(testMetadata)
+                JSON.stringify(testMetadata),
             );
 
             const loaded = storage.loadMetadata();
