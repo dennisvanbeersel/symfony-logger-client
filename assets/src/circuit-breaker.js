@@ -8,15 +8,39 @@
  * - CLOSED: Normal operation, requests go through
  * - OPEN: Service is down, requests are blocked immediately
  * - HALF_OPEN: Testing if service has recovered
+ *
+ * @example
+ * const breaker = new CircuitBreaker({ failureThreshold: 5, timeout: 60000 });
+ * if (!breaker.isOpen()) {
+ *   try {
+ *     await sendRequest();
+ *     breaker.recordSuccess();
+ *   } catch (error) {
+ *     breaker.recordFailure();
+ *   }
+ * }
  */
 export class CircuitBreaker {
+    /** @type {string} Circuit is functioning normally */
     static STATE_CLOSED = 'closed';
+    /** @type {string} Circuit is open, blocking requests */
     static STATE_OPEN = 'open';
+    /** @type {string} Circuit is testing if service recovered */
     static STATE_HALF_OPEN = 'half_open';
 
+    /**
+     * Create a new CircuitBreaker instance
+     *
+     * @param {Object} [config={}] - Configuration options
+     * @param {number} [config.failureThreshold=5] - Number of failures before opening circuit
+     * @param {number} [config.timeout=60000] - Milliseconds before attempting reset (default 60s)
+     */
     constructor(config = {}) {
+        /** @type {number} */
         this.failureThreshold = config.failureThreshold || 5;
-        this.timeout = config.timeout || 60000; // 60 seconds in milliseconds
+        /** @type {number} */
+        this.timeout = config.timeout || 60000;
+        /** @type {string} */
         this.storageKey = 'app_logger_circuit_breaker';
 
         this.loadState();
@@ -24,6 +48,10 @@ export class CircuitBreaker {
 
     /**
      * Check if circuit is open (service down, reject requests)
+     *
+     * Also triggers transition from OPEN to HALF_OPEN if timeout has elapsed.
+     *
+     * @returns {boolean} True if circuit is open and requests should be blocked
      */
     isOpen() {
         // Check if we should transition from OPEN to HALF_OPEN
@@ -35,7 +63,9 @@ export class CircuitBreaker {
     }
 
     /**
-     * Check if circuit is in half-open state
+     * Check if circuit is in half-open state (testing recovery)
+     *
+     * @returns {boolean} True if circuit is half-open
      */
     isHalfOpen() {
         return this.state === CircuitBreaker.STATE_HALF_OPEN;
@@ -43,6 +73,11 @@ export class CircuitBreaker {
 
     /**
      * Record a successful request
+     *
+     * In HALF_OPEN state, closes the circuit (service recovered).
+     * In CLOSED state, resets failure count.
+     *
+     * @returns {void}
      */
     recordSuccess() {
         if (this.state === CircuitBreaker.STATE_HALF_OPEN) {
@@ -57,6 +92,11 @@ export class CircuitBreaker {
 
     /**
      * Record a failed request
+     *
+     * In HALF_OPEN state, reopens the circuit.
+     * In CLOSED state, increments failure count and opens circuit if threshold reached.
+     *
+     * @returns {void}
      */
     recordFailure() {
         if (this.state === CircuitBreaker.STATE_HALF_OPEN) {
@@ -75,6 +115,8 @@ export class CircuitBreaker {
 
     /**
      * Get current state for monitoring/debugging
+     *
+     * @returns {{state: string, failureCount: number, openedAt: number|null}} Current circuit state
      */
     getState() {
         return {
@@ -85,14 +127,19 @@ export class CircuitBreaker {
     }
 
     /**
-     * Manually reset circuit breaker
+     * Manually reset circuit breaker to CLOSED state
+     *
+     * @returns {void}
      */
     reset() {
         this.close();
     }
 
     /**
-     * Transition to CLOSED state
+     * Transition to CLOSED state (internal)
+     *
+     * @private
+     * @returns {void}
      */
     close() {
         this.state = CircuitBreaker.STATE_CLOSED;
@@ -102,7 +149,10 @@ export class CircuitBreaker {
     }
 
     /**
-     * Transition to OPEN state
+     * Transition to OPEN state (internal)
+     *
+     * @private
+     * @returns {void}
      */
     open() {
         this.state = CircuitBreaker.STATE_OPEN;
@@ -111,7 +161,10 @@ export class CircuitBreaker {
     }
 
     /**
-     * Transition to HALF_OPEN state
+     * Transition to HALF_OPEN state (internal)
+     *
+     * @private
+     * @returns {void}
      */
     halfOpen() {
         this.state = CircuitBreaker.STATE_HALF_OPEN;
@@ -119,7 +172,10 @@ export class CircuitBreaker {
     }
 
     /**
-     * Check if enough time has passed to attempt reset
+     * Check if enough time has passed to attempt reset (internal)
+     *
+     * @private
+     * @returns {boolean} True if timeout has elapsed since circuit opened
      */
     shouldAttemptReset() {
         if (!this.openedAt) {
@@ -130,7 +186,10 @@ export class CircuitBreaker {
     }
 
     /**
-     * Load state from sessionStorage
+     * Load state from sessionStorage (internal)
+     *
+     * @private
+     * @returns {void}
      */
     loadState() {
         try {
@@ -155,7 +214,10 @@ export class CircuitBreaker {
     }
 
     /**
-     * Save state to sessionStorage
+     * Save state to sessionStorage (internal)
+     *
+     * @private
+     * @returns {void}
      */
     saveState() {
         try {

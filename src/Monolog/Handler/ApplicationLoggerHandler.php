@@ -7,6 +7,7 @@ namespace ApplicationLogger\Bundle\Monolog\Handler;
 use ApplicationLogger\Bundle\Service\ApiClient;
 use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
 use ApplicationLogger\Bundle\Service\ContextCollector;
+use ApplicationLogger\Bundle\Util\StackTraceParserTrait;
 use Monolog\Handler\AbstractProcessingHandler;
 use Monolog\Level;
 use Monolog\LogRecord;
@@ -24,6 +25,8 @@ use Monolog\LogRecord;
  */
 class ApplicationLoggerHandler extends AbstractProcessingHandler
 {
+    use StackTraceParserTrait;
+
     private readonly Level $minimumLevel;
 
     public function __construct(
@@ -32,8 +35,13 @@ class ApplicationLoggerHandler extends AbstractProcessingHandler
         private readonly BreadcrumbCollector $breadcrumbCollector,
         string $captureLevel = 'error',
     ) {
-        // Convert string level to Monolog Level enum
-        $this->minimumLevel = Level::fromName(ucfirst(strtolower($captureLevel)));
+        // Convert string level to Monolog Level enum (default to ERROR on invalid input)
+        try {
+            $this->minimumLevel = Level::fromName(ucfirst(strtolower($captureLevel)));
+        } catch (\ValueError) {
+            // Invalid level string - fall back to ERROR for resilience
+            $this->minimumLevel = Level::Error;
+        }
 
         parent::__construct($this->minimumLevel);
     }
@@ -61,6 +69,10 @@ class ApplicationLoggerHandler extends AbstractProcessingHandler
     /**
      * Build error payload from log record.
      *
+     * API expects flat structure with required fields:
+     * - type, message, file, line, stack_trace (required)
+     * - level, source, environment, etc. (optional)
+     *
      * @return array<string, mixed>
      */
     private function buildPayload(LogRecord $record): array
@@ -68,43 +80,64 @@ class ApplicationLoggerHandler extends AbstractProcessingHandler
         try {
             $context = $this->contextCollector->collectContext();
 
-            // Extract exception from context if present
+            // Extract exception details for required fields
             $exception = $record->context['exception'] ?? null;
-            $exceptionData = null;
+
+            // Determine required field values from exception or defaults
+            // Note: API requires line > 0 (Positive constraint), so we default to 1
+            $type = 'LogMessage';
+            $file = 'unknown';
+            $line = 1;
+            $stackTrace = [];
 
             if ($exception instanceof \Throwable) {
-                $exceptionData = [
-                    'type' => \get_class($exception),
-                    'value' => $exception->getMessage(),
-                    'stacktrace' => $this->parseStackTrace($exception),
-                ];
+                $type = \get_class($exception);
+                $file = $exception->getFile();
+                $line = $exception->getLine();
+                $stackTrace = $this->parseStackTrace($exception);
             }
 
             return [
-                'message' => $record->message,
+                // Required fields (flat structure matching API)
+                // Apply length limits to prevent API validation failures
+                'type' => $this->truncate($type, 255),
+                'message' => $this->truncate($record->message, 1000),
+                'file' => $this->truncate($file, 500),
+                'line' => $line,
+                'stack_trace' => $stackTrace,
+
+                // Optional fields
                 'level' => $this->mapLevel($record->level),
-                'exception' => $exceptionData,
-                'platform' => 'symfony',
+                'source' => 'backend',
                 'timestamp' => $record->datetime->format(\DateTimeImmutable::ATOM),
                 'environment' => $context['environment'] ?? 'production',
                 'release' => $context['release'] ?? null,
-                'request' => $context['request'] ?? null,
-                'user' => $context['user'] ?? null,
-                'server' => $context['server'] ?? [],
+                'session_hash' => $this->contextCollector->getSessionHash(),
+                'server_name' => $context['server']['server_name'] ?? null,
+                'url' => $context['request']['url'] ?? null,
+                'http_method' => $context['request']['method'] ?? null,
+                'ip_address' => $context['request']['env']['REMOTE_ADDR'] ?? null,
+                'user_agent' => $context['request']['env']['HTTP_USER_AGENT'] ?? null,
+                'runtime' => 'PHP '.\PHP_VERSION,
                 'breadcrumbs' => $this->breadcrumbCollector->get(),
+                'request_data' => $context['request'] ?? null,
+                'context' => $this->scrubContext($record->context),
                 'tags' => [
                     'channel' => $record->channel,
-                    'level' => $record->level->name,
+                    'monolog_level' => $record->level->name,
                 ],
-                'extra' => $record->extra,
-                'context' => $this->scrubContext($record->context),
             ];
         } catch (\Throwable) {
-            // If payload building fails, return minimal payload
+            // If payload building fails, return minimal payload with required fields
+            // Note: API requires line > 0 (Positive constraint)
             return [
-                'message' => $record->message,
+                'type' => 'LogMessage',
+                'message' => $this->truncate($record->message, 1000),
+                'file' => 'unknown',
+                'line' => 1,
+                'stack_trace' => [],
                 'level' => $this->mapLevel($record->level),
-                'platform' => 'symfony',
+                'source' => 'backend',
                 'timestamp' => $record->datetime->format(\DateTimeImmutable::ATOM),
             ];
         }
@@ -112,6 +145,8 @@ class ApplicationLoggerHandler extends AbstractProcessingHandler
 
     /**
      * Map Monolog level to Application Logger level.
+     *
+     * API accepts: debug, info, warning, error, fatal
      */
     private function mapLevel(Level $level): string
     {
@@ -120,40 +155,8 @@ class ApplicationLoggerHandler extends AbstractProcessingHandler
             Level::Info, Level::Notice => 'info',
             Level::Warning => 'warning',
             Level::Error => 'error',
-            Level::Critical, Level::Alert, Level::Emergency => 'critical',
+            Level::Critical, Level::Alert, Level::Emergency => 'fatal',
         };
-    }
-
-    /**
-     * Parse exception stack trace.
-     *
-     * @return array{frames: list<array<string, mixed>>}
-     */
-    private function parseStackTrace(\Throwable $exception): array
-    {
-        try {
-            $frames = [];
-
-            foreach ($exception->getTrace() as $trace) {
-                $frame = [
-                    'filename' => $trace['file'] ?? 'unknown',
-                    'lineno' => $trace['line'] ?? 0,
-                    'function' => $trace['function'] ?? 'unknown',
-                ];
-
-                if (isset($trace['class'])) {
-                    $frame['module'] = $trace['class'];
-                }
-
-                $frame['in_app'] = !str_contains($frame['filename'], '/vendor/');
-
-                $frames[] = $frame;
-            }
-
-            return ['frames' => array_reverse($frames)];
-        } catch (\Throwable) {
-            return ['frames' => []];
-        }
     }
 
     /**

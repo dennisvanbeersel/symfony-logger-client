@@ -49,6 +49,15 @@ class ApplicationLogger {
      * @param {number} [config.sessionTimeoutMinutes=30] Session timeout (max 120 min)
      * @param {number} [config.maxBufferSizeMB=5] Max localStorage buffer size (max 20MB)
      * @param {boolean} [config.exposeApi=true] Expose control API for developers
+     *
+     * Resilience Configuration (transport layer):
+     * @param {number} [config.circuitBreakerFailureThreshold=5] Failures before circuit opens
+     * @param {number} [config.circuitBreakerTimeoutMs=60000] Circuit breaker timeout (ms)
+     * @param {number} [config.storageQueueMaxSize=50] Max errors in offline queue
+     * @param {number} [config.storageQueueMaxAgeMs=86400000] Max age for queued errors (24h)
+     * @param {number} [config.rateLimiterMaxTokens=10] Max errors per minute
+     * @param {number} [config.rateLimiterRefillRate=0.167] Token refill rate (~10/min)
+     * @param {number} [config.deduplicationWindowMs=5000] Duplicate detection window (ms)
      */
     constructor(config) {
         // Validate required configuration
@@ -76,6 +85,15 @@ class ApplicationLogger {
             sessionTimeoutMinutes: 30,
             maxBufferSizeMB: 5,
             exposeApi: true,
+
+            // Resilience config (transport layer)
+            circuitBreakerFailureThreshold: 5,
+            circuitBreakerTimeoutMs: 60000, // 60 seconds
+            storageQueueMaxSize: 50,
+            storageQueueMaxAgeMs: 86400000, // 24 hours
+            rateLimiterMaxTokens: 10,
+            rateLimiterRefillRate: 0.167, // ~10 tokens per minute
+            deduplicationWindowMs: 5000, // 5 seconds
 
             // Merge user config
             ...config,
@@ -414,6 +432,12 @@ class ApplicationLogger {
             disable: () => {
                 if (this.config.sessionReplayEnabled) {
                     this.config.sessionReplayEnabled = false;
+
+                    // Clear the buffer save interval (prevents memory leak in SPAs)
+                    if (this.bufferSaveInterval) {
+                        clearInterval(this.bufferSaveInterval);
+                        this.bufferSaveInterval = null;
+                    }
 
                     // Clean up and save buffer
                     if (this.heatmap) {

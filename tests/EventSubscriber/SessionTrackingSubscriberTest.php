@@ -6,6 +6,7 @@ namespace ApplicationLogger\Bundle\Tests\EventSubscriber;
 
 use ApplicationLogger\Bundle\EventSubscriber\SessionTrackingSubscriber;
 use ApplicationLogger\Bundle\Service\ApiClient;
+use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -18,9 +19,8 @@ use Symfony\Component\HttpKernel\KernelEvents;
 
 final class SessionTrackingSubscriberTest extends TestCase
 {
-    private ApiClient $apiClient;
+    private MockObject&ApiClient $apiClient;
     private Session $session;
-    private ?object $security;
     private SessionTrackingSubscriber $subscriber;
 
     protected function setUp(): void
@@ -28,9 +28,6 @@ final class SessionTrackingSubscriberTest extends TestCase
         $this->apiClient = $this->createMock(ApiClient::class);
         $this->session = new Session(new MockArraySessionStorage());
         $this->session->start(); // Start the session
-
-        // Security is nullable, so just pass null
-        $this->security = null;
 
         $config = [
             'enabled' => true,
@@ -42,8 +39,7 @@ final class SessionTrackingSubscriberTest extends TestCase
 
         $this->subscriber = new SessionTrackingSubscriber(
             $this->apiClient,
-            $config,
-            $this->security
+            $config
         );
     }
 
@@ -206,8 +202,7 @@ final class SessionTrackingSubscriberTest extends TestCase
 
         $subscriber = new SessionTrackingSubscriber(
             $this->apiClient,
-            $disabledConfig,
-            $this->security
+            $disabledConfig
         );
 
         $request = Request::create('/test');

@@ -58,7 +58,7 @@ final class ApiClientSessionTest extends TestCase
         // Should not throw exception even with invalid DSN
         $this->apiClient->createSession($sessionData);
 
-        $this->assertTrue(true); // If we get here, test passed
+        $this->addToAssertionCount(1); // If we get here, test passed
     }
 
     public function testAddSessionEventDoesNotThrow(): void
@@ -73,7 +73,7 @@ final class ApiClientSessionTest extends TestCase
         // Should not throw exception
         $this->apiClient->addSessionEvent($sessionId, $eventData);
 
-        $this->assertTrue(true);
+        $this->addToAssertionCount(1);
     }
 
     public function testEndSessionDoesNotThrow(): void
@@ -84,7 +84,7 @@ final class ApiClientSessionTest extends TestCase
         // Should not throw exception
         $this->apiClient->endSession($sessionId, $endedAt);
 
-        $this->assertTrue(true);
+        $this->addToAssertionCount(1);
     }
 
     public function testEndSessionWithoutTimestampDoesNotThrow(): void
@@ -94,7 +94,7 @@ final class ApiClientSessionTest extends TestCase
         // Should not throw exception (will use current time)
         $this->apiClient->endSession($sessionId);
 
-        $this->assertTrue(true);
+        $this->addToAssertionCount(1);
     }
 
     public function testCircuitBreakerPreventsCallsWhenOpen(): void
@@ -116,7 +116,7 @@ final class ApiClientSessionTest extends TestCase
         $this->apiClient->endSession('test');
 
         // If we get here, the circuit breaker is working (no exceptions thrown)
-        $this->assertTrue(true);
+        $this->addToAssertionCount(1);
     }
 
     public function testCreateSessionAddsDefaultTimestamp(): void
@@ -130,7 +130,7 @@ final class ApiClientSessionTest extends TestCase
         // Should not throw - timestamp will be added
         $this->apiClient->createSession($sessionData);
 
-        $this->assertTrue(true);
+        $this->addToAssertionCount(1);
     }
 
     public function testAddSessionEventAddsDefaultTimestamp(): void
@@ -145,7 +145,7 @@ final class ApiClientSessionTest extends TestCase
         // Should not throw - timestamp will be added
         $this->apiClient->addSessionEvent($sessionId, $eventData);
 
-        $this->assertTrue(true);
+        $this->addToAssertionCount(1);
     }
 
     public function testMultipleSessionCallsDoNotThrow(): void
@@ -170,6 +170,6 @@ final class ApiClientSessionTest extends TestCase
         $this->apiClient->endSession($sessionId);
 
         // If we get here, all calls succeeded
-        $this->assertTrue(true);
+        $this->addToAssertionCount(1);
     }
 }

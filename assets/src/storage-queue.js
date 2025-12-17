@@ -1,5 +1,5 @@
 /**
- * Local Storage Queue
+ * Local Storage Queue for JavaScript
  *
  * Buffers failed error submissions in localStorage for later retry.
  * Used when the API is unreachable or circuit breaker is open.
@@ -8,16 +8,37 @@
  * - FIFO queue with size limits
  * - Automatic expiration of old errors
  * - Safe storage operations (never crash on quota exceeded)
+ *
+ * @example
+ * const queue = new StorageQueue({ maxSize: 50, maxAge: 86400000 });
+ * queue.enqueue({ message: 'Error', stack: '...' });
+ * const error = queue.dequeue(); // Returns oldest error or null
  */
 export class StorageQueue {
+    /**
+     * Create a new StorageQueue instance
+     *
+     * @param {Object} [config={}] - Configuration options
+     * @param {number} [config.maxSize=50] - Maximum items to store
+     * @param {number} [config.maxAge=86400000] - Maximum age in ms (default 24h)
+     */
     constructor(config = {}) {
+        /** @type {string} localStorage key for the queue */
         this.storageKey = 'app_logger_queue';
-        this.maxSize = config.maxSize || 50; // Max errors to store
-        this.maxAge = config.maxAge || 86400000; // 24 hours in milliseconds
+        /** @type {number} Maximum items to store */
+        this.maxSize = config.maxSize || 50;
+        /** @type {number} Maximum age in milliseconds */
+        this.maxAge = config.maxAge || 86400000;
     }
 
     /**
      * Add an error to the queue
+     *
+     * Adds the payload with a timestamp for expiration tracking.
+     * Automatically removes oldest items if maxSize is exceeded.
+     *
+     * @param {Object} payload - Error data to queue
+     * @returns {void}
      */
     enqueue(payload) {
         try {
@@ -45,7 +66,9 @@ export class StorageQueue {
     }
 
     /**
-     * Get next error from queue (FIFO)
+     * Get and remove next error from queue (FIFO)
+     *
+     * @returns {Object|null} Oldest queued payload, or null if empty
      */
     dequeue() {
         try {
@@ -65,7 +88,9 @@ export class StorageQueue {
     }
 
     /**
-     * Get all queued errors
+     * Get all queued errors without removing them
+     *
+     * @returns {Object[]} Array of queued payloads
      */
     getAll() {
         const queue = this.getQueue();
@@ -73,7 +98,9 @@ export class StorageQueue {
     }
 
     /**
-     * Get queue size
+     * Get current queue size
+     *
+     * @returns {number} Number of items in queue
      */
     size() {
         const queue = this.getQueue();
@@ -81,7 +108,9 @@ export class StorageQueue {
     }
 
     /**
-     * Clear the queue
+     * Clear all items from the queue
+     *
+     * @returns {void}
      */
     clear() {
         try {
@@ -92,7 +121,12 @@ export class StorageQueue {
     }
 
     /**
-     * Get queue from localStorage with expiration cleanup
+     * Get queue from localStorage with expiration cleanup (internal)
+     *
+     * Automatically removes expired items based on maxAge.
+     *
+     * @private
+     * @returns {Array<{payload: Object, timestamp: number}>} Queue items with metadata
      */
     getQueue() {
         try {
@@ -126,7 +160,13 @@ export class StorageQueue {
     }
 
     /**
-     * Save queue to localStorage
+     * Save queue to localStorage (internal)
+     *
+     * Handles QuotaExceededError by trimming oldest items.
+     *
+     * @private
+     * @param {Array<{payload: Object, timestamp: number}>} queue - Queue items to save
+     * @returns {void}
      */
     saveQueue(queue) {
         try {

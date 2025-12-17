@@ -6,7 +6,6 @@ namespace ApplicationLogger\Bundle\EventSubscriber;
 
 use ApplicationLogger\Bundle\Service\ApiClient;
 use Psr\Log\LoggerInterface;
-use Symfony\Bundle\SecurityBundle\Security as SecurityHelper;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\Session\SessionInterface;
 use Symfony\Component\HttpKernel\Event\RequestEvent;
@@ -31,7 +30,6 @@ class SessionTrackingSubscriber implements EventSubscriberInterface
     public function __construct(
         private readonly ApiClient $apiClient,
         private readonly array $config,
-        private readonly ?SecurityHelper $security = null,
         private readonly ?LoggerInterface $logger = null,
     ) {
     }

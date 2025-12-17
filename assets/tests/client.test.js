@@ -304,7 +304,8 @@ describe('Client', () => {
             const payload = client.buildPayload(error, 'error');
 
             expect(payload.file).toBe('unknown');
-            expect(payload.line).toBe(0);
+            // API requires line > 0 (Positive constraint), so default is 1
+            expect(payload.line).toBe(1);
             expect(Array.isArray(payload.stack_trace)).toBe(true);
         });
 
@@ -472,6 +473,45 @@ handler@/path/to/handler.js:20:10`;
             expect(hash).toMatch(/^[a-f0-9]{64}$/);
             expect(hash.length).toBe(64);
         });
+
+        test('initSessionHash pre-computes hash asynchronously', async () => {
+            // Create fresh client without cached hash
+            const freshClient = new Client(config, mockTransport, mockBreadcrumbs, null, null);
+
+            // Initially no cached hash
+            expect(freshClient.cachedSessionHash).toBeNull();
+
+            // Call initSessionHash (uses Web Crypto API or fallback)
+            await freshClient.initSessionHash();
+
+            // Should now have cached hash
+            expect(freshClient.cachedSessionHash).not.toBeNull();
+            expect(freshClient.cachedSessionHash).toMatch(/^[a-f0-9]{64}$/);
+        });
+
+        test('getSessionHash returns cached hash after init', async () => {
+            const freshClient = new Client(config, mockTransport, mockBreadcrumbs, null, null);
+
+            await freshClient.initSessionHash();
+            const cachedHash = freshClient.cachedSessionHash;
+
+            // getSessionHash should return the cached value
+            const returnedHash = freshClient.getSessionHash();
+            expect(returnedHash).toBe(cachedHash);
+        });
+
+        test('config.sessionHash takes precedence over computed hash', async () => {
+            const configWithHash = {
+                ...config,
+                sessionHash: 'a'.repeat(64), // Custom session hash
+            };
+
+            const clientWithHash = new Client(configWithHash, mockTransport, mockBreadcrumbs, null, null);
+            await clientWithHash.initSessionHash();
+
+            // Should return config hash, not computed hash
+            expect(clientWithHash.getSessionHash()).toBe('a'.repeat(64));
+        });
     });
 
     describe('HTTP method detection', () => {
@@ -569,6 +609,108 @@ handler@/path/to/handler.js:20:10`;
             expect(payload.breadcrumbs.length).toBe(1);
             expect(replayData).toBeDefined();
             expect(replayData.sessionId).toBe('test-session-id');
+        });
+    });
+
+    describe('Click Event Counting (countClickEvents)', () => {
+        test('returns 0 for empty array', () => {
+            const count = client.countClickEvents([]);
+            expect(count).toBe(0);
+        });
+
+        test('returns 0 for null', () => {
+            const count = client.countClickEvents(null);
+            expect(count).toBe(0);
+        });
+
+        test('returns 0 for undefined', () => {
+            const count = client.countClickEvents(undefined);
+            expect(count).toBe(0);
+        });
+
+        test('returns 0 for non-array inputs', () => {
+            expect(client.countClickEvents('not an array')).toBe(0);
+            expect(client.countClickEvents(123)).toBe(0);
+            expect(client.countClickEvents({})).toBe(0);
+        });
+
+        test('correctly counts click events', () => {
+            const events = [
+                { type: 'click', target: 'button.submit' },
+                { type: 'navigation', url: '/page' },
+                { type: 'click', target: 'a.link' },
+                { type: 'dom_snapshot', html: '<div>content</div>' },
+                { type: 'click', target: 'input.checkbox' },
+            ];
+
+            const count = client.countClickEvents(events);
+            expect(count).toBe(3);
+        });
+
+        test('returns 0 when no click events exist', () => {
+            const events = [
+                { type: 'navigation', url: '/page' },
+                { type: 'dom_snapshot', html: '<div>content</div>' },
+                { type: 'scroll', position: 100 },
+            ];
+
+            const count = client.countClickEvents(events);
+            expect(count).toBe(0);
+        });
+
+        test('handles events without type property', () => {
+            const events = [
+                { type: 'click', target: 'button' },
+                { target: 'button' }, // Missing type
+                { type: 'click', target: 'a.link' },
+            ];
+
+            const count = client.countClickEvents(events);
+            expect(count).toBe(2);
+        });
+
+        test('handles malformed events gracefully', () => {
+            const events = [
+                { type: 'click', target: 'button' },  // Valid
+                null,  // Malformed
+                'invalid',  // Malformed
+                123,  // Malformed
+                { type: 'navigation', url: '/page' },  // Valid non-click
+                { type: 'click', target: 'a.link' },  // Valid click
+            ];
+
+            const count = client.countClickEvents(events);
+            expect(count).toBe(2);
+        });
+
+        test('is case-sensitive for event types', () => {
+            const events = [
+                { type: 'click', target: 'button' },    // Valid: lowercase
+                { type: 'Click', target: 'button' },    // Invalid: uppercase C
+                { type: 'CLICK', target: 'button' },    // Invalid: all uppercase
+                { type: 'click', target: 'a.link' },    // Valid: lowercase
+            ];
+
+            const count = client.countClickEvents(events);
+            expect(count).toBe(2); // Only lowercase "click" matches
+        });
+
+        test('handles large arrays efficiently', () => {
+            const events = [];
+            for (let i = 0; i < 1000; i++) {
+                if (i % 10 === 0) {
+                    events.push({ type: 'click', target: `button${i}` });
+                } else {
+                    events.push({ type: 'navigation', url: `/page${i}` });
+                }
+            }
+
+            const startTime = Date.now();
+            const count = client.countClickEvents(events);
+            const endTime = Date.now();
+
+            expect(count).toBe(100);
+            expect(endTime - startTime).toBeLessThan(100); // Should complete in <100ms
         });
     });
 });

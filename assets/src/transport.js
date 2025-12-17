@@ -21,25 +21,25 @@ export class Transport {
         this.queue = [];
         this.sending = false;
 
-        // Initialize resilience components
+        // Initialize resilience components (configurable via SDK config)
         this.circuitBreaker = new CircuitBreaker({
-            failureThreshold: 5,
-            timeout: 60000, // 60 seconds
+            failureThreshold: config.circuitBreakerFailureThreshold ?? 5,
+            timeout: config.circuitBreakerTimeoutMs ?? 60000,
         });
 
         this.storageQueue = new StorageQueue({
-            maxSize: 50,
-            maxAge: 86400000, // 24 hours
+            maxSize: config.storageQueueMaxSize ?? 50,
+            maxAge: config.storageQueueMaxAgeMs ?? 86400000,
         });
 
         this.rateLimiter = new RateLimiter({
-            maxTokens: 10, // Max 10 errors per minute
-            refillRate: 0.167, // Refill ~10 tokens per minute
+            maxTokens: config.rateLimiterMaxTokens ?? 10,
+            refillRate: config.rateLimiterRefillRate ?? 0.167,
         });
 
-        // Deduplication cache
+        // Deduplication cache (configurable via SDK config)
         this.recentErrors = new Map();
-        this.deduplicationWindow = 5000; // 5 seconds
+        this.deduplicationWindow = config.deduplicationWindowMs ?? 5000;
 
         // Try to flush stored errors on init
         this.flushStoredErrors();
@@ -165,7 +165,13 @@ export class Transport {
 
             // Use sendBeacon for page unload (synchronous, guaranteed delivery)
             if (useBeacon && navigator.sendBeacon) {
-                const blob = new Blob([JSON.stringify(recoveryPayload)], {
+                // sendBeacon cannot send custom headers, so include API key in body
+                const payloadWithAuth = {
+                    ...recoveryPayload,
+                    apiKey: this.apiKey,
+                };
+
+                const blob = new Blob([JSON.stringify(payloadWithAuth)], {
                     type: 'application/json',
                 });
 
@@ -332,14 +338,17 @@ export class Transport {
 
     /**
    * Check if error is a duplicate
+   *
+   * Payload uses flat structure (not nested exception object):
+   * {type, message, file, line, stack_trace, ...}
    */
     isDuplicate(payload) {
         try {
-            // Create hash from error signature
+            // Create hash from error signature (flat payload structure)
             const signature = JSON.stringify({
-                type: payload.exception?.type,
-                message: payload.exception?.value,
-                stack: payload.exception?.stacktrace?.frames?.slice(0, 3), // Top 3 frames
+                type: payload.type,
+                message: payload.message,
+                stack: payload.stack_trace?.slice(0, 3), // Top 3 frames
             });
 
             const hash = this.simpleHash(signature);

@@ -15,6 +15,21 @@ export class BreadcrumbCollector {
     }
 
     /**
+   * Get className as string (handles both HTML and SVG elements)
+   * @param {Element} element - DOM element
+   * @returns {string} - className as string
+   */
+    getClassName(element) {
+        if (!element.className) return '';
+        // For SVG elements, className is an SVGAnimatedString
+        if (typeof element.className === 'object' && element.className.baseVal !== undefined) {
+            return element.className.baseVal;
+        }
+        // For HTML elements, className is a string
+        return element.className;
+    }
+
+    /**
    * Install automatic breadcrumb tracking (idempotent)
    */
     install() {
@@ -31,18 +46,7 @@ export class BreadcrumbCollector {
             const tagName = target.tagName.toLowerCase();
             let message = `Clicked ${tagName}`;
 
-            // Get className as string (handle SVG elements)
-            const getClassName = (element) => {
-                if (!element.className) return '';
-                // For SVG elements, className is an SVGAnimatedString
-                if (typeof element.className === 'object' && element.className.baseVal !== undefined) {
-                    return element.className.baseVal;
-                }
-                // For HTML elements, className is a string
-                return element.className;
-            };
-
-            const className = getClassName(target);
+            const className = this.getClassName(target);
 
             if (target.id) {
                 message += `#${target.id}`;

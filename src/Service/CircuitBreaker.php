@@ -65,6 +65,12 @@ class CircuitBreaker
             $this->halfOpen();
         }
 
+        // In half-open state, track test attempts
+        if (self::STATE_HALF_OPEN === $this->state) {
+            ++$this->halfOpenAttempts;
+            $this->saveState();
+        }
+
         return self::STATE_OPEN === $this->state;
     }
 
@@ -105,8 +111,13 @@ class CircuitBreaker
         }
 
         if (self::STATE_HALF_OPEN === $this->state) {
-            // Failure in half-open state = circuit opens again
-            $this->open();
+            // In half-open state, only reopen circuit if max attempts exhausted
+            if ($this->halfOpenAttempts >= $this->maxHalfOpenAttempts) {
+                $this->open();
+            } else {
+                // Allow more test attempts
+                $this->saveState();
+            }
         } elseif (self::STATE_CLOSED === $this->state) {
             ++$this->failureCount;
 

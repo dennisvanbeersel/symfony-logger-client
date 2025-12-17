@@ -64,7 +64,7 @@ class ContextCollector
 
             return [
                 'url' => $request->getUri(),
-                'method' => $request->getMethod(),
+                'method' => $this->sanitizeHttpMethod($request->getMethod()),
                 'query_string' => $request->getQueryString(),
                 'headers' => $this->scrubSensitiveData($headers),
                 'data' => $this->scrubSensitiveData($request->request->all()),
@@ -108,10 +108,39 @@ class ContextCollector
             }
 
             return [
-                'id' => $session->getId(),
                 'ip_address' => $this->anonymizeIp($request->getClientIp()),
                 'session_id' => $session->getId(),
             ];
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * Get session hash for GDPR-compliant session tracking.
+     *
+     * Returns SHA-256 hash of the Application Logger session ID if available.
+     * This ensures sessions can be correlated without storing identifiable data.
+     *
+     * @return string|null 64-character hex hash, or null if no session
+     */
+    public function getSessionHash(): ?string
+    {
+        try {
+            $request = $this->requestStack->getCurrentRequest();
+
+            if (null === $request || !$request->hasSession()) {
+                return null;
+            }
+
+            $session = $request->getSession();
+            $sessionId = $session->get('_application_logger_session_id');
+
+            if (null !== $sessionId && \is_string($sessionId)) {
+                return hash('sha256', $sessionId);
+            }
+
+            return null;
         } catch (\Throwable) {
             return null;
         }
@@ -140,7 +169,7 @@ class ContextCollector
 
                 // Parse server name and version
                 if (preg_match('/^([^\/\s]+)(?:\/([^\s]+))?/', $serverSoftware, $matches)) {
-                    $serverInfo['server_product'] = $matches[1] ?? 'unknown';
+                    $serverInfo['server_product'] = $matches[1];
                     $serverInfo['server_version'] = $matches[2] ?? 'unknown';
                 }
             }
@@ -155,7 +184,6 @@ class ContextCollector
             }
 
             return $serverInfo;
-            // @phpstan-ignore-next-line catch.neverThrown
         } catch (\Throwable) {
             // Defensive catch for resilience - even though nothing should throw
             return [];
@@ -198,6 +226,20 @@ class ContextCollector
             // If scrubbing fails, return empty array (safe default)
             return [];
         }
+    }
+
+    /**
+     * Sanitize HTTP method to allowed API values.
+     *
+     * API only accepts: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS
+     * Other methods (TRACE, CONNECT, PROPFIND, etc.) return null to avoid validation errors.
+     */
+    private function sanitizeHttpMethod(string $method): ?string
+    {
+        $allowedMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+        $method = strtoupper($method);
+
+        return \in_array($method, $allowedMethods, true) ? $method : null;
     }
 
     /**

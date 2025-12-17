@@ -58,7 +58,6 @@ services:
                 idle_timeout: '%application_logger.session_tracking.idle_timeout%'
                 ignored_routes: '%application_logger.session_tracking.ignored_routes%'
                 ignored_paths: '%application_logger.session_tracking.ignored_paths%'
-            $security: '@?security.helper'
             $logger: '@?logger'
         tags:
             - { name: kernel.event_subscriber }

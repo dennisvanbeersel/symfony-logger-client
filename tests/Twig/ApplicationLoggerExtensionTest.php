@@ -290,7 +290,7 @@ class ApplicationLoggerExtensionTest extends TestCase
                 return 'user-123';
             }
 
-            public function getEmail(): ?string
+            public function getEmail(): null
             {
                 return null; // Email can be null
             }
@@ -325,10 +325,16 @@ class ApplicationLoggerExtensionTest extends TestCase
         $extension = new ApplicationLoggerExtension($config);
         $output = $extension->renderInit();
 
-        // JSON_HEX_TAG should escape < and >
+        // JSON_HEX_TAG should escape < and > in the environment value
+        // The output will contain real <script> tags for the SDK, but the
+        // environment JSON value should have escaped characters
         $this->assertStringContainsString('\\u003C', $output); // <
         $this->assertStringContainsString('\\u003E', $output); // >
-        $this->assertStringNotContainsString('<script>', $output);
+
+        // Check that the malicious environment value is properly escaped
+        // (not that there are no script tags, since the SDK needs script tags)
+        $this->assertStringContainsString('\\u003Cscript\\u003Ealert', $output);
+        $this->assertStringNotContainsString('"environment":"<script>', $output);
     }
 
     public function testRenderInitEscapesAmpersandsInJson(): void

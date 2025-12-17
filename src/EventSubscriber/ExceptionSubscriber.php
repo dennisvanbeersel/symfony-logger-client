@@ -7,6 +7,7 @@ namespace ApplicationLogger\Bundle\EventSubscriber;
 use ApplicationLogger\Bundle\Service\ApiClient;
 use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
 use ApplicationLogger\Bundle\Service\ContextCollector;
+use ApplicationLogger\Bundle\Util\StackTraceParserTrait;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Event\ExceptionEvent;
@@ -28,6 +29,8 @@ use Symfony\Component\HttpKernel\KernelEvents;
  */
 class ExceptionSubscriber implements EventSubscriberInterface
 {
+    use StackTraceParserTrait;
+
     public function __construct(
         private readonly ApiClient $apiClient,
         private readonly ContextCollector $contextCollector,
@@ -101,21 +104,12 @@ class ExceptionSubscriber implements EventSubscriberInterface
             // Extract HTTP status code from exception
             $httpStatusCode = $this->extractHttpStatusCode($exception);
 
-            // Get session hash if available (GDPR-compliant session tracking)
-            $sessionHash = null;
-            if ($request->hasSession()) {
-                $session = $request->getSession();
-                $sessionId = $session->get('_application_logger_session_id');
-                if (null !== $sessionId && \is_string($sessionId)) {
-                    $sessionHash = hash('sha256', $sessionId);
-                }
-            }
-
             return [
                 // Required fields (flat structure with snake_case)
-                'type' => \get_class($exception),
-                'message' => $exception->getMessage(),
-                'file' => $exception->getFile(),
+                // Apply length limits to prevent API validation failures
+                'type' => $this->truncate(\get_class($exception), 255),
+                'message' => $this->truncate($exception->getMessage(), 1000),
+                'file' => $this->truncate($exception->getFile(), 500),
                 'line' => $exception->getLine(),
                 'stack_trace' => $this->parseStackTrace($exception),
 
@@ -124,15 +118,15 @@ class ExceptionSubscriber implements EventSubscriberInterface
                 'source' => 'backend',
                 'environment' => $context['environment'] ?? 'production',
                 'release' => $context['release'] ?? null,
-                'session_hash' => $sessionHash,
-                'timestamp' => new \DateTimeImmutable(),
-                'server_name' => $context['server']['name'] ?? null,
+                'session_hash' => $this->contextCollector->getSessionHash(),
+                'timestamp' => (new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM),
+                'server_name' => $context['server']['server_name'] ?? null,
                 'url' => $context['request']['url'] ?? null,
                 'http_method' => $context['request']['method'] ?? null,
                 'http_status_code' => $httpStatusCode,
-                'ip_address' => $context['request']['ip'] ?? null,
-                'user_agent' => $context['request']['user_agent'] ?? null,
-                'runtime' => 'PHP '.PHP_VERSION,
+                'ip_address' => $context['request']['env']['REMOTE_ADDR'] ?? null,
+                'user_agent' => $context['request']['env']['HTTP_USER_AGENT'] ?? null,
+                'runtime' => 'PHP '.\PHP_VERSION,
                 'breadcrumbs' => $this->breadcrumbCollector->get(),
                 'request_data' => $context['request'] ?? null,
                 'context' => $context['server'] ?? [],
@@ -144,14 +138,14 @@ class ExceptionSubscriber implements EventSubscriberInterface
         } catch (\Throwable) {
             // If payload building fails, return minimal payload
             return [
-                'type' => \get_class($exception),
-                'message' => $exception->getMessage(),
-                'file' => $exception->getFile(),
+                'type' => $this->truncate(\get_class($exception), 255),
+                'message' => $this->truncate($exception->getMessage(), 1000),
+                'file' => $this->truncate($exception->getFile(), 500),
                 'line' => $exception->getLine(),
                 'stack_trace' => [],
                 'level' => 'error',
                 'source' => 'backend',
-                'timestamp' => new \DateTimeImmutable(),
+                'timestamp' => (new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM),
                 'http_status_code' => 500, // Default to 500 for uncaught exceptions
             ];
         }
@@ -174,37 +168,5 @@ class ExceptionSubscriber implements EventSubscriberInterface
 
         // Default to 500 Internal Server Error for uncaught exceptions
         return 500;
-    }
-
-    /**
-     * Parse exception stack trace.
-     *
-     * @return list<array<string, mixed>>
-     */
-    private function parseStackTrace(\Throwable $exception): array
-    {
-        try {
-            $frames = [];
-
-            foreach ($exception->getTrace() as $trace) {
-                $frame = [
-                    'file' => $trace['file'] ?? 'unknown',
-                    'line' => $trace['line'] ?? 0,
-                    'function' => $trace['function'] ?? 'unknown',
-                    'class' => $trace['class'] ?? null,
-                    'type' => $trace['type'] ?? null,
-                ];
-
-                // Determine if frame is in application code (not vendor)
-                $frame['in_app'] = !str_contains($frame['file'], '/vendor/');
-
-                $frames[] = $frame;
-            }
-
-            // Reverse frames to show root cause first
-            return array_reverse($frames);
-        } catch (\Throwable) {
-            return [];
-        }
     }
 }

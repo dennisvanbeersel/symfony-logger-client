@@ -442,6 +442,17 @@ export class ErrorDetector {
                 return; // No recovery data
             }
 
+            // Only send if there are click events (user interactions)
+            const clickCount = events.filter(e => e && e.type === 'click').length;
+            if (clickCount === 0) {
+                if (this.config.debug) {
+                    console.warn('ErrorDetector: No click events in recovery session, skipping send', {
+                        totalEvents: events.length,
+                    });
+                }
+                return;
+            }
+
             // Format payload to match backend API expectations
             const recoveryPayload = {
                 sessionId: this.sessionManager.getSessionId(),

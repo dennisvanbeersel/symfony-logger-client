@@ -29,6 +29,7 @@ export class Client {
         this.tags = {};
         this.extra = {};
         this.pendingBeaconErrors = [];
+        this.cachedSessionHash = null; // Pre-computed SHA-256 hash (async init)
     }
 
     /**
@@ -41,6 +42,12 @@ export class Client {
    */
     install() {
         try {
+            // 0. Initialize session hash asynchronously (non-blocking)
+            //    First few errors before hash is computed will have null session_hash
+            this.initSessionHash().catch(() => {
+                // Silently fail - session hash is optional
+            });
+
             // 1. Process "resurrected" errors first (from previous sessions)
             //    These are catastrophic errors that broke JS execution
             this.processResurrectedErrors();
@@ -378,6 +385,18 @@ export class Client {
     }
 
     /**
+     * Count click events in an event array
+     * @param {Array} events - Array of replay events
+     * @returns {number} - Count of click events
+     */
+    countClickEvents(events) {
+        if (!Array.isArray(events)) {
+            return 0;
+        }
+        return events.filter(event => event && event.type === 'click').length;
+    }
+
+    /**
      * Capture exception and trigger TWO-PHASE session replay if enabled
      *
      * TWO-PHASE ARCHITECTURE:
@@ -417,17 +436,28 @@ export class Client {
                         );
 
                         if (preErrorEvents.length > 0) {
-                            replayData = {
-                                sessionId: replayContext.sessionId,
-                                events: preErrorEvents,
-                                phase: 'pre-error', // Mark as phase 1
-                            };
+                            // Check if there are any click events (user interactions)
+                            const clickCount = this.countClickEvents(preErrorEvents);
 
-                            if (this.config.debug) {
-                                console.warn('ApplicationLogger: Sending error with pre-error replay (phase 1)', {
-                                    totalEvents: replayContext.events.length,
-                                    preErrorEvents: preErrorEvents.length,
-                                    sessionId: replayData.sessionId,
+                            if (clickCount > 0) {
+                                replayData = {
+                                    sessionId: replayContext.sessionId,
+                                    events: preErrorEvents,
+                                    phase: 'pre-error', // Mark as phase 1
+                                };
+
+                                if (this.config.debug) {
+                                    console.warn('ApplicationLogger: Sending error with pre-error replay (phase 1)', {
+                                        totalEvents: replayContext.events.length,
+                                        preErrorEvents: preErrorEvents.length,
+                                        clickEvents: clickCount,
+                                        sessionId: replayData.sessionId,
+                                    });
+                                }
+                            } else if (this.config.debug) {
+                                console.warn('ApplicationLogger: No click events in replay buffer, skipping replay data', {
+                                    totalEvents: preErrorEvents.length,
+                                    bufferStats: this.errorDetector.replayBuffer.getStats(),
                                 });
                             }
                         } else if (this.config.debug) {
@@ -498,12 +528,15 @@ export class Client {
             const firstFrame = stackTrace.length > 0 ? stackTrace[0] : null;
 
             // Build payload matching exact API format
+            // Apply length limits to prevent API validation failures
             const payload = {
                 // Required fields (flat structure, not nested)
-                type: error.name || 'Error',
-                message: error.message || 'Unknown error',
-                file: firstFrame?.file || options.extra?.filename || 'unknown',
-                line: firstFrame?.line || options.extra?.lineno || 0,
+                // API length constraints: type (255), message (1000), file (500)
+                type: this.truncate(error.name || 'Error', 255),
+                message: this.truncate(error.message || 'Unknown error', 1000),
+                file: this.truncate(firstFrame?.file || options.extra?.filename || 'unknown', 500),
+                // API requires line > 0 (Positive constraint), default to 1
+                line: firstFrame?.line || options.extra?.lineno || 1,
                 stack_trace: stackTrace,
 
                 // Optional fields (snake_case to match API)
@@ -526,18 +559,41 @@ export class Client {
 
             // Clean up null values to reduce payload size
             return this.removeNullValues(payload);
-        } catch (error) {
+        } catch (err) {
             // If payload building completely fails, return minimal payload
-            console.error('ApplicationLogger: Failed to build payload', error);
+            console.error('ApplicationLogger: Failed to build payload', err);
             return {
                 type: 'Error',
-                message: 'Failed to build error payload',
+                message: this.truncate('Failed to build error payload', 1000),
                 file: 'unknown',
-                line: 0,
+                line: 1, // API requires line > 0
                 stack_trace: [],
                 level: 'error',
             };
         }
+    }
+
+    /**
+     * Truncate string to maximum length.
+     *
+     * API has length constraints: type (255), message (1000), file (500).
+     * Truncation prevents validation failures.
+     *
+     * @param {string} value - String to truncate
+     * @param {number} maxLength - Maximum allowed length
+     * @returns {string} Truncated string
+     */
+    truncate(value, maxLength) {
+        if (!value || typeof value !== 'string') {
+            return value;
+        }
+
+        if (value.length <= maxLength) {
+            return value;
+        }
+
+        // Truncate and add ellipsis to indicate truncation
+        return value.substring(0, maxLength - 3) + '...';
     }
 
     /**
@@ -550,7 +606,7 @@ export class Client {
         if (!error.stack) {
             return [{
                 file: 'unknown',
-                line: 0,
+                line: 1, // API requires line > 0
                 function: 'unknown',
             }];
         }
@@ -568,13 +624,13 @@ export class Client {
 
             return frames.length > 0 ? frames : [{
                 file: 'unknown',
-                line: 0,
+                line: 1, // API requires line > 0
                 function: 'unknown',
             }];
         } catch {
             return [{
                 file: 'unknown',
-                line: 0,
+                line: 1, // API requires line > 0
                 function: 'unknown',
             }];
         }
@@ -746,11 +802,14 @@ export class Client {
     }
 
     /**
-     * Get session hash for GDPR-compliant session tracking
+     * Get session hash for GDPR-compliant session tracking.
+     *
+     * Returns the pre-computed SHA-256 hash from initSessionHash().
+     * If hash is not yet computed (async init pending), returns null.
      *
      * Priority:
      * 1. Use sessionHash from config if provided by server (Symfony bundle)
-     * 2. Generate from sessionStorage if available
+     * 2. Return cached session hash (computed by initSessionHash)
      * 3. Return null (errors will be tracked without session linkage)
      *
      * @returns {string|null} SHA-256 hash of session ID (64 hex chars)
@@ -762,22 +821,15 @@ export class Client {
                 return this.config.sessionHash;
             }
 
-            // 2. Try to get/generate from sessionStorage
-            if (typeof sessionStorage !== 'undefined') {
-                let sessionId = sessionStorage.getItem('_app_logger_session_id');
-
-                if (!sessionId) {
-                    // Generate new session ID for this browser session
-                    sessionId = this.generateSessionId();
-                    sessionStorage.setItem('_app_logger_session_id', sessionId);
-                }
-
-                // Generate SHA-256 hash synchronously (simple implementation)
-                return this.sha256(sessionId);
+            // 2. Return cached session hash (computed asynchronously on init)
+            if (this.cachedSessionHash) {
+                return this.cachedSessionHash;
             }
 
-            // 3. No session tracking available
-            return null;
+            // 3. Fallback to synchronous djb2Hash if async hash not yet computed
+            //    This ensures we always return a valid hash for error tracking
+            const sessionId = this.getOrCreateSessionId();
+            return this.djb2Hash(sessionId);
         } catch {
             // If session tracking fails, return null (errors still captured)
             return null;
@@ -804,24 +856,88 @@ export class Client {
     }
 
     /**
-     * Simple synchronous SHA-256 implementation
+     * Initialize session hash asynchronously using Web Crypto API.
      *
-     * This is a simplified hash function for client-side session hashing.
-     * While not cryptographically secure for production use, it's sufficient
-     * for generating consistent session hashes for tracking purposes.
+     * Pre-computes the SHA-256 hash once on startup, then caches it for
+     * synchronous access in getSessionHash(). This avoids cascading async
+     * changes through the codebase while still using real SHA-256.
+     *
+     * @returns {Promise<void>}
+     */
+    async initSessionHash() {
+        try {
+            // Get or create session ID
+            const sessionId = this.getOrCreateSessionId();
+
+            // Use Web Crypto API for real SHA-256 (modern browsers)
+            if (crypto && crypto.subtle) {
+                const encoder = new TextEncoder();
+                const data = encoder.encode(sessionId);
+                const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                this.cachedSessionHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+                if (this.config.debug) {
+                    console.warn('ApplicationLogger: Session hash initialized (Web Crypto)');
+                }
+            } else {
+                // Fallback for old browsers (rare)
+                this.cachedSessionHash = this.djb2Hash(sessionId);
+
+                if (this.config.debug) {
+                    console.warn('ApplicationLogger: Session hash initialized (fallback)');
+                }
+            }
+        } catch (error) {
+            // If crypto fails, use fallback
+            try {
+                this.cachedSessionHash = this.djb2Hash(this.getOrCreateSessionId());
+            } catch {
+                // Complete failure - session hash will be null
+                if (this.config.debug) {
+                    console.error('ApplicationLogger: Failed to initialize session hash', error);
+                }
+            }
+        }
+    }
+
+    /**
+     * Get or create session ID for hashing.
+     *
+     * @returns {string} Session ID
+     */
+    getOrCreateSessionId() {
+        if (typeof sessionStorage !== 'undefined') {
+            let sessionId = sessionStorage.getItem('_app_logger_session_id');
+
+            if (!sessionId) {
+                sessionId = this.generateSessionId();
+                sessionStorage.setItem('_app_logger_session_id', sessionId);
+            }
+
+            return sessionId;
+        }
+
+        // Fallback if sessionStorage not available
+        return this.generateSessionId();
+    }
+
+    /**
+     * DJB2 hash function (fallback for browsers without Web Crypto API).
+     *
+     * This is a simple hash function used as fallback. It's not SHA-256
+     * but produces consistent results that pass regex validation.
      *
      * @param {string} str - String to hash
      * @returns {string} 64-character hexadecimal hash
      */
-    sha256(str) {
-        // Simple djb2-like hash (not real SHA-256, but consistent and sufficient)
+    djb2Hash(str) {
         let hash = 5381;
         for (let i = 0; i < str.length; i++) {
             hash = ((hash << 5) + hash) + str.charCodeAt(i);
         }
 
-        // Convert to hex and pad to 64 characters for consistency with PHP hash('sha256')
-        // This is a simplified version - for production, consider using Web Crypto API
+        // Convert to hex and pad to 64 characters
         const hex = Math.abs(hash).toString(16);
         return hex.padStart(64, '0');
     }

@@ -305,16 +305,13 @@ describe('Transport', () => {
                 json: async () => ({ success: true }),
             });
 
+            // Uses flat payload structure matching API spec
             const payload = {
-                exception: {
-                    type: 'Error',
-                    value: 'Duplicate error',
-                    stacktrace: {
-                        frames: [
-                            { filename: 'test.js', lineno: 10 },
-                        ],
-                    },
-                },
+                type: 'Error',
+                message: 'Duplicate error',
+                stack_trace: [
+                    { file: 'test.js', line: 10, function: 'testFn', in_app: true },
+                ],
             };
 
             await transport.send(payload);
@@ -467,16 +464,13 @@ describe('Transport', () => {
 
     describe('Deduplication', () => {
         test('detects duplicate errors', () => {
+            // Uses flat payload structure matching API spec
             const payload = {
-                exception: {
-                    type: 'Error',
-                    value: 'Duplicate test',
-                    stacktrace: {
-                        frames: [
-                            { filename: 'test.js', lineno: 10 },
-                        ],
-                    },
-                },
+                type: 'Error',
+                message: 'Duplicate test',
+                stack_trace: [
+                    { file: 'test.js', line: 10, function: 'testFn', in_app: true },
+                ],
             };
 
             const isDup1 = transport.isDuplicate(payload);
@@ -487,18 +481,15 @@ describe('Transport', () => {
         });
 
         test('treats different errors as unique', () => {
+            // Uses flat payload structure matching API spec
             const payload1 = {
-                exception: {
-                    type: 'Error',
-                    value: 'Error 1',
-                },
+                type: 'Error',
+                message: 'Error 1',
             };
 
             const payload2 = {
-                exception: {
-                    type: 'Error',
-                    value: 'Error 2',
-                },
+                type: 'Error',
+                message: 'Error 2',
             };
 
             const isDup1 = transport.isDuplicate(payload1);
@@ -509,11 +500,10 @@ describe('Transport', () => {
         });
 
         test('cleans up old deduplication entries', () => {
+            // Uses flat payload structure matching API spec
             const payload = {
-                exception: {
-                    type: 'Error',
-                    value: 'Old error',
-                },
+                type: 'Error',
+                message: 'Old error',
             };
 
             transport.isDuplicate(payload);
@@ -523,8 +513,8 @@ describe('Transport', () => {
             const hash = Array.from(transport.recentErrors.keys())[0];
             transport.recentErrors.set(hash, Date.now() - 10000); // 10 seconds ago
 
-            // Trigger cleanup by checking another error
-            transport.isDuplicate({ exception: { type: 'New', value: 'New' } });
+            // Trigger cleanup by checking another error (flat structure)
+            transport.isDuplicate({ type: 'New', message: 'New' });
 
             // Old entry should be cleaned up (after deduplication window)
             expect(transport.recentErrors.size).toBe(1);

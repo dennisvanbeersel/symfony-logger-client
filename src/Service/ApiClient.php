@@ -25,12 +25,11 @@ class ApiClient
 {
     private readonly string $endpoint;
     private readonly string $publicKey;
-    private readonly string $projectId;
     private readonly HttpClientInterface $httpClient;
 
     public function __construct(
-        private readonly string $dsn,
-        private readonly string $apiKey,
+        string $dsn,
+        string $apiKey,
         private readonly float $timeout,
         private readonly int $retryAttempts,
         private readonly bool $async,
@@ -46,8 +45,7 @@ class ApiClient
         // Parse DSN and initialize readonly properties
         $parsed = $this->parseDsn($dsn);
         $this->endpoint = $parsed['endpoint'];
-        $this->publicKey = $apiKey; // Store API key from constructor parameter
-        $this->projectId = $parsed['projectId'];
+        $this->publicKey = $apiKey;
 
         // Create HTTP client with aggressive timeout configuration
         $this->httpClient = HttpClient::create([
@@ -55,6 +53,39 @@ class ApiClient
             'max_duration' => $this->timeout,
             'http_version' => '1.1', // HTTP/1.1 is more reliable than HTTP/2 for fire-and-forget
         ]);
+    }
+
+    /**
+     * Build API URL from path.
+     *
+     * Extracts host, scheme, and port from endpoint and builds full URL.
+     */
+    private function buildApiUrl(string $path): string
+    {
+        $host = parse_url($this->endpoint, \PHP_URL_HOST);
+        $scheme = parse_url($this->endpoint, \PHP_URL_SCHEME);
+        $port = parse_url($this->endpoint, \PHP_URL_PORT);
+
+        $hostWithPort = $host;
+        if (null !== $port) {
+            $hostWithPort .= ':'.$port;
+        }
+
+        return \sprintf('%s://%s%s', $scheme, $hostWithPort, $path);
+    }
+
+    /**
+     * Get common API headers.
+     *
+     * @return array<string, string>
+     */
+    private function getApiHeaders(): array
+    {
+        return [
+            'Content-Type' => 'application/json',
+            'X-Api-Key' => $this->publicKey,
+            'User-Agent' => 'ApplicationLogger-Symfony-Bundle/1.0',
+        ];
     }
 
     /**
@@ -297,22 +328,7 @@ class ApiClient
      */
     private function sendToSessionApi(array $sessionData): void
     {
-        $host = parse_url($this->endpoint, \PHP_URL_HOST);
-        $scheme = parse_url($this->endpoint, \PHP_URL_SCHEME);
-        $port = parse_url($this->endpoint, \PHP_URL_PORT);
-
-        $hostWithPort = $host;
-        if (null !== $port) {
-            $hostWithPort .= ':'.$port;
-        }
-
-        $url = \sprintf('%s://%s/api/v1/sessions', $scheme, $hostWithPort);
-
-        $headers = [
-            'Content-Type' => 'application/json',
-            'X-Api-Key' => $this->publicKey,
-            'User-Agent' => 'ApplicationLogger-Symfony-Bundle/1.0',
-        ];
+        $url = $this->buildApiUrl('/api/v1/sessions');
 
         try {
             $jsonBody = json_encode($sessionData, \JSON_THROW_ON_ERROR);
@@ -327,7 +343,7 @@ class ApiClient
         }
 
         $response = $this->httpClient->request('POST', $url, [
-            'headers' => $headers,
+            'headers' => $this->getApiHeaders(),
             'body' => $jsonBody,
             'timeout' => $this->timeout,
             'max_duration' => $this->timeout,
@@ -353,22 +369,7 @@ class ApiClient
      */
     private function sendToSessionEventApi(string $sessionId, array $eventData): void
     {
-        $host = parse_url($this->endpoint, \PHP_URL_HOST);
-        $scheme = parse_url($this->endpoint, \PHP_URL_SCHEME);
-        $port = parse_url($this->endpoint, \PHP_URL_PORT);
-
-        $hostWithPort = $host;
-        if (null !== $port) {
-            $hostWithPort .= ':'.$port;
-        }
-
-        $url = \sprintf('%s://%s/api/v1/sessions/%s/events', $scheme, $hostWithPort, $sessionId);
-
-        $headers = [
-            'Content-Type' => 'application/json',
-            'X-Api-Key' => $this->publicKey,
-            'User-Agent' => 'ApplicationLogger-Symfony-Bundle/1.0',
-        ];
+        $url = $this->buildApiUrl(\sprintf('/api/v1/sessions/%s/events', $sessionId));
 
         try {
             $jsonBody = json_encode($eventData, \JSON_THROW_ON_ERROR);
@@ -383,7 +384,7 @@ class ApiClient
         }
 
         $response = $this->httpClient->request('POST', $url, [
-            'headers' => $headers,
+            'headers' => $this->getApiHeaders(),
             'body' => $jsonBody,
             'timeout' => $this->timeout,
             'max_duration' => $this->timeout,
@@ -408,22 +409,7 @@ class ApiClient
      */
     private function sendToSessionEndApi(string $sessionId, array $data): void
     {
-        $host = parse_url($this->endpoint, \PHP_URL_HOST);
-        $scheme = parse_url($this->endpoint, \PHP_URL_SCHEME);
-        $port = parse_url($this->endpoint, \PHP_URL_PORT);
-
-        $hostWithPort = $host;
-        if (null !== $port) {
-            $hostWithPort .= ':'.$port;
-        }
-
-        $url = \sprintf('%s://%s/api/v1/sessions/%s/end', $scheme, $hostWithPort, $sessionId);
-
-        $headers = [
-            'Content-Type' => 'application/json',
-            'X-Api-Key' => $this->publicKey,
-            'User-Agent' => 'ApplicationLogger-Symfony-Bundle/1.0',
-        ];
+        $url = $this->buildApiUrl(\sprintf('/api/v1/sessions/%s/end', $sessionId));
 
         try {
             $jsonBody = json_encode($data, \JSON_THROW_ON_ERROR);
@@ -438,7 +424,7 @@ class ApiClient
         }
 
         $response = $this->httpClient->request('POST', $url, [
-            'headers' => $headers,
+            'headers' => $this->getApiHeaders(),
             'body' => $jsonBody,
             'timeout' => $this->timeout,
             'max_duration' => $this->timeout,

@@ -150,8 +150,15 @@ class JavaScriptInjectionSubscriberTest extends TestCase
 
         $modifiedContent = $event->getResponse()->getContent();
 
-        // Script should be injected before </body>
-        $this->assertStringContainsString('<script>console.log("test");</script></body>', $modifiedContent);
+        // Script should be injected before </body> (may have newline between)
+        $this->assertStringContainsString('<script>console.log("test");</script>', $modifiedContent);
+
+        // Verify script comes before closing body tag
+        $scriptPos = strpos($modifiedContent, '<script>console.log("test");</script>');
+        $bodyPos = strpos($modifiedContent, '</body>');
+        $this->assertNotFalse($scriptPos);
+        $this->assertNotFalse($bodyPos);
+        $this->assertLessThan($bodyPos, $scriptPos, 'Script should appear before </body>');
 
         // Original content should still be there
         $this->assertStringContainsString('<h1>Test</h1>', $modifiedContent);
@@ -180,8 +187,15 @@ class JavaScriptInjectionSubscriberTest extends TestCase
 
         $modifiedContent = $event->getResponse()->getContent();
 
-        // Script should be injected before </BODY> (case-insensitive)
-        $this->assertStringContainsString('<script>test</script></BODY>', $modifiedContent);
+        // Script should be injected before </BODY> (case-insensitive, may have newline between)
+        $this->assertStringContainsString('<script>test</script>', $modifiedContent);
+
+        // Verify script comes before closing body tag (case-insensitive)
+        $scriptPos = strpos($modifiedContent, '<script>test</script>');
+        $bodyPos = stripos($modifiedContent, '</BODY>');
+        $this->assertNotFalse($scriptPos);
+        $this->assertNotFalse($bodyPos);
+        $this->assertLessThan($bodyPos, $scriptPos, 'Script should appear before </BODY>');
     }
 
     public function testOnKernelResponseSkipsWhenScriptIsEmpty(): void
@@ -327,9 +341,16 @@ HTML;
 
         $modifiedContent = $event->getResponse()->getContent();
 
-        // Script should be injected before closing body tag
-        $this->assertStringContainsString('<script>test</script></body>', $modifiedContent);
+        // Script should be injected before closing body tag (may have newline between)
+        $this->assertStringContainsString('<script>test</script>', $modifiedContent);
         $this->assertStringContainsString('<h1>Hello World</h1>', $modifiedContent);
+
+        // Verify script comes before closing body tag
+        $scriptPos = strpos($modifiedContent, '<script>test</script>');
+        $bodyPos = stripos($modifiedContent, '</body>');
+        $this->assertNotFalse($scriptPos);
+        $this->assertNotFalse($bodyPos);
+        $this->assertLessThan($bodyPos, $scriptPos, 'Script should appear before </body>');
     }
 
     /**
