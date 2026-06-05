@@ -23,10 +23,23 @@ class CircuitBreaker
     private const STATE_HALF_OPEN = 'half_open';
     private const CACHE_KEY = 'application_logger.circuit_breaker';
 
+    /**
+     * How long (seconds) in-memory state may be trusted before re-reading the shared
+     * cache. Keeps long-lived workers (FrankenPHP worker mode) eventually consistent
+     * with sibling workers without a cache read on every single isOpen() call.
+     */
+    private const STALENESS_TTL = 5;
+
     private string $state;
     private int $failureCount = 0;
     private int $halfOpenAttempts = 0;
     private ?int $openedAt = null;
+
+    /** Unix timestamp of the last cache (re)load, for staleness detection. */
+    private int $loadedAt = 0;
+
+    /** True once at least one cache load has occurred (distinguishes first boot from eviction). */
+    private bool $everLoaded = false;
 
     public function __construct(
         private readonly bool $enabled,
@@ -59,6 +72,11 @@ class CircuitBreaker
         if (!$this->enabled) {
             return false;
         }
+
+        // Re-read shared state if our in-memory copy is stale. In worker mode the
+        // service is a singleton loaded once at boot; without this, a sibling worker
+        // opening the circuit would never be observed here.
+        $this->refreshIfStale();
 
         // Check if we should transition from OPEN to HALF_OPEN
         if (self::STATE_OPEN === $this->state && $this->shouldAttemptReset()) {
@@ -198,10 +216,32 @@ class CircuitBreaker
     }
 
     /**
+     * Re-read shared state from cache if the in-memory copy is older than the
+     * staleness TTL. Cheap no-op within the TTL window.
+     */
+    private function refreshIfStale(): void
+    {
+        if ((time() - $this->loadedAt) < self::STALENESS_TTL) {
+            return;
+        }
+
+        $this->loadState();
+    }
+
+    /**
      * Load state from cache.
+     *
+     * Fail-safe policy: on a cache MISS we default to OPEN (not CLOSED). A miss
+     * under memory pressure / eviction is indistinguishable from "circuit may be
+     * open", so defaulting closed would unleash a thundering herd against an
+     * already-degraded API. The OPEN state self-heals via the normal HALF_OPEN
+     * probe after the timeout window. A genuinely-never-initialised breaker is
+     * seeded CLOSED once on construction (see below) so first boot is permissive.
      */
     private function loadState(): void
     {
+        $this->loadedAt = time();
+
         try {
             $item = $this->cache->getItem(self::CACHE_KEY);
 
@@ -211,12 +251,30 @@ class CircuitBreaker
                 $this->failureCount = $state['failureCount'] ?? 0;
                 $this->openedAt = $state['openedAt'] ?? null;
                 $this->halfOpenAttempts = $state['halfOpenAttempts'] ?? 0;
-            } else {
+
+                // Honour the logical timeout encoded in the data even if the cache
+                // entry outlived it: an OPEN circuit whose timeout has elapsed should
+                // be eligible for a HALF_OPEN probe rather than staying OPEN forever.
+                return;
+            }
+
+            // Cache miss. On first boot (never loaded before) seed CLOSED so a fresh
+            // deployment is permissive. Otherwise the entry was evicted while we had
+            // prior state: fail safe to OPEN to avoid a herd against a degraded API.
+            if (!$this->everLoaded) {
                 $this->state = self::STATE_CLOSED;
+            } else {
+                $this->state = self::STATE_OPEN;
+                $this->openedAt = time();
+                $this->halfOpenAttempts = 0;
             }
         } catch (\Throwable) {
-            // Cache failure should never break the application
-            $this->state = self::STATE_CLOSED;
+            // Cache failure should never break the application; stay/seed CLOSED.
+            if (!$this->everLoaded) {
+                $this->state = self::STATE_CLOSED;
+            }
+        } finally {
+            $this->everLoaded = true;
         }
     }
 
@@ -225,6 +283,8 @@ class CircuitBreaker
      */
     private function saveState(): void
     {
+        $this->loadedAt = time();
+
         try {
             $item = $this->cache->getItem(self::CACHE_KEY);
             $item->set([
@@ -233,8 +293,11 @@ class CircuitBreaker
                 'openedAt' => $this->openedAt,
                 'halfOpenAttempts' => $this->halfOpenAttempts,
             ]);
-            // Cache for longer than the timeout to persist across requests
-            $item->expiresAfter($this->timeout * 2);
+            // Use a large, fixed lower-bounded TTL independent of the (now capped)
+            // logical timeout so the entry is far less likely to be LRU-evicted mid
+            // outage. The logical timeout itself is enforced via openedAt in
+            // shouldAttemptReset(), so a longer cache TTL is safe.
+            $item->expiresAfter(max(3600, $this->timeout * 4));
             $this->cache->save($item);
         } catch (\Throwable) {
             // Cache failure should never break the application

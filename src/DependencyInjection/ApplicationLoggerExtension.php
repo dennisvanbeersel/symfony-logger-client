@@ -86,6 +86,14 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
         $container->setParameter('application_logger.max_breadcrumbs', $config['max_breadcrumbs']);
         $container->setParameter('application_logger.debug', $config['debug']);
 
+        // Error/log endpoint routing parameters
+        $container->setParameter('application_logger.endpoint_path', $config['endpoint_path']);
+        $container->setParameter('application_logger.log_endpoint', $config['log_endpoint']);
+        $container->setParameter('application_logger.log_token', $config['log_token']);
+        $container->setParameter('application_logger.log_path', $config['log_path']);
+        $container->setParameter('application_logger.log_batch_size', $config['log_batch_size']);
+        $container->setParameter('application_logger.max_log_buffer', $config['max_log_buffer']);
+
         // Circuit breaker parameters
         $container->setParameter('application_logger.circuit_breaker.enabled', $config['circuit_breaker']['enabled']);
         $container->setParameter('application_logger.circuit_breaker.failure_threshold', $config['circuit_breaker']['failure_threshold']);

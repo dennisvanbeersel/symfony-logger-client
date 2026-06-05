@@ -65,6 +65,14 @@ class JavaScriptInjectionSubscriber implements EventSubscriberInterface
 
         $response = $event->getResponse();
 
+        // Do not inject into error responses (4xx/5xx). Their error templates are
+        // typically minimal and do not include the host application's importmap,
+        // so the SDK's ES-module <script> would leave a bare specifier that the
+        // browser cannot resolve. Error pages have no need for the client SDK.
+        if ($response->getStatusCode() >= 400) {
+            return;
+        }
+
         // Only inject in HTML responses
         $contentType = $response->headers->get('Content-Type', '');
         if (!str_contains($contentType, 'text/html') && !empty($contentType)) {

@@ -164,6 +164,34 @@ class JavaScriptInjectionSubscriberTest extends TestCase
         $this->assertStringContainsString('<h1>Test</h1>', $modifiedContent);
     }
 
+    public function testOnKernelResponseSkipsErrorResponses(): void
+    {
+        $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
+        $twigExtension->method('renderInit')
+            ->willReturn('<script>console.log("test");</script>');
+
+        $subscriber = new JavaScriptInjectionSubscriber(
+            autoInject: true,
+            enabled: true,
+            twigExtension: $twigExtension
+        );
+
+        // Error pages (4xx/5xx) are rendered from a minimal template that does
+        // not include the host application's importmap, so injecting the SDK's
+        // ES-module <script> there leaves a bare specifier that cannot resolve.
+        $response = new Response('<html><body><h1>Not Found</h1></body></html>', 404);
+        $response->headers->set('Content-Type', 'text/html');
+        $event = $this->createResponseEventWithResponse($response);
+
+        $subscriber->onKernelResponse($event);
+
+        $this->assertStringNotContainsString(
+            '<script>console.log("test");</script>',
+            (string) $event->getResponse()->getContent(),
+            'SDK must not be injected into error responses'
+        );
+    }
+
     public function testOnKernelResponseHandlesCaseInsensitiveBodyTag(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);

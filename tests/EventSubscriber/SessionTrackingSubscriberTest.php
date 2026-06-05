@@ -6,6 +6,7 @@ namespace ApplicationLogger\Bundle\Tests\EventSubscriber;
 
 use ApplicationLogger\Bundle\EventSubscriber\SessionTrackingSubscriber;
 use ApplicationLogger\Bundle\Service\ApiClient;
+use ApplicationLogger\Bundle\Service\DataScrubber;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
@@ -39,7 +40,8 @@ final class SessionTrackingSubscriberTest extends TestCase
 
         $this->subscriber = new SessionTrackingSubscriber(
             $this->apiClient,
-            $config
+            $config,
+            new DataScrubber(['password', 'token', 'api_key', 'secret', 'authorization'])
         );
     }
 
@@ -202,7 +204,8 @@ final class SessionTrackingSubscriberTest extends TestCase
 
         $subscriber = new SessionTrackingSubscriber(
             $this->apiClient,
-            $disabledConfig
+            $disabledConfig,
+            new DataScrubber(['password', 'token', 'api_key', 'secret', 'authorization'])
         );
 
         $request = Request::create('/test');

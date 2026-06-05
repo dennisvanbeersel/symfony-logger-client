@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\Tests\Service;
 
 use ApplicationLogger\Bundle\Service\ContextCollector;
+use ApplicationLogger\Bundle\Service\DataScrubber;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
@@ -29,7 +30,7 @@ final class ContextCollectorTest extends TestCase
         string $environment = 'test'
     ): ContextCollector {
         return new ContextCollector(
-            $scrubFields,
+            new DataScrubber($scrubFields),
             $release,
             $environment,
             $this->requestStack

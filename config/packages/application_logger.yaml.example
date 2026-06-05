@@ -35,6 +35,25 @@ application_logger:
         timeout: 60           # Keep circuit open for 60 seconds
         half_open_attempts: 1 # Allow 1 test request in half-open state
 
+    # Log Aggregation (ships non-exception Monolog records to the Go log-collector)
+    # Records WITH an attached exception go to the error pipeline (/api/v1/errors);
+    # plain log messages are shipped here, to the high-throughput log collector
+    # (ClickHouse). Leave log_endpoint/log_token null to disable log shipping
+    # (non-exception records are then simply not sent anywhere).
+    #
+    # Collector HTTP contract:
+    #   POST {log_endpoint}/v1/logs        -> single LogEntry
+    #   POST {log_endpoint}/v1/logs/batch  -> {"logs": [LogEntry, ...]}  (max 1000)
+    #   Auth: X-Api-Key: {log_token}   (token format: sk_log_...)
+    log_endpoint: null    # e.g. 'https://your-slug.logs.applogger.eu' or '%env(APPLICATION_LOGGER_LOG_ENDPOINT)%'
+    log_token: null       # e.g. '%env(APPLICATION_LOGGER_LOG_TOKEN)%'  (sk_log_...)
+    log_path: '/v1/logs'  # collector ingestion path (single; batch is this + "/batch")
+    log_batch_size: 50    # buffer this many records before flushing one batch request (max 1000)
+    max_log_buffer: 1000  # hard cap on buffered records; oldest are dropped beyond this
+
+    # Error ingestion path on the platform API (versioned, non-deprecated route)
+    endpoint_path: '/api/v1/errors'
+
     # Capture Settings
     # Minimum Monolog level to capture
     capture_level: error # debug|info|notice|warning|error|critical|alert|emergency

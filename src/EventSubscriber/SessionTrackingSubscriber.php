@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\EventSubscriber;
 
 use ApplicationLogger\Bundle\Service\ApiClient;
+use ApplicationLogger\Bundle\Service\DataScrubber;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\Session\SessionInterface;
@@ -23,6 +24,7 @@ class SessionTrackingSubscriber implements EventSubscriberInterface
 {
     private const SESSION_KEY = '_application_logger_session_id';
     private const LAST_ACTIVITY_KEY = '_application_logger_last_activity';
+    private const REGISTERED_KEY = '_application_logger_session_registered';
 
     /**
      * @param array{enabled: bool, track_page_views: bool, idle_timeout: int, ignored_routes: array<string>, ignored_paths: array<string>} $config
@@ -30,6 +32,7 @@ class SessionTrackingSubscriber implements EventSubscriberInterface
     public function __construct(
         private readonly ApiClient $apiClient,
         private readonly array $config,
+        private readonly DataScrubber $scrubber,
         private readonly ?LoggerInterface $logger = null,
     ) {
     }
@@ -82,26 +85,36 @@ class SessionTrackingSubscriber implements EventSubscriberInterface
             $idleTimeout = $this->config['idle_timeout'];
             $now = time();
 
+            $expired = false;
             if (null !== $lastActivity && ($now - $lastActivity) > $idleTimeout) {
                 // Session expired - end old session and create new one
                 $oldSessionId = $sessionId;
                 $this->apiClient->endSession($oldSessionId);
                 $sessionId = $this->createNewSession($session);
+                $session->remove(self::REGISTERED_KEY);
+                $expired = true;
             }
 
             // Update last activity
             $session->set(self::LAST_ACTIVITY_KEY, $now);
 
-            // Generate session hash (SHA-256 of session_id for GDPR compliance)
-            $sessionHash = hash('sha256', $sessionId);
+            // DEBOUNCE: only POST createSession once per session lifetime (or after a
+            // rotation). Previously this fired on EVERY request, generating 2-3 API
+            // calls per host request. Subsequent page views still record events.
+            if ($expired || true !== $session->get(self::REGISTERED_KEY)) {
+                // Generate session hash (SHA-256 of session_id for GDPR compliance)
+                $sessionHash = hash('sha256', $sessionId);
 
-            // Create/update session
-            $this->apiClient->createSession([
-                'session_id' => $sessionId,
-                'session_hash' => $sessionHash,
-                'ip_address' => $request->getClientIp(),
-                'user_agent' => $request->headers->get('User-Agent'),
-            ]);
+                $this->apiClient->createSession([
+                    'session_id' => $sessionId,
+                    'session_hash' => $sessionHash,
+                    // GDPR: anonymise the IP before it ever leaves the host app.
+                    'ip_address' => $this->scrubber->anonymizeIp($request->getClientIp()),
+                    'user_agent' => $request->headers->get('User-Agent'),
+                ]);
+
+                $session->set(self::REGISTERED_KEY, true);
+            }
 
             // Track page view
             if ($this->config['track_page_views']) {

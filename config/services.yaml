@@ -4,6 +4,11 @@ services:
         autoconfigure: false
         public: false
 
+    # Data Scrubber - shared GDPR scrubbing + IP anonymization utility
+    ApplicationLogger\Bundle\Service\DataScrubber:
+        arguments:
+            $scrubFields: '%application_logger.scrub_fields%'
+
     # Circuit Breaker - prevents repeated calls to failing service
     ApplicationLogger\Bundle\Service\CircuitBreaker:
         arguments:
@@ -13,7 +18,7 @@ services:
             $maxHalfOpenAttempts: '%application_logger.circuit_breaker.half_open_attempts%'
             $cache: '@cache.app'
 
-    # API Client - sends errors to platform with resilience features
+    # API Client - sends errors AND logs to platform with resilience features
     ApplicationLogger\Bundle\Service\ApiClient:
         arguments:
             $dsn: '%application_logger.dsn%'
@@ -24,11 +29,17 @@ services:
             $circuitBreaker: '@ApplicationLogger\Bundle\Service\CircuitBreaker'
             $logger: '@?logger'
             $debug: '%application_logger.debug%'
+            # Inject host-app HTTP client so proxy/SSL/framework.http_client config applies.
+            $httpClient: '@?http_client'
+            $errorPath: '%application_logger.endpoint_path%'
+            $logEndpoint: '%application_logger.log_endpoint%'
+            $logToken: '%application_logger.log_token%'
+            $logPath: '%application_logger.log_path%'
 
     # Context Collector - gathers request/user/server context
     ApplicationLogger\Bundle\Service\ContextCollector:
         arguments:
-            $scrubFields: '%application_logger.scrub_fields%'
+            $scrubber: '@ApplicationLogger\Bundle\Service\DataScrubber'
             $release: '%application_logger.release%'
             $environment: '%application_logger.environment%'
             $requestStack: '@request_stack'
@@ -58,17 +69,22 @@ services:
                 idle_timeout: '%application_logger.session_tracking.idle_timeout%'
                 ignored_routes: '%application_logger.session_tracking.ignored_routes%'
                 ignored_paths: '%application_logger.session_tracking.ignored_paths%'
+            $scrubber: '@ApplicationLogger\Bundle\Service\DataScrubber'
             $logger: '@?logger'
         tags:
             - { name: kernel.event_subscriber }
 
-    # Monolog Handler - integrates with Monolog logging
+    # Monolog Handler - routes exceptions to errors, plain logs to log aggregation
     ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler:
         arguments:
             $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
             $contextCollector: '@ApplicationLogger\Bundle\Service\ContextCollector'
             $breadcrumbCollector: '@ApplicationLogger\Bundle\Service\BreadcrumbCollector'
+            $scrubber: '@ApplicationLogger\Bundle\Service\DataScrubber'
             $captureLevel: '%application_logger.capture_level%'
+            $environment: '%application_logger.environment%'
+            $batchSize: '%application_logger.log_batch_size%'
+            $maxBuffer: '%application_logger.max_log_buffer%'
 
     # Twig Extension - provides application_logger_init() function
     ApplicationLogger\Bundle\Twig\ApplicationLoggerExtension:

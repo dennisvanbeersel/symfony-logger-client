@@ -16,11 +16,8 @@ use Symfony\Component\HttpFoundation\RequestStack;
  */
 class ContextCollector
 {
-    /**
-     * @param list<string> $scrubFields
-     */
     public function __construct(
-        private readonly array $scrubFields,
+        private readonly DataScrubber $scrubber,
         private readonly ?string $release,
         private readonly string $environment,
         private readonly RequestStack $requestStack,
@@ -66,11 +63,11 @@ class ContextCollector
                 'url' => $request->getUri(),
                 'method' => $this->sanitizeHttpMethod($request->getMethod()),
                 'query_string' => $request->getQueryString(),
-                'headers' => $this->scrubSensitiveData($headers),
-                'data' => $this->scrubSensitiveData($request->request->all()),
-                'cookies' => $this->scrubSensitiveData($request->cookies->all()),
+                'headers' => $this->scrubber->scrub($headers),
+                'data' => $this->scrubber->scrub($request->request->all()),
+                'cookies' => $this->scrubber->scrub($request->cookies->all()),
                 'env' => [
-                    'REMOTE_ADDR' => $this->anonymizeIp($request->getClientIp()),
+                    'REMOTE_ADDR' => $this->scrubber->anonymizeIp($request->getClientIp()),
                     'SERVER_NAME' => $request->getHost(),
                     'SERVER_PORT' => $request->getPort(),
                     'REQUEST_URI' => $request->getRequestUri(),
@@ -108,7 +105,7 @@ class ContextCollector
             }
 
             return [
-                'ip_address' => $this->anonymizeIp($request->getClientIp()),
+                'ip_address' => $this->scrubber->anonymizeIp($request->getClientIp()),
                 'session_id' => $session->getId(),
             ];
         } catch (\Throwable) {
@@ -191,44 +188,6 @@ class ContextCollector
     }
 
     /**
-     * Scrub sensitive data from arrays.
-     *
-     * @param array<string, mixed> $data
-     *
-     * @return array<string, mixed>
-     */
-    private function scrubSensitiveData(array $data): array
-    {
-        try {
-            $scrubbed = [];
-
-            foreach ($data as $key => $value) {
-                // Check if key matches any scrub pattern
-                $shouldScrub = false;
-                foreach ($this->scrubFields as $field) {
-                    if (false !== stripos($key, $field)) {
-                        $shouldScrub = true;
-                        break;
-                    }
-                }
-
-                if ($shouldScrub) {
-                    $scrubbed[$key] = '[REDACTED]';
-                } elseif (\is_array($value)) {
-                    $scrubbed[$key] = $this->scrubSensitiveData($value);
-                } else {
-                    $scrubbed[$key] = $value;
-                }
-            }
-
-            return $scrubbed;
-        } catch (\Throwable) {
-            // If scrubbing fails, return empty array (safe default)
-            return [];
-        }
-    }
-
-    /**
      * Sanitize HTTP method to allowed API values.
      *
      * API only accepts: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS
@@ -240,40 +199,5 @@ class ContextCollector
         $method = strtoupper($method);
 
         return \in_array($method, $allowedMethods, true) ? $method : null;
-    }
-
-    /**
-     * Anonymize IP address (mask last octet for IPv4, last 80 bits for IPv6).
-     */
-    private function anonymizeIp(?string $ip): ?string
-    {
-        if (null === $ip) {
-            return null;
-        }
-
-        try {
-            if (filter_var($ip, \FILTER_VALIDATE_IP, \FILTER_FLAG_IPV4)) {
-                // IPv4: mask last octet
-                $parts = explode('.', $ip);
-                $parts[3] = '0';
-
-                return implode('.', $parts);
-            }
-
-            if (filter_var($ip, \FILTER_VALIDATE_IP, \FILTER_FLAG_IPV6)) {
-                // IPv6: mask last 80 bits (keep first 48 bits)
-                $addr = inet_pton($ip);
-                if (false !== $addr) {
-                    $addr = substr($addr, 0, 6).str_repeat("\0", 10);
-                    $anonymized = inet_ntop($addr);
-
-                    return false !== $anonymized ? $anonymized : $ip;
-                }
-            }
-
-            return $ip;
-        } catch (\Throwable) {
-            return null; // If anonymization fails, return null (safer than exposing real IP)
-        }
     }
 }
