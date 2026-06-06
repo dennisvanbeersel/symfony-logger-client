@@ -13,8 +13,11 @@ application_logger:
     # Environment (production, staging, development)
     environment: '%kernel.environment%'
 
-    # Enable error tracking
-    enabled: true
+    # Enable error tracking.
+    # Env-driven so the bundle stays inert until a real project DSN + key are
+    # configured; otherwise it POSTs to the placeholder host. Set
+    # APPLICATION_LOGGER_ENABLED=true in .env.local once you have credentials.
+    enabled: '%env(bool:APPLICATION_LOGGER_ENABLED)%'
 
     # Resilience settings (default values - optimized for reliability)
     # timeout: 2.0              # API timeout in seconds (0.5-5.0)
@@ -59,9 +62,20 @@ application_logger:
 
     # JavaScript SDK integration (auto-injected by default)
     javascript:
-        enabled: true
+        # Env-driven (mirrors the root `enabled`) so the SDK is not auto-injected
+        # with a placeholder DSN before a real project exists.
+        enabled: '%env(bool:APPLICATION_LOGGER_ENABLED)%'
         # auto_inject: true   # Automatically inject SDK on HTML pages
         # debug: '%kernel.debug%'  # Enable console logging in dev
+
+    # Log Aggregation (papertrail-style log shipping to the Go log-collector)
+    # Ships non-exception Monolog records to the collector for storage (ClickHouse).
+    # Disabled by default (null endpoint); set the env vars below to enable.
+    # log_endpoint: '%env(APPLICATION_LOGGER_LOG_ENDPOINT)%'  # e.g. https://your-slug.logs.applogger.eu
+    # log_token: '%env(APPLICATION_LOGGER_LOG_TOKEN)%'        # collector token (sk_log_...)
+    # log_path: '/v1/logs'        # collector ingestion path (batch is this + "/batch")
+    # log_batch_size: 50          # buffer this many records before flushing a batch (max 1000)
+    # max_log_buffer: 1000        # hard cap on buffered records; oldest dropped beyond this
 
     # Debug mode (development only)
     debug: '%kernel.debug%'

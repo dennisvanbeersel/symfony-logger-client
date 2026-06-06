@@ -1,6 +1,16 @@
 import { CircuitBreaker } from './circuit-breaker.js';
 import { StorageQueue } from './storage-queue.js';
 import { RateLimiter } from './rate-limiter.js';
+import { DEFAULT_SCRUB_FIELDS } from './scrub-fields.js';
+import { hashString } from './util/hash.js';
+
+/**
+ * Payload keys whose STRING value is a URL/URI and may carry sensitive query
+ * parameters (the JS SDK puts window.location.href under `url`). Their query
+ * VALUES are scrubbed even though the key name itself is not sensitive.
+ * @type {Set<string>}
+ */
+const URL_VALUE_KEYS = new Set(['url', 'request_uri', 'requesturi', 'referrer', 'referer']);
 
 /**
  * Transport layer for sending errors to the platform
@@ -37,7 +47,12 @@ export class Transport {
             refillRate: config.rateLimiterRefillRate ?? 0.167,
         });
 
-        // Deduplication cache (configurable via SDK config)
+        // Network-layer deduplication cache (configurable via SDK config).
+        // Intentionally SHORTER than ErrorDetector's 60s replay-dedup window:
+        // this collapses bursts of an identical payload (e.g. an error firing
+        // in a tight loop) without suppressing a genuinely recurring error for
+        // long, whereas the replay detector only needs to avoid re-capturing a
+        // heavy session-replay for the same error within a page view.
         this.recentErrors = new Map();
         this.deduplicationWindow = config.deduplicationWindowMs ?? 5000;
 
@@ -155,10 +170,16 @@ export class Transport {
             // Use dedicated recovery session endpoint
             const endpoint = `${this.dsn.protocol}://${this.dsn.host}/api/errors/recovery-session`;
 
+            // Scrub before sending: the top-level `url` and every nested `event.url`
+            // carry raw query strings (?token=...). scrubSensitiveData() applies
+            // scrubUrlValue to URL_VALUE_KEYS at any depth. Same credential-leak
+            // class as C1; must run on BOTH the beacon and fetch branches.
+            const scrubbedPayload = this.scrubSensitiveData(recoveryPayload);
+
             if (this.config.debug) {
                 console.warn('ApplicationLogger: Sending recovery session', {
-                    sessionId: recoveryPayload.sessionId,
-                    eventCount: recoveryPayload.events?.length || 0,
+                    sessionId: scrubbedPayload.sessionId,
+                    eventCount: scrubbedPayload.events?.length || 0,
                     method: useBeacon ? 'sendBeacon' : 'fetch',
                 });
             }
@@ -167,7 +188,7 @@ export class Transport {
             if (useBeacon && navigator.sendBeacon) {
                 // sendBeacon cannot send custom headers, so include API key in body
                 const payloadWithAuth = {
-                    ...recoveryPayload,
+                    ...scrubbedPayload,
                     apiKey: this.apiKey,
                 };
 
@@ -199,7 +220,7 @@ export class Transport {
                     'X-Api-Key': this.apiKey,
                     'User-Agent': 'ApplicationLogger-JS-SDK/1.0',
                 },
-                body: JSON.stringify(recoveryPayload),
+                body: JSON.stringify(scrubbedPayload),
                 signal: controller.signal,
             });
 
@@ -217,11 +238,13 @@ export class Transport {
         } catch (error) {
             console.error('ApplicationLogger: Failed to send recovery session', error);
 
-            // Store in queue for retry (best effort)
+            // Store in queue for retry (best effort). Scrub here too so a queued
+            // retry can never leak a raw URL even if scrubbing happened to fail
+            // before the throw.
             try {
                 this.storageQueue.enqueue({
                     type: 'recovery',
-                    payload: recoveryPayload,
+                    payload: this.scrubSensitiveData(recoveryPayload),
                 });
             } catch (queueError) {
                 console.error('ApplicationLogger: Failed to queue recovery session', queueError);
@@ -376,16 +399,13 @@ export class Transport {
     }
 
     /**
-   * Simple hash function
-   */
+     * Hash an error signature for deduplication (delegates to the shared util).
+     *
+     * @param {string} str - Signature string
+     * @returns {string} Hash
+     */
     simpleHash(str) {
-        let hash = 0;
-        for (let i = 0; i < str.length; i++) {
-            const char = str.charCodeAt(i);
-            hash = ((hash << 5) - hash) + char;
-            hash = hash & hash; // Convert to 32bit integer
-        }
-        return hash.toString();
+        return hashString(str);
     }
 
     /**
@@ -438,57 +458,122 @@ export class Transport {
    * Scrub sensitive data from payload
    */
     scrubSensitiveData(payload) {
+        // Canonical scrub list (single source of truth) + any caller-supplied
+        // extras. config.scrubFields already defaults to DEFAULT_SCRUB_FIELDS via
+        // index.js, but we union here too so a caller passing a narrow override
+        // can never drop the baseline protections.
         const scrubFields = this.config.scrubFields || [];
-        const scrubPatterns = [
-            ...scrubFields,
-            'password',
-            'passwd',
-            'pwd',
-            'secret',
-            'api_key',
-            'apikey',
-            'token',
-            'auth',
-            'authorization',
-            'private_key',
-            'access_token',
-            'refresh_token',
-        ];
+        const scrubPatterns = [...new Set([...scrubFields, ...DEFAULT_SCRUB_FIELDS])];
 
-        // Deep clone payload (handle circular references)
+        // Work on a circular-ref-safe deep copy; JSON round-trip is the fast
+        // path, removeCircularReferences the fallback. Both produce a fresh
+        // structure, so the caller's object is never touched.
         let scrubbed;
         try {
             scrubbed = JSON.parse(JSON.stringify(payload));
         } catch {
-            // Circular reference detected - work with original and remove circular refs
             scrubbed = this.removeCircularReferences(payload);
         }
 
-        // Recursively scrub object
+        // Purely functional recursive scrub: builds new objects/arrays and never
+        // mutates its argument (M10).
         const scrubObject = (obj) => {
             if (!obj || typeof obj !== 'object') {
                 return obj;
             }
 
-            for (const key in obj) {
-                if (Object.prototype.hasOwnProperty.call(obj, key)) {
-                    // Check if key matches scrub pattern
-                    const shouldScrub = scrubPatterns.some(pattern =>
-                        key.toLowerCase().includes(pattern.toLowerCase()),
-                    );
+            if (Array.isArray(obj)) {
+                return obj.map(item => scrubObject(item));
+            }
 
-                    if (shouldScrub) {
-                        obj[key] = '[REDACTED]';
-                    } else if (typeof obj[key] === 'object') {
-                        scrubObject(obj[key]);
-                    }
+            const result = {};
+            for (const key in obj) {
+                if (!Object.prototype.hasOwnProperty.call(obj, key)) {
+                    continue;
+                }
+
+                const value = obj[key];
+                const shouldScrub = scrubPatterns.some(pattern =>
+                    key.toLowerCase().includes(pattern.toLowerCase()),
+                );
+
+                if (shouldScrub) {
+                    result[key] = '[REDACTED]';
+                } else if (typeof value === 'string' && URL_VALUE_KEYS.has(key.toLowerCase())) {
+                    // The JS SDK captures window.location.href into `url`, so a
+                    // raw query like ?token=abc would otherwise ship verbatim
+                    // (key-name scrubbing alone never inspects the value). Scrub
+                    // sensitive query VALUES while leaving the path/host intact.
+                    // Mirrors PHP DataScrubber::scrubUrl() for cross-side parity.
+                    result[key] = this.scrubUrlValue(value, scrubPatterns);
+                } else if (value && typeof value === 'object') {
+                    result[key] = scrubObject(value);
+                } else {
+                    result[key] = value;
                 }
             }
 
-            return obj;
+            return result;
         };
 
         return scrubObject(scrubbed);
+    }
+
+    /**
+     * Scrub sensitive query-string VALUES from a URL/URI string.
+     *
+     * Only the query component is touched: scheme/host/path/fragment are left
+     * intact. A query pair is redacted when its NAME matches a scrub pattern
+     * (case-insensitive substring). Mirrors PHP DataScrubber::scrubUrl().
+     * Never throws; returns the input unchanged when it cannot be parsed.
+     *
+     * @param {string} value - URL or path+query string
+     * @param {string[]} scrubPatterns - Field-name fragments to redact
+     * @returns {string} URL with sensitive query values redacted
+     */
+    scrubUrlValue(value, scrubPatterns) {
+        try {
+            const hashIndex = value.indexOf('#');
+            const fragment = hashIndex !== -1 ? value.slice(hashIndex) : '';
+            const beforeFragment = hashIndex !== -1 ? value.slice(0, hashIndex) : value;
+
+            const qIndex = beforeFragment.indexOf('?');
+            if (qIndex === -1) {
+                return value; // No query component; nothing to scrub.
+            }
+
+            const base = beforeFragment.slice(0, qIndex + 1);
+            const query = beforeFragment.slice(qIndex + 1);
+            if (query === '') {
+                return value;
+            }
+
+            const isSensitive = (name) =>
+                scrubPatterns.some(pattern => name.toLowerCase().includes(pattern.toLowerCase()));
+
+            const scrubbedPairs = query.split('&').map((pair) => {
+                if (pair === '') {
+                    return pair;
+                }
+                const eqIndex = pair.indexOf('=');
+                let rawName;
+                try {
+                    rawName = decodeURIComponent(eqIndex === -1 ? pair : pair.slice(0, eqIndex));
+                } catch {
+                    rawName = eqIndex === -1 ? pair : pair.slice(0, eqIndex);
+                }
+                if (!isSensitive(rawName)) {
+                    return pair;
+                }
+                const namePart = eqIndex === -1 ? pair : pair.slice(0, eqIndex);
+                return `${namePart}=[REDACTED]`;
+            });
+
+            return `${base}${scrubbedPairs.join('&')}${fragment}`;
+        } catch {
+            // Fail safe: never echo back a URL that may carry a sensitive value.
+            return '[REDACTED]';
+        }
     }
 
     /**
@@ -545,6 +630,9 @@ export class Transport {
         try {
             const url = `${this.dsn.protocol}://${this.dsn.host}/api/v1/sessions/${sessionId}/events`;
 
+            // Scrub: session events can carry a `url` with sensitive query values.
+            const scrubbedEventData = this.scrubSensitiveData(eventData);
+
             const response = await fetch(url, {
                 method: 'POST',
                 headers: {
@@ -552,7 +640,7 @@ export class Transport {
                     'X-Api-Key': this.apiKey,
                     'User-Agent': 'ApplicationLogger-JS-SDK/1.0',
                 },
-                body: JSON.stringify(eventData),
+                body: JSON.stringify(scrubbedEventData),
             });
 
             if (!response.ok) {
@@ -579,6 +667,9 @@ export class Transport {
         try {
             const url = `${this.dsn.protocol}://${this.dsn.host}/api/v1/sessions/${sessionId}/replay`;
 
+            // Scrub: replay clicks can carry a `url` with sensitive query values.
+            const scrubbedBody = this.scrubSensitiveData({ clicks });
+
             const response = await fetch(url, {
                 method: 'POST',
                 headers: {
@@ -586,7 +677,7 @@ export class Transport {
                     'X-Api-Key': this.apiKey,
                     'User-Agent': 'ApplicationLogger-JS-SDK/1.0',
                 },
-                body: JSON.stringify({ clicks }),
+                body: JSON.stringify(scrubbedBody),
             });
 
             if (!response.ok) {
@@ -619,49 +710,42 @@ export class Transport {
     }
 
     /**
-   * Flush pending errors using Beacon API
-   * Called on page unload to ensure errors are sent even as page closes
-   */
+     * Flush pending errors using the Beacon API on page unload.
+     *
+     * sendBeacon cannot set request headers, so (like sendRecoverySession) the
+     * API key is carried in the request BODY. The ingestion endpoint accepts a
+     * single flat error payload - NOT a `{dsn, errors:[]}` envelope - so we post
+     * the most recent error as a flat payload with `apiKey` added. Remaining
+     * queued errors are left for the next session's retry flush.
+     */
     flushWithBeacon() {
         try {
-            // Get all stored errors (from offline queue)
-            const storedErrors = this.storageQueue.getAll();
-
-            // Also include current queue
-            const allErrors = [...this.queue, ...storedErrors];
-
+            const allErrors = [...this.queue, ...this.storageQueue.getAll()];
             if (allErrors.length === 0) {
                 return;
             }
 
-            // Limit to 10 most recent errors to avoid payload size issues
-            const errorsToSend = allErrors.slice(-10);
-
-            // Beacon API has limitations with headers, so we include DSN in body
-            const beaconPayload = {
-                dsn: this.config.dsn,
-                errors: errorsToSend,
-            };
+            // Beacon fires once and best-effort: send the most recent error in
+            // the shape the ingest endpoint validates, with body-based auth.
+            const mostRecent = allErrors[allErrors.length - 1];
+            const beaconPayload = { ...mostRecent, apiKey: this.apiKey };
 
             const blob = new Blob([JSON.stringify(beaconPayload)], {
                 type: 'application/json',
             });
 
-            // Try to send via Beacon API
             const sent = navigator.sendBeacon(this.dsn.endpoint, blob);
 
             if (sent) {
-                // Successfully queued for sending
-                // Clear the storage queue and current queue
                 this.storageQueue.clear();
                 this.queue = [];
 
                 if (this.config.debug) {
-                    console.warn(`ApplicationLogger: Flushed ${errorsToSend.length} errors via Beacon API`);
+                    console.warn('ApplicationLogger: Flushed 1 error via Beacon API');
                 }
             }
         } catch (error) {
-            // Beacon flush failed - errors remain in storage for next session
+            // Errors remain queued for next session on failure.
             if (this.config.debug) {
                 console.error('ApplicationLogger: Beacon flush failed', error);
             }

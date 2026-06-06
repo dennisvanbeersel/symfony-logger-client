@@ -9,6 +9,21 @@
  * - OPEN: Service is down, requests are blocked immediately
  * - HALF_OPEN: Testing if service has recovered
  *
+ * HALF-OPEN POLICY (intentional divergence from the PHP CircuitBreaker):
+ * This JS breaker allows a SINGLE probe in HALF_OPEN - the first failure
+ * reopens the circuit immediately. The PHP side supports a configurable
+ * `maxHalfOpenAttempts` (multiple probes before reopening). The single-probe
+ * policy is deliberate here for two reasons:
+ *   1. State lives in sessionStorage and is PER-TAB and non-atomic. Multiple
+ *      tabs (or concurrent in-flight requests within one tab) cannot
+ *      coordinate a shared attempt counter without races, so a multi-attempt
+ *      cap would be unreliable anyway. A single probe is race-free.
+ *   2. On the client the cost of being conservative is tiny (one extra
+ *      blocked request until the next timeout), whereas extra probes against a
+ *      still-failing backend waste the host page's network budget.
+ * If cross-side parity is ever required, add a `maxHalfOpenAttempts` config and
+ * track attempts in the persisted state - but mind the per-tab race above.
+ *
  * @example
  * const breaker = new CircuitBreaker({ failureThreshold: 5, timeout: 60000 });
  * if (!breaker.isOpen()) {

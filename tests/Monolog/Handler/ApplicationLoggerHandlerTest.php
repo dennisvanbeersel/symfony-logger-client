@@ -9,6 +9,7 @@ use ApplicationLogger\Bundle\Service\ApiClient;
 use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
 use ApplicationLogger\Bundle\Service\ContextCollector;
 use ApplicationLogger\Bundle\Service\DataScrubber;
+use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
 use Monolog\Level;
 use Monolog\LogRecord;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -49,13 +50,14 @@ final class ApplicationLoggerHandlerTest extends TestCase
         $this->handler = $this->createHandler($this->apiClient);
     }
 
-    private function createHandler(ApiClient $apiClient, string $captureLevel = 'error', int $batchSize = 1): ApplicationLoggerHandler
+    private function createHandler(ApiClient $apiClient, string $captureLevel = 'error', int $batchSize = 1, bool $enabled = true): ApplicationLoggerHandler
     {
         return new ApplicationLoggerHandler(
             $apiClient,
             $this->contextCollector,
-            $this->breadcrumbCollector,
             new DataScrubber(['password', 'token', 'api_key', 'secret', 'authorization']),
+            new ErrorPayloadFactory($this->contextCollector, $this->breadcrumbCollector),
+            enabled: $enabled,
             captureLevel: $captureLevel,
             environment: 'test',
             // batchSize 1 => flush each log record immediately for deterministic assertions.
@@ -260,8 +262,8 @@ final class ApplicationLoggerHandlerTest extends TestCase
         $handler = new ApplicationLoggerHandler(
             $apiClient,
             $this->contextCollector,
-            $this->breadcrumbCollector,
             new DataScrubber([]),
+            new ErrorPayloadFactory($this->contextCollector, $this->breadcrumbCollector),
             captureLevel: 'debug',
             environment: 'test',
             batchSize: 1000,
@@ -297,5 +299,42 @@ final class ApplicationLoggerHandlerTest extends TestCase
         $this->handler->handle($record);
 
         $this->addToAssertionCount(1);
+    }
+
+    // ---- Enabled gate (C2): a disabled install must never ship anything ----
+
+    public function testDisabledHandlerNeverSendsExceptionRecord(): void
+    {
+        $apiClient = $this->createMock(ApiClient::class);
+        $handler = $this->createHandler($apiClient, captureLevel: 'debug', enabled: false);
+
+        $apiClient->expects($this->never())->method('sendError');
+        $apiClient->expects($this->never())->method('sendLogs');
+
+        $handler->handle($this->createLogRecord(Level::Error, 'boom', ['exception' => new \RuntimeException('x')]));
+        $handler->flushLogs();
+    }
+
+    public function testDisabledHandlerNeverSendsLogRecord(): void
+    {
+        $apiClient = $this->createMock(ApiClient::class);
+        $handler = $this->createHandler($apiClient, captureLevel: 'debug', enabled: false);
+
+        $apiClient->expects($this->never())->method('sendError');
+        $apiClient->expects($this->never())->method('sendLogs');
+
+        $handler->handle($this->createLogRecord(Level::Info, 'plain log'));
+        $handler->flushLogs();
+    }
+
+    public function testEnabledHandlerSendsExceptionRecord(): void
+    {
+        $apiClient = $this->createMock(ApiClient::class);
+        $handler = $this->createHandler($apiClient, captureLevel: 'error', enabled: true);
+
+        $apiClient->expects($this->once())->method('sendError');
+        $apiClient->expects($this->never())->method('sendLogs');
+
+        $handler->handle($this->createLogRecord(Level::Error, 'boom', ['exception' => new \RuntimeException('x')]));
     }
 }

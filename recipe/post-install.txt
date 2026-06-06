@@ -1,22 +1,29 @@
 
   ApplicationLogger Bundle installed! 🎉
 
+  The bundle is installed but inert until you opt in. The values written to
+  .env are placeholders; put your REAL values in .env.local (git-ignored, it
+  overrides .env).
+
   Next steps:
 
-  1. Configure your credentials in .env.local:
+  1. Add your credentials to .env.local:
 
-     APPLICATION_LOGGER_DSN=https://your-logger-host.com/your-project-id
-     APPLICATION_LOGGER_API_KEY=your-api-key-here
+     APPLICATION_LOGGER_DSN=https://your-host.com/your-project-id
+     APPLICATION_LOGGER_API_KEY=your-real-api-key
 
-  2. The bundle is ready to use with zero additional configuration!
-     - ✅ PHP errors tracked automatically
-     - ✅ JavaScript SDK auto-injected
-     - ✅ Session replay enabled (error-triggered, privacy-safe)
+  2. Flip the switch to start sending in .env.local:
 
-  3. Optional: Customize config/packages/application_logger.yaml
-     - Adjust session replay buffers
+     APPLICATION_LOGGER_ENABLED=true
+
+  3. PHP error tracking, the JavaScript SDK and log aggregation activate ONLY
+     once APPLICATION_LOGGER_ENABLED=true. Until then the bundle stays inert
+     and sends nothing.
+
+  Optional: customize config/packages/application_logger.yaml
      - Configure scrub_fields for PII protection
-     - Enable debug mode for troubleshooting
+     - Adjust session replay buffers
+     - Uncomment the log aggregation block to ship logs
 
   📖 Documentation: https://github.com/dennisvanbeersel/symfony-logger-client
 

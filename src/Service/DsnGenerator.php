@@ -85,12 +85,21 @@ final class DsnGenerator
     }
 
     /**
+     * Path component of the canonical error-ingestion endpoint.
+     *
+     * MUST match the route the platform actually serves and the path the client
+     * bundle's ApiClient POSTs to (see ApiClient::$errorPath default). The previous
+     * value (/api/errors/ingest) was a divergent, non-existent route (M4).
+     */
+    public const INGEST_PATH = '/api/v1/errors';
+
+    /**
      * Get the API endpoint URL for error ingestion.
      *
-     * @return string Example: https://localhost:8111/api/errors/ingest
+     * @return string Example: https://localhost:8111/api/v1/errors
      */
     public function getIngestEndpoint(): string
     {
-        return rtrim($this->baseUrl, '/').'/api/errors/ingest';
+        return rtrim($this->baseUrl, '/').self::INGEST_PATH;
     }
 }

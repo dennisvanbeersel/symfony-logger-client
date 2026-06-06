@@ -567,6 +567,32 @@ describe('Transport', () => {
             expect(scrubbed.self).toBe('[Circular Reference]');
         });
 
+        test('scrubs financial PII fields by default', () => {
+            const payload = {
+                context: {
+                    credit_card: '4111111111111111',
+                    creditcard: '4111111111111111',
+                    card_number: '4111111111111111',
+                    cvv: '123',
+                    ssn: '078-05-1120',
+                    iban: 'DE89370400440532013000',
+                    authorization: 'Bearer xyz',
+                    amount: '42.00',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.credit_card).toBe('[REDACTED]');
+            expect(scrubbed.context.creditcard).toBe('[REDACTED]');
+            expect(scrubbed.context.card_number).toBe('[REDACTED]');
+            expect(scrubbed.context.cvv).toBe('[REDACTED]');
+            expect(scrubbed.context.ssn).toBe('[REDACTED]');
+            expect(scrubbed.context.iban).toBe('[REDACTED]');
+            expect(scrubbed.context.authorization).toBe('[REDACTED]');
+            expect(scrubbed.context.amount).toBe('42.00'); // Not sensitive
+        });
+
         test('respects custom scrub fields', () => {
             const t = new Transport({
                 dsn: 'https://localhost:8111/project-id',
@@ -585,6 +611,32 @@ describe('Transport', () => {
 
             expect(scrubbed.context.customField).toBe('[REDACTED]');
             expect(scrubbed.context.normalField).toBe('public');
+        });
+
+        test('scrubs sensitive query values in the url field (window.location.href leak)', () => {
+            const payload = {
+                type: 'Error',
+                url: 'https://app.example.com/reset?token=abc&page=2',
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            // token value redacted, page preserved, host/path intact.
+            expect(scrubbed.url).toBe('https://app.example.com/reset?token=[REDACTED]&page=2');
+            expect(JSON.stringify(scrubbed)).not.toContain('abc');
+        });
+
+        test('leaves url without query untouched and preserves fragment', () => {
+            const payload = {
+                url: 'https://app.example.com/dashboard',
+                referrer: 'https://app.example.com/login?password=hunter2#top',
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.url).toBe('https://app.example.com/dashboard');
+            expect(scrubbed.referrer).toBe('https://app.example.com/login?password=[REDACTED]#top');
+            expect(JSON.stringify(scrubbed)).not.toContain('hunter2');
         });
     });
 
@@ -689,16 +741,16 @@ describe('Transport', () => {
             expect(transport.storageQueue.size()).toBe(0);
         });
 
-        test('limits beacon payload to 10 errors', (done) => {
+        test('beacon sends the most recent error as a flat payload with body apiKey', (done) => {
             const beaconCalls = [];
             global.navigator.sendBeacon = (url, data) => {
                 beaconCalls.push({ url, data });
                 return true;
             };
 
-            // Add 15 errors
+            // Add multiple flat error payloads
             for (let i = 0; i < 15; i++) {
-                transport.queue.push({ exception: { type: 'Error', value: `Error ${i}` } });
+                transport.queue.push({ type: 'Error', message: `Error ${i}` });
             }
 
             transport.flushWithBeacon();
@@ -709,11 +761,15 @@ describe('Transport', () => {
             const blob = beaconCalls[0].data;
             expect(blob).toBeInstanceOf(Blob);
 
-            // Read blob using FileReader to verify it contains 10 errors
+            // sendBeacon cannot set headers, so auth must be in the body (mirrors
+            // sendRecoverySession) and the shape must be a single flat error the
+            // ingest endpoint accepts (NOT a {dsn, errors:[]} envelope).
             const reader = new FileReader();
             reader.onload = () => {
                 const payload = JSON.parse(reader.result);
-                expect(payload.errors.length).toBe(10);
+                expect(payload.errors).toBeUndefined();
+                expect(payload.apiKey).toBe('test-api-key');
+                expect(payload.message).toBe('Error 14'); // most recent
                 done();
             };
             reader.onerror = () => {
@@ -751,8 +807,7 @@ describe('Transport', () => {
             );
         });
 
-        // TODO: sendHeatmap method not implemented yet
-        test.skip('sendHeatmap sends batch of clicks', async () => {
+        test('sendReplayClicks sends batch of clicks', async () => {
             mockFetch.mockResolvedValue({
                 ok: true,
                 json: async () => ({ success: true }),
@@ -763,23 +818,284 @@ describe('Transport', () => {
                 { x: 150, y: 250, timestamp: Date.now() },
             ];
 
-            await transport.sendHeatmap('session-123', clicks);
+            await transport.sendReplayClicks('session-123', clicks);
 
             expect(mockFetch).toHaveBeenCalledWith(
-                'https://localhost:8111/api/v1/sessions/session-123/heatmap',
+                'https://localhost:8111/api/v1/sessions/session-123/replay',
                 expect.objectContaining({
                     method: 'POST',
+                    body: JSON.stringify({ clicks }),
                 }),
             );
         });
 
-        // TODO: sendHeatmap method not implemented yet
-        test.skip('session/heatmap failures are silent', async () => {
+        test('sendReplayClicks is a no-op when there are no clicks', async () => {
+            await transport.sendReplayClicks('session-123', []);
+            expect(mockFetch.mock.calls.length).toBe(0);
+
+            await transport.sendReplayClicks(null, [{ x: 1, y: 2 }]);
+            expect(mockFetch.mock.calls.length).toBe(0);
+        });
+
+        test('session/replay failures are silent', async () => {
             mockFetch.mockRejectedValue(new Error('Network error'));
 
-            // Should not throw
-            await expect(transport.sendSessionEvent('s1', {})).resolves.toBeUndefined();
-            await expect(transport.sendHeatmap('s1', [])).resolves.toBeUndefined();
+            // Should not throw - session/replay tracking is non-critical
+            await expect(transport.sendSessionEvent('s1', { event: 'x' })).resolves.toBeUndefined();
+            await expect(
+                transport.sendReplayClicks('s1', [{ x: 1, y: 2 }]),
+            ).resolves.toBeUndefined();
+        });
+    });
+
+    describe('sendRecoverySession()', () => {
+        test('sends recovery session via fetch to the recovery endpoint', async () => {
+            if (global.navigator) delete global.navigator.sendBeacon;
+            mockFetch.mockResolvedValue({
+                ok: true,
+                json: async () => ({ success: true }),
+            });
+
+            const recoveryPayload = {
+                sessionId: 'sess-1',
+                events: [{ type: 'click', timestamp: Date.now() }],
+            };
+
+            const result = await transport.sendRecoverySession(recoveryPayload);
+
+            expect(mockFetch).toHaveBeenCalledWith(
+                'https://localhost:8111/api/errors/recovery-session',
+                expect.objectContaining({
+                    method: 'POST',
+                    headers: expect.objectContaining({ 'X-Api-Key': 'test-api-key' }),
+                    body: JSON.stringify(recoveryPayload),
+                }),
+            );
+            expect(result).toEqual({ success: true });
+        });
+
+        afterEach(() => {
+            // Ensure beacon stub does not leak into other tests
+            if (global.navigator) {
+                delete global.navigator.sendBeacon;
+            }
+        });
+
+        test('uses sendBeacon when requested and available', async () => {
+            const beaconCalls = [];
+            global.navigator = global.navigator || {};
+            global.navigator.sendBeacon = (url, blob) => {
+                beaconCalls.push({ url, blob });
+                return true;
+            };
+
+            const recoveryPayload = { sessionId: 'sess-2', events: [] };
+            const result = await transport.sendRecoverySession(recoveryPayload, true);
+
+            expect(beaconCalls).toHaveLength(1);
+            expect(beaconCalls[0].url).toBe('https://localhost:8111/api/errors/recovery-session');
+            expect(result).toEqual({ success: true, method: 'beacon' });
+            expect(mockFetch).not.toHaveBeenCalled();
+        });
+
+        test('throws and queues recovery session when sendBeacon fails', async () => {
+            global.navigator = global.navigator || {};
+            global.navigator.sendBeacon = () => false; // queue full / too large
+
+            const recoveryPayload = { sessionId: 'sess-3', events: [] };
+
+            await expect(
+                transport.sendRecoverySession(recoveryPayload, true),
+            ).rejects.toThrow('sendBeacon failed');
+
+            // Failed recovery is queued for retry
+            expect(transport.storageQueue.size()).toBe(1);
+            expect(transport.storageQueue.getAll()[0].type).toBe('recovery');
+        });
+
+        test('throws and queues recovery session on non-ok fetch response', async () => {
+            if (global.navigator) delete global.navigator.sendBeacon; // no beacon -> fetch
+            mockFetch.mockResolvedValue({
+                ok: false,
+                status: 500,
+                json: async () => ({}),
+            });
+
+            const recoveryPayload = { sessionId: 'sess-4', events: [] };
+
+            await expect(
+                transport.sendRecoverySession(recoveryPayload),
+            ).rejects.toThrow('Recovery session send failed: 500');
+
+            expect(transport.storageQueue.size()).toBe(1);
+        });
+
+        test('throws and queues recovery session on fetch network error', async () => {
+            if (global.navigator) delete global.navigator.sendBeacon;
+            mockFetch.mockRejectedValue(new Error('Network down'));
+
+            const recoveryPayload = { sessionId: 'sess-5', events: [] };
+
+            await expect(
+                transport.sendRecoverySession(recoveryPayload),
+            ).rejects.toThrow('Network down');
+
+            expect(transport.storageQueue.size()).toBe(1);
+        });
+
+        test('scrubs sensitive query values in url and nested event.url (fetch branch)', async () => {
+            if (global.navigator) delete global.navigator.sendBeacon;
+            mockFetch.mockResolvedValue({ ok: true, json: async () => ({ success: true }) });
+
+            const recoveryPayload = {
+                sessionId: 'sess-6',
+                url: 'https://app.example.com/dashboard?token=secret123&page=2',
+                events: [
+                    { type: 'navigate', url: 'https://app.example.com/login?password=hunter2' },
+                ],
+            };
+
+            await transport.sendRecoverySession(recoveryPayload);
+
+            const sentBody = mockFetch.mock.calls[0][1].body;
+            expect(sentBody).not.toContain('secret123');
+            expect(sentBody).not.toContain('hunter2');
+            expect(sentBody).toContain('token=[REDACTED]');
+            expect(sentBody).toContain('password=[REDACTED]');
+            // Non-sensitive query + path preserved.
+            expect(sentBody).toContain('page=2');
+            expect(sentBody).toContain('/dashboard');
+        });
+
+        test('scrubs sensitive query values before sending via sendBeacon', (done) => {
+            const beaconCalls = [];
+            global.navigator = global.navigator || {};
+            global.navigator.sendBeacon = (url, blob) => {
+                beaconCalls.push({ url, blob });
+                return true;
+            };
+
+            const recoveryPayload = {
+                sessionId: 'sess-7',
+                url: 'https://app.example.com/p?token=secret123',
+                events: [{ type: 'navigate', url: 'https://app.example.com/q?api_key=leak' }],
+            };
+
+            transport.sendRecoverySession(recoveryPayload, true).then(() => {
+                expect(beaconCalls).toHaveLength(1);
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const blobText = reader.result;
+                    expect(blobText).not.toContain('secret123');
+                    expect(blobText).not.toContain('leak');
+                    expect(blobText).toContain('token=[REDACTED]');
+                    expect(blobText).toContain('api_key=[REDACTED]');
+                    // API key still carried in the beacon body for auth.
+                    expect(blobText).toContain('test-api-key');
+                    done();
+                };
+                reader.onerror = () => done(new Error('Failed to read blob'));
+                reader.readAsText(beaconCalls[0].blob);
+            }).catch(done);
+        });
+    });
+
+    describe('Debug logging branches', () => {
+        let debugTransport;
+
+        beforeEach(() => {
+            debugTransport = new Transport({
+                dsn: 'https://localhost:8111/test-project-id',
+                apiKey: 'test-api-key',
+                debug: true,
+            });
+            debugTransport.circuitBreaker = new MockCircuitBreaker();
+            debugTransport.storageQueue = new MockStorageQueue();
+            debugTransport.rateLimiter = new MockRateLimiter();
+        });
+
+        test('send() logs duplicate, rate-limit and replay debug paths without throwing', async () => {
+            mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+
+            const replayData = { sessionId: 's', events: [{ a: 1 }] };
+            const payload = { type: 'Error', message: 'dbg', stack_trace: [] };
+
+            // First send with replay data exercises the replay debug branch
+            await debugTransport.send(payload, replayData);
+            // Duplicate send exercises the duplicate debug branch
+            await debugTransport.send(payload);
+
+            // Rate limit exceeded debug branch
+            debugTransport.rateLimiter.tokens = 0;
+            await debugTransport.send({ type: 'Error', message: 'rl' });
+
+            expect(debugTransport.storageQueue.size()).toBeGreaterThanOrEqual(1);
+        });
+
+        test('sendToApi() logs circuit-breaker-open debug path', async () => {
+            debugTransport.circuitBreaker.open = true;
+            await debugTransport.sendToApi({ type: 'Error' });
+            expect(debugTransport.storageQueue.size()).toBe(1);
+            expect(mockFetch).not.toHaveBeenCalled();
+        });
+
+        test('sendReplayClicks logs success debug path', async () => {
+            mockFetch.mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+            await debugTransport.sendReplayClicks('s', [{ x: 1, y: 2 }]);
+            expect(mockFetch).toHaveBeenCalled();
+        });
+
+        test('sendReplayClicks logs failure debug path silently', async () => {
+            mockFetch.mockRejectedValue(new Error('boom'));
+            await expect(
+                debugTransport.sendReplayClicks('s', [{ x: 1, y: 2 }]),
+            ).resolves.toBeUndefined();
+        });
+
+        test('sendToApi() logs timeout debug path on AbortError', async () => {
+            mockFetch.mockImplementation(() => {
+                const error = new Error('Timeout');
+                error.name = 'AbortError';
+                return Promise.reject(error);
+            });
+
+            await debugTransport.sendToApi({ type: 'Error' });
+
+            expect(debugTransport.circuitBreaker.failures).toBe(1);
+            expect(debugTransport.storageQueue.size()).toBe(1);
+        });
+
+        test('sendToApi() logs max-retries debug path on repeated failure', async () => {
+            mockFetch.mockRejectedValue(new Error('Network error'));
+
+            await debugTransport.sendToApi({ type: 'Error' });
+
+            expect(mockFetch).toHaveBeenCalledTimes(3); // initial + 2 retries
+            expect(debugTransport.storageQueue.size()).toBe(1);
+        });
+
+        test('flushStoredErrors logs debug path and processes queue', async () => {
+            mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+
+            // Seed the offline storage queue, then flush
+            debugTransport.storageQueue.enqueue({ type: 'Error', message: 'stored' });
+            await debugTransport.flushStoredErrors();
+
+            expect(mockFetch).toHaveBeenCalled();
+        });
+
+        test('flushWithBeacon clears queues on successful beacon send (debug)', () => {
+            global.navigator = global.navigator || {};
+            global.navigator.sendBeacon = () => true;
+
+            debugTransport.queue.push({ type: 'Error', message: 'q' });
+            debugTransport.storageQueue.enqueue({ type: 'Error', message: 's' });
+
+            expect(() => debugTransport.flushWithBeacon()).not.toThrow();
+            expect(debugTransport.queue).toHaveLength(0);
+            expect(debugTransport.storageQueue.size()).toBe(0);
+
+            delete global.navigator.sendBeacon;
         });
     });
 

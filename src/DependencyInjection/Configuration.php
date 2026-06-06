@@ -125,8 +125,12 @@ class Configuration implements ConfigurationInterface
                 ->end()
                 ->arrayNode('scrub_fields')
                     ->prototype('scalar')->end()
-                    ->defaultValue(['password', 'token', 'api_key', 'secret', 'authorization'])
-                    ->info('Field names to scrub from requests (security)')
+                    // KEEP IN SYNC with the canonical JS scrub list in
+                    // assets/src/scrub-fields.js (DEFAULT_SCRUB_FIELDS). The two
+                    // lists cannot share a runtime value (PHP vs JS), so a field
+                    // added on one side MUST be mirrored on the other.
+                    ->defaultValue(['password', 'token', 'api_key', 'secret', 'authorization', 'credit_card', 'creditcard', 'card_number', 'cvv', 'ssn', 'iban'])
+                    ->info('Field names to scrub from requests (security). Keep in sync with assets/src/scrub-fields.js.')
                 ->end()
                 ->integerNode('max_breadcrumbs')
                     ->defaultValue(50)

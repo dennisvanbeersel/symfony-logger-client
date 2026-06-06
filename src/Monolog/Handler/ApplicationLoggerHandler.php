@@ -5,10 +5,9 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\Monolog\Handler;
 
 use ApplicationLogger\Bundle\Service\ApiClient;
-use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
 use ApplicationLogger\Bundle\Service\ContextCollector;
 use ApplicationLogger\Bundle\Service\DataScrubber;
-use ApplicationLogger\Bundle\Util\StackTraceParserTrait;
+use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
 use Monolog\Handler\AbstractProcessingHandler;
 use Monolog\Level;
 use Monolog\LogRecord;
@@ -29,10 +28,8 @@ use Monolog\LogRecord;
  *
  * RESILIENCE GUARANTEE: never throws to the caller; logging must never crash the app.
  */
-class ApplicationLoggerHandler extends AbstractProcessingHandler
+final class ApplicationLoggerHandler extends AbstractProcessingHandler
 {
-    use StackTraceParserTrait;
-
     private readonly Level $minimumLevel;
 
     /** @var array<int, array<string, mixed>> */
@@ -41,8 +38,9 @@ class ApplicationLoggerHandler extends AbstractProcessingHandler
     public function __construct(
         private readonly ApiClient $apiClient,
         private readonly ContextCollector $contextCollector,
-        private readonly BreadcrumbCollector $breadcrumbCollector,
         private readonly DataScrubber $scrubber,
+        private readonly ErrorPayloadFactory $payloadFactory,
+        private readonly bool $enabled = true,
         string $captureLevel = 'error',
         private readonly string $environment = 'production',
         private readonly int $batchSize = 50,
@@ -73,6 +71,12 @@ class ApplicationLoggerHandler extends AbstractProcessingHandler
      */
     protected function write(LogRecord $record): void
     {
+        // Disabled installs (or env-gated `enabled=false`) must never ship anything,
+        // even though the handler is auto-attached to Monolog via the bundle prepend().
+        if (!$this->enabled) {
+            return;
+        }
+
         try {
             $exception = $record->context['exception'] ?? null;
 
@@ -138,43 +142,29 @@ class ApplicationLoggerHandler extends AbstractProcessingHandler
         try {
             $context = $this->contextCollector->collectContext();
 
-            return [
-                'type' => $this->truncate(\get_class($exception), 255),
-                'message' => $this->truncate($record->message, 1000),
-                'file' => $this->truncate($exception->getFile(), 500),
+            // The common ~20-field mapping lives in ErrorPayloadFactory; the handler
+            // overrides the fields it derives from the LogRecord rather than the
+            // Throwable (message/level/timestamp/context/tags) plus its line floor.
+            return $this->payloadFactory->fromThrowable($exception, $context, [
+                'message' => $this->payloadFactory->truncateValue($record->message, 1000),
                 'line' => max(1, $exception->getLine()),
-                'stack_trace' => $this->parseStackTrace($exception),
                 'level' => $this->mapLevel($record->level),
-                'source' => 'backend',
                 'timestamp' => $record->datetime->format(\DateTimeImmutable::ATOM),
                 'environment' => $context['environment'] ?? $this->environment,
-                'release' => $context['release'] ?? null,
-                'session_hash' => $this->contextCollector->getSessionHash(),
-                'server_name' => $context['server']['server_name'] ?? null,
-                'url' => $context['request']['url'] ?? null,
-                'http_method' => $context['request']['method'] ?? null,
-                'ip_address' => $context['request']['env']['REMOTE_ADDR'] ?? null,
-                'user_agent' => $context['request']['env']['HTTP_USER_AGENT'] ?? null,
-                'runtime' => 'PHP '.\PHP_VERSION,
-                'breadcrumbs' => $this->breadcrumbCollector->get(),
-                'request_data' => $context['request'] ?? null,
                 'context' => $this->scrubber->scrub($this->stripException($record->context)),
                 'tags' => [
                     'channel' => $record->channel,
                     'monolog_level' => $record->level->name,
                 ],
-            ];
+            ]);
         } catch (\Throwable) {
-            return [
-                'type' => $this->truncate(\get_class($exception), 255),
-                'message' => $this->truncate($record->message, 1000),
+            return $this->payloadFactory->minimalFallback($exception, [
+                'message' => $this->payloadFactory->truncateValue($record->message, 1000),
                 'file' => 'unknown',
                 'line' => 1,
-                'stack_trace' => [],
                 'level' => $this->mapLevel($record->level),
-                'source' => 'backend',
                 'timestamp' => $record->datetime->format(\DateTimeImmutable::ATOM),
-            ];
+            ]);
         }
     }
 
@@ -204,8 +194,8 @@ class ApplicationLoggerHandler extends AbstractProcessingHandler
         return [
             'timestamp' => $record->datetime->format(\DateTimeImmutable::ATOM),
             'severity' => $this->mapSeverity($record->level),
-            'message' => $this->truncate($record->message, 8000),
-            'app_name' => $this->truncate($record->channel, 255),
+            'message' => $this->payloadFactory->truncateValue($record->message, 8000),
+            'app_name' => $this->payloadFactory->truncateValue($record->channel, 255),
             'environment' => $this->environment,
             'context' => $context,
         ];
@@ -224,10 +214,10 @@ class ApplicationLoggerHandler extends AbstractProcessingHandler
         foreach ($data as $key => $value) {
             $k = (string) $key;
             if (\is_scalar($value) || null === $value) {
-                $out[$k] = $this->truncate($this->stringify($value), 4000);
+                $out[$k] = $this->payloadFactory->truncateValue($this->stringify($value), 4000);
             } else {
                 try {
-                    $out[$k] = $this->truncate((string) json_encode($value), 4000);
+                    $out[$k] = $this->payloadFactory->truncateValue((string) json_encode($value), 4000);
                 } catch (\Throwable) {
                     $out[$k] = '[unserializable]';
                 }

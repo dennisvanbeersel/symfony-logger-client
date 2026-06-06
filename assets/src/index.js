@@ -24,6 +24,7 @@ import { ReplayBuffer } from './replay-buffer.js';
 import { ErrorDetector } from './error-detector.js';
 import { SessionManager } from './session-manager.js';
 import { StorageManager } from './storage-manager.js';
+import { DEFAULT_SCRUB_FIELDS } from './scrub-fields.js';
 
 /**
  * Main ApplicationLogger class
@@ -72,7 +73,9 @@ class ApplicationLogger {
         this.config = {
             // Core config
             debug: false,
-            scrubFields: ['password', 'token', 'api_key', 'secret'],
+            // Canonical scrub list (single source of truth, see scrub-fields.js).
+            // Spread into a fresh array so callers cannot mutate the frozen export.
+            scrubFields: [...DEFAULT_SCRUB_FIELDS],
 
             // Session replay config (error-triggered only)
             sessionReplayEnabled: true,
@@ -257,30 +260,7 @@ class ApplicationLogger {
 
         // 2. Install session replay tracking (if enabled)
         if (this.config.sessionReplayEnabled && this.heatmap) {
-            this.heatmap.install();
-            this.errorDetector.install();
-
-            // Periodic saves to localStorage (every 5 seconds)
-            // This ensures buffer persists even if page closes unexpectedly
-            this.bufferSaveInterval = setInterval(() => {
-                this.saveBufferToStorage();
-            }, 5000);
-
-            // Save buffer to localStorage on page unload
-            window.addEventListener('beforeunload', () => {
-                this.saveBufferToStorage();
-            });
-
-            // Also save on visibility change (mobile)
-            document.addEventListener('visibilitychange', () => {
-                if (document.visibilityState === 'hidden') {
-                    this.saveBufferToStorage();
-                }
-            });
-
-            if (this.config.debug) {
-                console.warn('ApplicationLogger: Session replay enabled (error-triggered, periodic saves every 5s)');
-            }
+            this.installReplayLifecycle();
         }
 
         // 3. Install error capture LAST (processes buffered errors, then starts live capture)
@@ -302,6 +282,56 @@ class ApplicationLogger {
                 sdkLoadTime: sdkLoadTime + 'ms',
                 bufferedErrors: window._appLoggerBuffer?.errors?.length || 0,
             });
+        }
+    }
+
+    /**
+     * Install session-replay tracking and its unload/visibility lifecycle hooks.
+     *
+     * The unload/visibility handlers are stored as bound references so they can
+     * be removed again in {@link teardownReplayLifecycle} (and thus on
+     * sessionReplay.disable()), so repeated enable/disable cycles in SPAs don't
+     * leak listeners or the periodic-save interval.
+     */
+    installReplayLifecycle() {
+        this.heatmap.install();
+        this.errorDetector.install();
+
+        // Periodic save so the buffer survives an unexpected page close.
+        this.bufferSaveInterval = setInterval(() => {
+            this.saveBufferToStorage();
+        }, 5000);
+
+        this.boundSaveBuffer = () => this.saveBufferToStorage();
+        this.boundVisibilitySave = () => {
+            if (document.visibilityState === 'hidden') {
+                this.saveBufferToStorage();
+            }
+        };
+
+        window.addEventListener('beforeunload', this.boundSaveBuffer);
+        document.addEventListener('visibilitychange', this.boundVisibilitySave);
+
+        if (this.config.debug) {
+            console.warn('ApplicationLogger: Session replay enabled (error-triggered, periodic saves every 5s)');
+        }
+    }
+
+    /**
+     * Remove the session-replay lifecycle hooks and stop periodic saves.
+     */
+    teardownReplayLifecycle() {
+        if (this.bufferSaveInterval) {
+            clearInterval(this.bufferSaveInterval);
+            this.bufferSaveInterval = null;
+        }
+        if (this.boundSaveBuffer) {
+            window.removeEventListener('beforeunload', this.boundSaveBuffer);
+            this.boundSaveBuffer = null;
+        }
+        if (this.boundVisibilitySave) {
+            document.removeEventListener('visibilitychange', this.boundVisibilitySave);
+            this.boundVisibilitySave = null;
         }
     }
 
@@ -415,8 +445,7 @@ class ApplicationLogger {
                     if (!this.heatmap) {
                         this.initializeSessionReplay();
                         if (this.initialized && this.heatmap) {
-                            this.heatmap.install();
-                            this.errorDetector.install();
+                            this.installReplayLifecycle();
                         }
                     }
 
@@ -433,13 +462,10 @@ class ApplicationLogger {
                 if (this.config.sessionReplayEnabled) {
                     this.config.sessionReplayEnabled = false;
 
-                    // Clear the buffer save interval (prevents memory leak in SPAs)
-                    if (this.bufferSaveInterval) {
-                        clearInterval(this.bufferSaveInterval);
-                        this.bufferSaveInterval = null;
-                    }
+                    // Stop the periodic save + remove unload/visibility hooks
+                    // (prevents listener/interval leaks in SPAs).
+                    this.teardownReplayLifecycle();
 
-                    // Clean up and save buffer
                     if (this.heatmap) {
                         this.heatmap.cleanup();
                     }

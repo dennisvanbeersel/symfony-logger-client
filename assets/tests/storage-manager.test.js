@@ -5,6 +5,7 @@
  * cleanup, and size estimation.
  */
 
+import { jest } from '@jest/globals';
 import { StorageManager } from '../src/storage-manager.js';
 
 // Mock localStorage with quota simulation
@@ -379,6 +380,77 @@ describe('StorageManager', () => {
             // Restore
             global.localStorage = mockLocalStorage;
         });
+
+        test('getStats reports used bytes synchronously and unknown free space', () => {
+            storage.save({ buffer: [{ type: 'click', timestamp: Date.now() }] });
+
+            const stats = storage.getStats();
+
+            expect(typeof stats.usedBytes).toBe('number');
+            expect(stats.availableMB).toBe('unknown');
+            expect(stats.totalMB).toBe('unknown');
+            expect(stats.maxBufferSizeMB).toBe(5);
+        });
+    });
+
+    describe('getSpaceInfo (I8 - Storage Quota API, never brute-forces)', () => {
+        afterEach(() => {
+            if (global.navigator) {
+                delete global.navigator.storage;
+            }
+        });
+
+        test('uses navigator.storage.estimate() when available', async () => {
+            global.navigator = global.navigator || {};
+            global.navigator.storage = {
+                estimate: async () => ({ usage: 2 * 1024 * 1024, quota: 10 * 1024 * 1024 }),
+            };
+
+            const info = await storage.getSpaceInfo();
+
+            expect(info.usedBytes).toBe(2 * 1024 * 1024);
+            expect(info.usedMB).toBe('2.00');
+            expect(info.availableMB).toBe('8.00');
+            expect(info.totalMB).toBe('10.00');
+        });
+
+        test('reports unknown free space when the Storage Quota API is unavailable', async () => {
+            if (global.navigator) {
+                delete global.navigator.storage;
+            }
+
+            const info = await storage.getSpaceInfo();
+
+            expect(typeof info.usedBytes).toBe('number');
+            expect(info.availableMB).toBe('unknown');
+            expect(info.totalMB).toBe('unknown');
+        });
+
+        test('falls back to unknown when estimate() rejects', async () => {
+            global.navigator = global.navigator || {};
+            global.navigator.storage = {
+                estimate: async () => {
+                    throw new Error('not allowed');
+                },
+            };
+
+            const info = await storage.getSpaceInfo();
+
+            expect(info.availableMB).toBe('unknown');
+            expect(info.totalMB).toBe('unknown');
+        });
+
+        test('never writes a probe key to localStorage', async () => {
+            global.navigator = global.navigator || {};
+            global.navigator.storage = {
+                estimate: async () => ({ usage: 1, quota: 2 }),
+            };
+
+            const setSpy = jest.spyOn(Storage.prototype, 'setItem');
+            await storage.getSpaceInfo();
+            expect(setSpy).not.toHaveBeenCalled();
+            setSpy.mockRestore();
+        });
     });
 
     describe('Clear', () => {
@@ -398,37 +470,23 @@ describe('StorageManager', () => {
             expect(storage.isAvailable()).toBe(true);
         });
 
-        test.skip('returns false when localStorage fails', () => {
-            // SKIPPED: This test is difficult to properly mock in Jest + ES modules + jsdom
-            // environment due to how localStorage references are resolved at module load time.
-            //
-            // COVERAGE: The main error scenario (QuotaExceededError) is tested and passing
-            // in "handles QuotaExceededError gracefully" test above.
-            //
-            // Test that isAvailable correctly detects when localStorage is unavailable
-            // by creating a completely broken localStorage mock
-            const brokenStorage = {
-                getItem: () => { throw new Error('disabled'); },
-                setItem: () => { throw new Error('disabled'); },
-                removeItem: () => { throw new Error('disabled'); },
-                clear: () => {},
+        test('returns false when localStorage fails', () => {
+            // jsdom localStorage is a real Storage instance, so override the prototype
+            // method to simulate private mode / disabled storage that throws on setItem.
+            const originalSetItem = Storage.prototype.setItem;
+            Storage.prototype.setItem = () => {
+                throw new Error('disabled');
             };
 
-            // Set on both global and window (for jsdom compatibility)
-            const originalGlobal = global.localStorage;
-            const originalWindow = window.localStorage;
+            try {
+                const testStorage = new StorageManager({ maxBufferSizeMB: 5 });
 
-            global.localStorage = brokenStorage;
-            window.localStorage = brokenStorage;
-
-            const testStorage = new StorageManager({ maxBufferSizeMB: 5 });
-
-            // isAvailable should return false when localStorage throws errors
-            expect(testStorage.isAvailable()).toBe(false);
-
-            // Restore both
-            global.localStorage = originalGlobal;
-            window.localStorage = originalWindow;
+                // isAvailable must never throw and must report unavailability
+                expect(() => testStorage.isAvailable()).not.toThrow();
+                expect(testStorage.isAvailable()).toBe(false);
+            } finally {
+                Storage.prototype.setItem = originalSetItem;
+            }
         });
     });
 
@@ -439,44 +497,49 @@ describe('StorageManager', () => {
             expect(success).toBe(false);
         });
 
-        test.skip('handles save failures gracefully', () => {
-            // SKIPPED: This test is difficult to properly mock in Jest + ES modules + jsdom
-            // environment due to how localStorage references are resolved at module load time.
-            //
-            // COVERAGE: Error handling is tested by multiple passing tests:
-            // - "handles invalid buffer data gracefully" (input validation)
-            // - "handles QuotaExceededError gracefully" (storage errors)
-            // - Error handling code uses simple try-catch blocks
-            //
-            // Test that save returns false when localStorage throws non-quota errors
-            const errorStorage = {
-                getItem: () => null,
-                setItem: () => {
-                    const error = new Error('Storage error');
-                    error.name = 'UnknownError'; // Not QuotaExceededError
-                    throw error;
-                },
-                removeItem: () => {},
-                clear: () => {},
+        test('handles save failures gracefully', () => {
+            // Override the real Storage prototype to throw a non-quota error
+            const originalSetItem = Storage.prototype.setItem;
+            Storage.prototype.setItem = () => {
+                const error = new Error('Storage error');
+                error.name = 'UnknownError'; // Not QuotaExceededError
+                throw error;
             };
 
-            // Set on both global and window (for jsdom compatibility)
-            const originalGlobal = global.localStorage;
-            const originalWindow = window.localStorage;
+            try {
+                const testStorage = new StorageManager({ maxBufferSizeMB: 5 });
 
-            global.localStorage = errorStorage;
-            window.localStorage = errorStorage;
+                // Save must never throw and must return the documented false on failure
+                let success;
+                expect(() => {
+                    success = testStorage.save({ buffer: [{ type: 'click' }] });
+                }).not.toThrow();
+                expect(success).toBe(false);
+            } finally {
+                Storage.prototype.setItem = originalSetItem;
+            }
+        });
 
-            const testStorage = new StorageManager({ maxBufferSizeMB: 5 });
+        test('returns false when save fails even after quota cleanup', () => {
+            // Always throw QuotaExceededError so the retry path also fails
+            const originalSetItem = Storage.prototype.setItem;
+            Storage.prototype.setItem = () => {
+                const error = new Error('Quota');
+                error.name = 'QuotaExceededError';
+                throw error;
+            };
 
-            // Save should fail and return false
-            const success = testStorage.save({ buffer: [{ type: 'click' }] });
+            try {
+                const testStorage = new StorageManager({ maxBufferSizeMB: 5 });
 
-            expect(success).toBe(false);
-
-            // Restore both
-            global.localStorage = originalGlobal;
-            window.localStorage = originalWindow;
+                let success;
+                expect(() => {
+                    success = testStorage.save({ buffer: [{ type: 'click' }] });
+                }).not.toThrow();
+                expect(success).toBe(false);
+            } finally {
+                Storage.prototype.setItem = originalSetItem;
+            }
         });
     });
 });

@@ -7,9 +7,8 @@ namespace ApplicationLogger\Bundle\EventSubscriber;
 use ApplicationLogger\Bundle\Service\ApiClient;
 use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
 use ApplicationLogger\Bundle\Service\ContextCollector;
-use ApplicationLogger\Bundle\Util\StackTraceParserTrait;
+use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
-use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Event\ExceptionEvent;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Symfony\Component\HttpKernel\KernelEvents;
@@ -27,14 +26,13 @@ use Symfony\Component\HttpKernel\KernelEvents;
  * Priority is set to -100 to run AFTER all other exception listeners
  * (including those that might handle/suppress the exception).
  */
-class ExceptionSubscriber implements EventSubscriberInterface
+final class ExceptionSubscriber implements EventSubscriberInterface
 {
-    use StackTraceParserTrait;
-
     public function __construct(
         private readonly ApiClient $apiClient,
         private readonly ContextCollector $contextCollector,
         private readonly BreadcrumbCollector $breadcrumbCollector,
+        private readonly ErrorPayloadFactory $payloadFactory,
         private readonly bool $debug = false,
     ) {
     }
@@ -57,10 +55,9 @@ class ExceptionSubscriber implements EventSubscriberInterface
     {
         try {
             $exception = $event->getThrowable();
-            $request = $event->getRequest();
 
             // Build error payload
-            $payload = $this->buildPayload($exception, $request);
+            $payload = $this->buildPayload($exception);
 
             // Send to API (async, fire-and-forget)
             $this->apiClient->sendError($payload);
@@ -92,11 +89,13 @@ class ExceptionSubscriber implements EventSubscriberInterface
      * Build error payload from exception.
      *
      * Returns payload matching exact API format with snake_case field names.
-     * See ErrorIngestDto for complete field specifications.
+     * See ErrorIngestDto for complete field specifications. The common ~20-field
+     * mapping (including http_method) lives in ErrorPayloadFactory; this method
+     * only supplies the subscriber-specific fields (http_status_code + exception tags).
      *
      * @return array<string, mixed>
      */
-    private function buildPayload(\Throwable $exception, Request $request): array
+    private function buildPayload(\Throwable $exception): array
     {
         try {
             $context = $this->contextCollector->collectContext();
@@ -104,50 +103,18 @@ class ExceptionSubscriber implements EventSubscriberInterface
             // Extract HTTP status code from exception
             $httpStatusCode = $this->extractHttpStatusCode($exception);
 
-            return [
-                // Required fields (flat structure with snake_case)
-                // Apply length limits to prevent API validation failures
-                'type' => $this->truncate(\get_class($exception), 255),
-                'message' => $this->truncate($exception->getMessage(), 1000),
-                'file' => $this->truncate($exception->getFile(), 500),
-                'line' => $exception->getLine(),
-                'stack_trace' => $this->parseStackTrace($exception),
-
-                // Optional fields (all snake_case to match API)
-                'level' => 'error',
-                'source' => 'backend',
-                'environment' => $context['environment'] ?? 'production',
-                'release' => $context['release'] ?? null,
-                'session_hash' => $this->contextCollector->getSessionHash(),
-                'timestamp' => (new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM),
-                'server_name' => $context['server']['server_name'] ?? null,
-                'url' => $context['request']['url'] ?? null,
-                'http_method' => $context['request']['method'] ?? null,
+            return $this->payloadFactory->fromThrowable($exception, $context, [
                 'http_status_code' => $httpStatusCode,
-                'ip_address' => $context['request']['env']['REMOTE_ADDR'] ?? null,
-                'user_agent' => $context['request']['env']['HTTP_USER_AGENT'] ?? null,
-                'runtime' => 'PHP '.\PHP_VERSION,
-                'breadcrumbs' => $this->breadcrumbCollector->get(),
-                'request_data' => $context['request'] ?? null,
-                'context' => $context['server'] ?? [],
                 'tags' => [
                     'exception_class' => \get_class($exception),
                     'exception_code' => (string) $exception->getCode(),
                 ],
-            ];
+            ]);
         } catch (\Throwable) {
-            // If payload building fails, return minimal payload
-            return [
-                'type' => $this->truncate(\get_class($exception), 255),
-                'message' => $this->truncate($exception->getMessage(), 1000),
-                'file' => $this->truncate($exception->getFile(), 500),
-                'line' => $exception->getLine(),
-                'stack_trace' => [],
-                'level' => 'error',
-                'source' => 'backend',
-                'timestamp' => (new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM),
+            // If payload building fails, return minimal payload.
+            return $this->payloadFactory->minimalFallback($exception, [
                 'http_status_code' => 500, // Default to 500 for uncaught exceptions
-            ];
+            ]);
         }
     }
 

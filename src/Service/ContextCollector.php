@@ -56,13 +56,24 @@ class ContextCollector
 
             $headers = [];
             foreach ($request->headers->all() as $key => $value) {
+                // Cookie headers carry session identifiers, CSRF tokens, and
+                // remember-me secrets. Their names do not match any scrub
+                // fragment, so force-redact them regardless of scrub_fields.
+                if (\in_array(strtolower((string) $key), ['cookie', 'set-cookie'], true)) {
+                    $headers[$key] = '[REDACTED]';
+                    continue;
+                }
+
                 $headers[$key] = \is_array($value) ? implode(', ', $value) : $value;
             }
 
             return [
-                'url' => $request->getUri(),
+                // getUri()/getQueryString() expose raw credentials/PII in the query
+                // (e.g. ?token=, ?password=). Scrub query VALUES whose name is
+                // sensitive before they leave the host. Path/host are kept intact.
+                'url' => $this->scrubber->scrubUrl($request->getUri()),
                 'method' => $this->sanitizeHttpMethod($request->getMethod()),
-                'query_string' => $request->getQueryString(),
+                'query_string' => $this->scrubber->scrubQueryString($request->getQueryString()),
                 'headers' => $this->scrubber->scrub($headers),
                 'data' => $this->scrubber->scrub($request->request->all()),
                 'cookies' => $this->scrubber->scrub($request->cookies->all()),
@@ -70,7 +81,8 @@ class ContextCollector
                     'REMOTE_ADDR' => $this->scrubber->anonymizeIp($request->getClientIp()),
                     'SERVER_NAME' => $request->getHost(),
                     'SERVER_PORT' => $request->getPort(),
-                    'REQUEST_URI' => $request->getRequestUri(),
+                    // getRequestUri() is path+query; scrub sensitive query values too.
+                    'REQUEST_URI' => $this->scrubber->scrubUrl($request->getRequestUri()),
                     'HTTP_USER_AGENT' => $request->headers->get('User-Agent'),
                 ],
             ];
@@ -96,17 +108,15 @@ class ContextCollector
 
             $session = $request->getSession();
 
-            // Try to get user from security token
-            $user = null;
-            if ($session->has('_security_main')) {
-                // This is a simplified approach - in real implementation,
-                // you'd inject Security and get the actual user
-                // For now, we'll just capture session ID
-            }
+            // Never emit the live PHP session id verbatim: it is the real
+            // framework session identifier and is usable for session hijacking.
+            // Hash it (SHA-256) so sessions can still be correlated without
+            // shipping a usable credential. Consistent with getSessionHash().
+            $rawSessionId = $session->getId();
 
             return [
                 'ip_address' => $this->scrubber->anonymizeIp($request->getClientIp()),
-                'session_id' => $session->getId(),
+                'session_id' => '' !== $rawSessionId ? hash('sha256', $rawSessionId) : null,
             ];
         } catch (\Throwable) {
             return null;
@@ -160,8 +170,8 @@ class ContextCollector
             ];
 
             // Detect web server software (Apache, Nginx, Caddy, etc.)
-            if (isset($_SERVER['SERVER_SOFTWARE'])) {
-                $serverSoftware = $_SERVER['SERVER_SOFTWARE'];
+            $serverSoftware = $this->serverValue('SERVER_SOFTWARE');
+            if (null !== $serverSoftware) {
                 $serverInfo['server_software'] = $serverSoftware;
 
                 // Parse server name and version
@@ -172,12 +182,14 @@ class ContextCollector
             }
 
             // Add additional server details if available
-            if (isset($_SERVER['SERVER_PROTOCOL'])) {
-                $serverInfo['server_protocol'] = $_SERVER['SERVER_PROTOCOL'];
+            $serverProtocol = $this->serverValue('SERVER_PROTOCOL');
+            if (null !== $serverProtocol) {
+                $serverInfo['server_protocol'] = $serverProtocol;
             }
 
-            if (isset($_SERVER['HTTPS'])) {
-                $serverInfo['https'] = 'on' === strtolower($_SERVER['HTTPS']);
+            $https = $this->serverValue('HTTPS');
+            if (null !== $https) {
+                $serverInfo['https'] = 'on' === strtolower($https);
             }
 
             return $serverInfo;
@@ -185,6 +197,24 @@ class ContextCollector
             // Defensive catch for resilience - even though nothing should throw
             return [];
         }
+    }
+
+    /**
+     * Read a server variable, preferring the current Request's server bag so we
+     * use the framework's request scope rather than the raw $_SERVER superglobal.
+     *
+     * Falls back to $_SERVER only when there is no active Request (e.g. CLI),
+     * where the server bag is unavailable but $_SERVER may still hold values.
+     */
+    private function serverValue(string $key): ?string
+    {
+        $request = $this->requestStack->getCurrentRequest();
+
+        $value = null !== $request
+            ? $request->server->get($key)
+            : ($_SERVER[$key] ?? null);
+
+        return null !== $value ? (string) $value : null;
     }
 
     /**

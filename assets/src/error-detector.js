@@ -12,6 +12,8 @@
  * - Prevents duplicate captures
  * - Configurable error filtering
  */
+import { hasUserInteraction } from './util/interaction.js';
+
 export class ErrorDetector {
     /**
      * @param {ReplayBuffer} replayBuffer - Replay buffer instance
@@ -69,10 +71,14 @@ export class ErrorDetector {
             // This detector will be called FROM the Client class when errors occur
             // This design prevents double-handling of errors
 
-            // Set up cleanup for recent errors (prevent duplicates)
+            // Replay-capture dedup window. Deliberately LONGER (60s) than the
+            // Transport network dedup window (5s): re-capturing a full session
+            // replay for the same error within a page view adds little value and
+            // is expensive, whereas Transport only needs to collapse tight bursts
+            // of an identical payload. See transport.js deduplicationWindow.
             this.recentErrorsCleanupInterval = setInterval(() => {
                 this.recentErrors.clear();
-            }, 60000); // Clear every 60 seconds
+            }, 60000);
 
             this.isInstalled = true;
 
@@ -252,28 +258,21 @@ export class ErrorDetector {
      *
      * This method is called AFTER the error + pre-error replay has been sent.
      * It continues recording user actions for the configured duration/clicks,
-     * then sends the recovery session as a separate request.
-     *
-     * EDGE CASES HANDLED:
-     * - Prevents multiple concurrent recovery recordings
-     * - Cleans up previous recording if new error occurs
-     * - Proper cleanup of intervals and event listeners
-     * - Handles page unload gracefully
-     * - Uses sendBeacon for reliable unload transmission
-     * - Handles null/undefined buffer states
+     * then sends the recovery session as a separate request. It is defensive
+     * about concurrent recordings, missing dependencies and page unload, and
+     * cleans up all intervals/timers/listeners on completion.
      *
      * @param {Error} error - The error object
      * @returns {Promise<void>}
      */
     async startRecoveryRecording(error) {
         try {
-            // EDGE CASE 1: Check if already recording recovery
+            // A new error supersedes any in-flight recovery recording.
             if (this.isRecordingRecovery) {
                 if (this.config.debug) {
                     console.warn('ErrorDetector: Already recording recovery, cleaning up previous recording');
                 }
 
-                // Clean up previous recording
                 if (this.recoveryRecordingCleanup) {
                     this.recoveryRecordingCleanup();
                 }
@@ -281,13 +280,11 @@ export class ErrorDetector {
                 this.stats.recoveryRecordingsCancelled++;
             }
 
-            // EDGE CASE 2: Validate dependencies
             if (!this.replayBuffer || !this.sessionManager) {
                 console.error('ErrorDetector: Cannot start recovery recording - missing dependencies');
                 return;
             }
 
-            // EDGE CASE 3: Validate error object
             if (!error || typeof error !== 'object') {
                 console.error('ErrorDetector: Invalid error object for recovery recording');
                 return;
@@ -308,8 +305,6 @@ export class ErrorDetector {
                 url: window.location.href,
             };
 
-            // Mark buffer as recording recovery (after error)
-            // EDGE CASE 4: Validate method exists
             if (typeof this.replayBuffer.startRecordingAfterError === 'function') {
                 this.replayBuffer.startRecordingAfterError(errorContext);
             } else {
@@ -321,18 +316,24 @@ export class ErrorDetector {
             // Wait for recording to complete (time limit or click limit)
             return new Promise((resolve) => {
                 let checkCompleteInterval = null;
+                let safetyTimeout = null;
                 let unloadHandler = null;
                 let visibilityHandler = null;
 
-                // Create cleanup function to prevent memory leaks
+                // Single cleanup path: clears the completion interval, the
+                // absolute safety timeout (previously leaked - M16) and the
+                // unload/visibility listeners, then resets recovery state.
                 const cleanup = () => {
-                    // Clear interval
                     if (checkCompleteInterval) {
                         clearInterval(checkCompleteInterval);
                         checkCompleteInterval = null;
                     }
 
-                    // Remove event listeners
+                    if (safetyTimeout) {
+                        clearTimeout(safetyTimeout);
+                        safetyTimeout = null;
+                    }
+
                     if (unloadHandler) {
                         window.removeEventListener('beforeunload', unloadHandler);
                         unloadHandler = null;
@@ -343,7 +344,6 @@ export class ErrorDetector {
                         visibilityHandler = null;
                     }
 
-                    // Clear recovery state
                     this.isRecordingRecovery = false;
                     this.recoveryRecordingCleanup = null;
                 };
@@ -356,11 +356,10 @@ export class ErrorDetector {
                         console.warn(`ErrorDetector: Finishing recovery recording (reason: ${reason})`);
                     }
 
-                    // Clean up listeners FIRST
+                    // Clean up listeners/timers FIRST.
                     cleanup();
 
-                    // Get recovery events
-                    // EDGE CASE 5: Validate method exists and returns array
+                    // Collect recovery events if the buffer still exposes them.
                     let recoveryEvents = [];
                     if (this.replayBuffer && typeof this.replayBuffer.getEventsByPhase === 'function') {
                         recoveryEvents = this.replayBuffer.getEventsByPhase('after_error') || [];
@@ -379,10 +378,9 @@ export class ErrorDetector {
                     resolve();
                 };
 
-                // Check every second if recording is complete
+                // Poll once per second for the buffer's stop condition.
                 checkCompleteInterval = setInterval(() => {
                     try {
-                        // EDGE CASE 6: Validate buffer still exists
                         if (!this.replayBuffer || typeof this.replayBuffer.shouldStopRecording !== 'function') {
                             finishRecording('buffer-unavailable');
                             return;
@@ -397,13 +395,12 @@ export class ErrorDetector {
                     }
                 }, 1000);
 
-                // Listen for page unload (use sendBeacon for reliability)
+                // Finish (with beacon) when the page goes away (desktop + mobile).
                 unloadHandler = () => {
                     finishRecording('page-unload');
                 };
                 window.addEventListener('beforeunload', unloadHandler, { once: true });
 
-                // Also listen for visibility change (mobile)
                 visibilityHandler = () => {
                     if (document.visibilityState === 'hidden') {
                         finishRecording('page-hidden');
@@ -411,16 +408,16 @@ export class ErrorDetector {
                 };
                 document.addEventListener('visibilitychange', visibilityHandler, { once: true });
 
-                // EDGE CASE 7: Safety timeout (absolute maximum)
-                // If something goes wrong, force finish after 2 minutes
-                setTimeout(() => {
+                // Absolute-maximum safety timeout. Its id is now captured so
+                // cleanup() clears it (previously leaked - M16).
+                safetyTimeout = setTimeout(() => {
                     if (this.isRecordingRecovery) {
                         if (this.config.debug) {
                             console.warn('ErrorDetector: Recovery recording safety timeout (2 minutes)');
                         }
                         finishRecording('safety-timeout');
                     }
-                }, 120000); // 2 minutes absolute maximum
+                }, 120000);
             });
         } catch (error) {
             console.error('ErrorDetector: Failed to start recovery recording', error);
@@ -442,9 +439,8 @@ export class ErrorDetector {
                 return; // No recovery data
             }
 
-            // Only send if there are click events (user interactions)
-            const clickCount = events.filter(e => e && e.type === 'click').length;
-            if (clickCount === 0) {
+            // Only send when the recovery window contains a user interaction.
+            if (!hasUserInteraction(events)) {
                 if (this.config.debug) {
                     console.warn('ErrorDetector: No click events in recovery session, skipping send', {
                         totalEvents: events.length,

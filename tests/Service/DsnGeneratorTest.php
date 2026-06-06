@@ -134,7 +134,8 @@ final class DsnGeneratorTest extends TestCase
         $generator = new DsnGenerator('https://applogger.eu');
         $endpoint = $generator->getIngestEndpoint();
 
-        $this->assertSame('https://applogger.eu/api/errors/ingest', $endpoint);
+        // Canonical versioned ingest route (M4: was the divergent /api/errors/ingest).
+        $this->assertSame('https://applogger.eu/api/v1/errors', $endpoint);
     }
 
     public function testGetIngestEndpointWithTrailingSlash(): void
@@ -142,7 +143,7 @@ final class DsnGeneratorTest extends TestCase
         $generator = new DsnGenerator('https://applogger.eu/');
         $endpoint = $generator->getIngestEndpoint();
 
-        $this->assertSame('https://applogger.eu/api/errors/ingest', $endpoint);
+        $this->assertSame('https://applogger.eu/api/v1/errors', $endpoint);
     }
 
     public function testGetIngestEndpointWithPort(): void
@@ -150,7 +151,7 @@ final class DsnGeneratorTest extends TestCase
         $generator = new DsnGenerator('https://localhost:8111');
         $endpoint = $generator->getIngestEndpoint();
 
-        $this->assertSame('https://localhost:8111/api/errors/ingest', $endpoint);
+        $this->assertSame('https://localhost:8111/api/v1/errors', $endpoint);
     }
 
     public function testRoundTripGenerateAndParse(): void

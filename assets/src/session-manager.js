@@ -11,7 +11,37 @@
  * - Session expiration (idle timeout)
  * - Session metadata (start time, page count)
  */
+import { sha256Hex, hashHex64 } from './util/hash.js';
+
 export class SessionManager {
+    /**
+     * Compute a GDPR-friendly session hash for a session id.
+     *
+     * Prefers a real SHA-256 digest (Web Crypto); falls back to a 64-char
+     * djb2 hex when SubtleCrypto is unavailable. Always resolves to a
+     * 64-character hex string (matches the API's session_hash contract).
+     *
+     * Centralised here so the crypto lives with session concerns rather than
+     * being duplicated inside the Client.
+     *
+     * @param {string} sessionId - Session identifier to hash
+     * @returns {Promise<string>} 64-character hex hash
+     */
+    static async computeSessionHash(sessionId) {
+        const digest = await sha256Hex(sessionId);
+        return digest ?? hashHex64(sessionId);
+    }
+
+    /**
+     * Synchronous (non-cryptographic) session hash fallback.
+     *
+     * @param {string} sessionId - Session identifier to hash
+     * @returns {string} 64-character hex hash
+     */
+    static computeSessionHashSync(sessionId) {
+        return hashHex64(sessionId);
+    }
+
     /**
      * @param {Object} [config] - Configuration options
      * @param {number} [config.sessionTimeoutMinutes=30] - Session timeout in minutes

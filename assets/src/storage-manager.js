@@ -321,64 +321,88 @@ export class StorageManager {
     }
 
     /**
-     * Get available localStorage space (approximate)
+     * Synchronously sum the bytes our keys occupy in localStorage.
      *
-     * @returns {Object} Space info
+     * Cheap (iterates existing keys only) and, crucially, never writes - unlike
+     * the old quota probe which wrote ~50MB synchronously to find the limit.
+     *
+     * @returns {number} Approximate used bytes
      */
-    getSpaceInfo() {
+    getUsedBytes() {
         try {
-            const testKey = '_app_logger_space_test';
-            const testData = '0'.repeat(1024); // 1KB test string
-
-            let available = 0;
             let used = 0;
-
-            // Estimate used space
             for (const key in localStorage) {
                 if (Object.prototype.hasOwnProperty.call(localStorage, key)) {
                     used += localStorage[key].length + key.length;
                 }
             }
-
-            // Estimate available space (crude test)
-            try {
-                for (let i = 0; i < 10000; i++) {
-                    localStorage.setItem(testKey, testData.repeat(i));
-                    available = i * 1024;
-                }
-            } catch {
-                // Quota exceeded - we found the limit
-            } finally {
-                localStorage.removeItem(testKey);
-            }
-
-            return {
-                usedBytes: used,
-                usedMB: (used / 1024 / 1024).toFixed(2),
-                availableMB: (available / 1024 / 1024).toFixed(2),
-                totalMB: ((used + available) / 1024 / 1024).toFixed(2),
-            };
+            return used;
         } catch {
-            return {
-                usedBytes: 0,
-                usedMB: 'unknown',
-                availableMB: 'unknown',
-                totalMB: 'unknown',
-            };
+            return 0;
         }
     }
 
     /**
-     * Get storage statistics
+     * Get localStorage space info using the Storage Quota API (async).
+     *
+     * Uses navigator.storage.estimate() when available - it reports the
+     * origin's quota/usage WITHOUT touching the main thread or writing data.
+     * When unavailable, available/total are reported as 'unknown' (we never
+     * brute-force the quota by writing large payloads - I8).
+     *
+     * @returns {Promise<Object>} Space info
+     */
+    async getSpaceInfo() {
+        const usedBytes = this.getUsedBytes();
+        const usedMB = (usedBytes / 1024 / 1024).toFixed(2);
+
+        try {
+            if (typeof navigator !== 'undefined'
+                && navigator.storage
+                && typeof navigator.storage.estimate === 'function') {
+                const estimate = await navigator.storage.estimate();
+                const usage = typeof estimate.usage === 'number' ? estimate.usage : null;
+                const quota = typeof estimate.quota === 'number' ? estimate.quota : null;
+
+                return {
+                    usedBytes: usage ?? usedBytes,
+                    usedMB: usage !== null ? (usage / 1024 / 1024).toFixed(2) : usedMB,
+                    availableMB: (quota !== null && usage !== null)
+                        ? ((quota - usage) / 1024 / 1024).toFixed(2)
+                        : 'unknown',
+                    totalMB: quota !== null ? (quota / 1024 / 1024).toFixed(2) : 'unknown',
+                };
+            }
+        } catch {
+            // Estimate failed - fall through to the unknown/used-only result.
+        }
+
+        return {
+            usedBytes,
+            usedMB,
+            availableMB: 'unknown',
+            totalMB: 'unknown',
+        };
+    }
+
+    /**
+     * Get storage statistics.
+     *
+     * Synchronous and side-effect-free: includes the save/load counters plus a
+     * cheap used-bytes figure. Free/total space requires the async Storage
+     * Quota API - see {@link getSpaceInfo}.
      *
      * @returns {Object}
      */
     getStats() {
-        const spaceInfo = this.getSpaceInfo();
+        const usedBytes = this.getUsedBytes();
 
         return {
             ...this.stats,
-            ...spaceInfo,
+            usedBytes,
+            usedMB: (usedBytes / 1024 / 1024).toFixed(2),
+            availableMB: 'unknown',
+            totalMB: 'unknown',
             maxBufferSizeMB: this.config.maxBufferSizeMB,
         };
     }

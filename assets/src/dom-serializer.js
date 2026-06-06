@@ -403,34 +403,6 @@ export class DOMSerializer {
         }
     }
 
-    /**
-     * Compress serialized structure (remove nulls, optimize).
-     *
-     * @param {Object} serialized - Serialized DOM structure
-     * @returns {Object} Compressed structure
-     */
-    compress(serialized) {
-        // Remove null/undefined values
-        const removeNulls = (obj) => {
-            if (Array.isArray(obj)) {
-                return obj.map(removeNulls);
-            }
-
-            if (obj !== null && typeof obj === 'object') {
-                const cleaned = {};
-                for (const key in obj) {
-                    if (obj[key] !== null && obj[key] !== undefined) {
-                        cleaned[key] = removeNulls(obj[key]);
-                    }
-                }
-                return cleaned;
-            }
-
-            return obj;
-        };
-
-        return removeNulls(serialized);
-    }
 }
 
 /**
@@ -444,34 +416,24 @@ export class ThrottledDOMSerializer {
         this.serializer = new DOMSerializer(options);
         this.throttleMs = options.throttleMs || 1000; // Default: 1 snapshot per second
         this.lastCaptureTime = 0;
-        this.pendingCapture = null;
     }
 
     /**
-     * Serialize DOM with throttling.
+     * Serialize the DOM, gated to at most one capture per throttle window.
+     *
+     * This is a pure time-gate: calls inside the window return null (the
+     * previous implementation scheduled a setTimeout that captured nothing,
+     * which was misleading - M18).
      *
      * @param {Element} [rootElement] - Root element to serialize
-     * @returns {Object|null} Serialized structure or null if throttled
+     * @returns {Object|null} Serialized structure, or null if within the window
      */
     serialize(rootElement) {
         const now = Date.now();
-        const timeSinceLastCapture = now - this.lastCaptureTime;
-
-        // Check if throttled
-        if (timeSinceLastCapture < this.throttleMs) {
-            // Throttled - schedule capture for later
-            if (!this.pendingCapture) {
-                const remainingTime = this.throttleMs - timeSinceLastCapture;
-                this.pendingCapture = setTimeout(() => {
-                    this.pendingCapture = null;
-                    this.lastCaptureTime = Date.now();
-                    // Capture will happen on next call
-                }, remainingTime);
-            }
+        if (now - this.lastCaptureTime < this.throttleMs) {
             return null;
         }
 
-        // Not throttled - perform capture
         this.lastCaptureTime = now;
         return this.serializer.serialize(rootElement);
     }
@@ -486,12 +448,12 @@ export class ThrottledDOMSerializer {
     }
 
     /**
-     * Clear pending throttle timer.
+     * Reset the throttle so the next serialize() captures immediately.
+     *
+     * Retained for API compatibility (ClickTracker calls it on cleanup). There
+     * is no longer a pending timer to clear; this simply reopens the gate.
      */
     clearThrottle() {
-        if (this.pendingCapture) {
-            clearTimeout(this.pendingCapture);
-            this.pendingCapture = null;
-        }
+        this.lastCaptureTime = 0;
     }
 }

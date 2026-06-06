@@ -8,6 +8,7 @@ use ApplicationLogger\Bundle\EventSubscriber\ExceptionSubscriber;
 use ApplicationLogger\Bundle\Service\ApiClient;
 use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
 use ApplicationLogger\Bundle\Service\ContextCollector;
+use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
@@ -62,6 +63,7 @@ final class ExceptionSubscriberTest extends TestCase
             $this->apiClient,
             $this->contextCollector,
             $this->breadcrumbCollector,
+            new ErrorPayloadFactory($this->contextCollector, $this->breadcrumbCollector),
             debug: false
         );
     }
@@ -312,6 +314,7 @@ final class ExceptionSubscriberTest extends TestCase
             $this->apiClient,
             $contextCollector,
             $this->breadcrumbCollector,
+            new ErrorPayloadFactory($contextCollector, $this->breadcrumbCollector),
             debug: false
         );
 

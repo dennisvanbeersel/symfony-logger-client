@@ -5,6 +5,7 @@
  * user context, tags, session replay integration, and beacon API.
  */
 
+import { jest } from '@jest/globals';
 import { Client } from '../src/client.js';
 
 // Mock Transport
@@ -130,6 +131,27 @@ describe('Client', () => {
             };
 
             expect(() => client.install()).not.toThrow();
+        });
+
+        test('teardown removes the unload/visibility handlers it installed', () => {
+            const removed = [];
+            const winSpy = jest.spyOn(window, 'removeEventListener')
+                .mockImplementation((type) => removed.push(type));
+            const docSpy = jest.spyOn(document, 'removeEventListener')
+                .mockImplementation((type) => removed.push(type));
+
+            client.install();
+            client.teardown();
+
+            expect(removed).toContain('beforeunload');
+            expect(removed).toContain('visibilitychange');
+
+            winSpy.mockRestore();
+            docSpy.mockRestore();
+        });
+
+        test('teardown never throws', () => {
+            expect(() => client.teardown()).not.toThrow();
         });
     });
 
@@ -711,6 +733,260 @@ handler@/path/to/handler.js:20:10`;
 
             expect(count).toBe(100);
             expect(endTime - startTime).toBeLessThan(100); // Should complete in <100ms
+        });
+    });
+
+    describe('processResurrectedErrors', () => {
+        beforeEach(() => {
+            localStorage.clear();
+        });
+
+        afterEach(() => {
+            localStorage.clear();
+        });
+
+        test('does nothing when there are no nuclear errors stored', () => {
+            client.processResurrectedErrors();
+            expect(mockTransport.sentPayloads).toHaveLength(0);
+        });
+
+        test('resurrects stored nuclear errors and clears storage on success', () => {
+            const now = Date.now();
+            localStorage.setItem('_appLogger_nuclear', JSON.stringify([
+                { m: 'Catastrophic failure', t: now, f: 'app.js', l: 10, c: 5, u: '/home' },
+            ]));
+
+            client.processResurrectedErrors();
+
+            expect(mockTransport.sentPayloads).toHaveLength(1);
+            const payload = mockTransport.sentPayloads[0].payload;
+            expect(payload.type).toBe('NuclearError');
+            // Storage cleared after a fully successful resurrection
+            expect(localStorage.getItem('_appLogger_nuclear')).toBeNull();
+        });
+
+        test('clears storage when max resurrection attempts reached', () => {
+            localStorage.setItem('_appLogger_resurrection_attempts', '5');
+            localStorage.setItem('_appLogger_nuclear', JSON.stringify([{ m: 'x', t: Date.now() }]));
+
+            client.processResurrectedErrors();
+
+            expect(mockTransport.sentPayloads).toHaveLength(0);
+            expect(localStorage.getItem('_appLogger_nuclear')).toBeNull();
+        });
+
+        test('clears corrupted nuclear data', () => {
+            localStorage.setItem('_appLogger_nuclear', '{not valid json');
+
+            expect(() => client.processResurrectedErrors()).not.toThrow();
+            expect(localStorage.getItem('_appLogger_nuclear')).toBeNull();
+        });
+
+        test('clears storage when all stored errors are expired', () => {
+            const old = Date.now() - (25 * 60 * 60 * 1000); // 25h ago (> 24h max age)
+            localStorage.setItem('_appLogger_nuclear', JSON.stringify([{ m: 'old', t: old }]));
+
+            client.processResurrectedErrors();
+
+            expect(mockTransport.sentPayloads).toHaveLength(0);
+            expect(localStorage.getItem('_appLogger_nuclear')).toBeNull();
+        });
+    });
+
+    describe('processBufferedErrors', () => {
+        afterEach(() => {
+            delete window._appLoggerBuffer;
+        });
+
+        test('does nothing when buffer is absent', () => {
+            delete window._appLoggerBuffer;
+            expect(() => client.processBufferedErrors()).not.toThrow();
+            expect(mockTransport.sentPayloads).toHaveLength(0);
+        });
+
+        test('processes buffered error items', () => {
+            window._appLoggerBuffer = {
+                errors: [
+                    {
+                        type: 'error',
+                        error: { message: 'Buffered boom', name: 'TypeError', stack: 'at x' },
+                        timestamp: Date.now(),
+                        filename: 'a.js',
+                        lineno: 3,
+                        colno: 2,
+                    },
+                ],
+            };
+
+            client.processBufferedErrors();
+
+            expect(mockTransport.sentPayloads).toHaveLength(1);
+            expect(mockTransport.sentPayloads[0].payload.message).toBe('Buffered boom');
+            // Buffer is emptied to prevent reprocessing
+            expect(window._appLoggerBuffer.errors).toHaveLength(0);
+        });
+
+        test('processes buffered promise rejection items (object reason)', () => {
+            window._appLoggerBuffer = {
+                errors: [
+                    {
+                        type: 'rejection',
+                        reason: { message: 'Rejected!', name: 'RejectionError' },
+                        timestamp: Date.now(),
+                    },
+                ],
+            };
+
+            client.processBufferedErrors();
+
+            expect(mockTransport.sentPayloads).toHaveLength(1);
+            expect(mockTransport.sentPayloads[0].payload.message).toBe('Rejected!');
+        });
+
+        test('processes buffered promise rejection items (primitive reason)', () => {
+            window._appLoggerBuffer = {
+                errors: [
+                    { type: 'rejection', reason: 'string reason', timestamp: Date.now() },
+                ],
+            };
+
+            client.processBufferedErrors();
+
+            expect(mockTransport.sentPayloads).toHaveLength(1);
+            expect(mockTransport.sentPayloads[0].payload.message).toBe('string reason');
+        });
+
+        test('skips malformed and unknown buffered items without throwing', () => {
+            window._appLoggerBuffer = {
+                errors: [null, 123, { type: 'mystery' }],
+            };
+
+            expect(() => client.processBufferedErrors()).not.toThrow();
+            expect(mockTransport.sentPayloads).toHaveLength(0);
+        });
+    });
+
+    describe('two-phase session replay', () => {
+        test('starts recovery recording after sending pre-error replay', async () => {
+            mockErrorDetector = new MockErrorDetector();
+            const recoveryCalls = [];
+            mockErrorDetector.startRecoveryRecording = (err) => {
+                recoveryCalls.push(err);
+                return Promise.resolve();
+            };
+
+            const c = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector, null);
+            const err = new Error('Replay phase test');
+
+            await c.captureException(err);
+
+            // Error + pre-error replay sent
+            expect(mockTransport.sentPayloads).toHaveLength(1);
+            expect(mockTransport.sentPayloads[0].replayData).not.toBeNull();
+            expect(mockTransport.sentPayloads[0].replayData.phase).toBe('pre-error');
+            // Phase 2 recovery recording kicked off
+            expect(recoveryCalls).toHaveLength(1);
+        });
+
+        test('still sends error when handleError throws', async () => {
+            mockErrorDetector = new MockErrorDetector();
+            mockErrorDetector.handleError = () => Promise.reject(new Error('replay broke'));
+
+            const c = new Client(config, mockTransport, mockBreadcrumbs, mockErrorDetector, null);
+            await c.captureException(new Error('boom'));
+
+            // Falls back to sending the error without replay data
+            expect(mockTransport.sentPayloads).toHaveLength(1);
+            expect(mockTransport.sentPayloads[0].replayData == null).toBe(true);
+        });
+    });
+
+    describe('flushBeaconErrors', () => {
+        test('does nothing when sendBeacon is unavailable', () => {
+            const original = navigator.sendBeacon;
+            delete navigator.sendBeacon;
+
+            expect(() => client.flushBeaconErrors()).not.toThrow();
+            expect(mockTransport.beaconPayloads).toHaveLength(0);
+
+            if (original) navigator.sendBeacon = original;
+        });
+
+        test('does nothing when there are no pending errors', () => {
+            navigator.sendBeacon = () => true;
+            mockTransport.getStats = () => ({ storedErrors: 0, queueSize: 0 });
+
+            client.flushBeaconErrors();
+            expect(mockTransport.beaconPayloads).toHaveLength(0);
+
+            delete navigator.sendBeacon;
+        });
+
+        test('delegates to transport beacon flush when errors are pending', () => {
+            navigator.sendBeacon = () => true;
+            mockTransport.getStats = () => ({ storedErrors: 2, queueSize: 1 });
+
+            client.flushBeaconErrors();
+            expect(mockTransport.beaconPayloads).toContain('flushed');
+
+            delete navigator.sendBeacon;
+        });
+    });
+
+    describe('session hashing and helpers', () => {
+        test('getSessionHash returns server-provided hash when configured', () => {
+            const c = new Client(
+                { ...config, sessionHash: 'server-hash-123' },
+                mockTransport, mockBreadcrumbs, null, null,
+            );
+            expect(c.getSessionHash()).toBe('server-hash-123');
+        });
+
+        test('getSessionHash falls back to a synchronous hash', () => {
+            const hash = client.getSessionHash();
+            expect(typeof hash).toBe('string');
+            expect(hash.length).toBeGreaterThan(0);
+        });
+
+        test('initSessionHash computes and caches a hash', async () => {
+            await client.initSessionHash();
+            expect(client.cachedSessionHash).toBeTruthy();
+            // Subsequent getSessionHash returns the cached value
+            expect(client.getSessionHash()).toBe(client.cachedSessionHash);
+        });
+
+        test('getOrCreateSessionId persists a stable id', () => {
+            const id1 = client.getOrCreateSessionId();
+            const id2 = client.getOrCreateSessionId();
+            expect(id1).toBe(id2);
+        });
+
+        test('djb2Hash returns a 64-char hex string', () => {
+            const h = client.djb2Hash('hello');
+            expect(h).toMatch(/^[0-9a-f]{64}$/);
+        });
+
+        test('detectHttpMethod returns GET', () => {
+            expect(client.detectHttpMethod()).toBe('GET');
+        });
+
+        test('extractHttpStatusCode reads status from various sources', () => {
+            const errWithStatus = new Error('fail');
+            errWithStatus.status = 503;
+            expect(client.extractHttpStatusCode(errWithStatus)).toBe(503);
+
+            expect(client.extractHttpStatusCode(new Error('x'), { httpStatusCode: 418 })).toBe(418);
+            expect(client.extractHttpStatusCode(new Error('HTTP 404 Not Found'))).toBe(404);
+            expect(client.extractHttpStatusCode(new Error('no status here'))).toBeNull();
+        });
+
+        test('getBrowserInfo returns a non-empty string', () => {
+            expect(typeof client.getBrowserInfo()).toBe('string');
+        });
+
+        test('removeNullValues strips null and undefined', () => {
+            const cleaned = client.removeNullValues({ a: 1, b: null, c: undefined, d: 'x' });
+            expect(cleaned).toEqual({ a: 1, d: 'x' });
         });
     });
 });

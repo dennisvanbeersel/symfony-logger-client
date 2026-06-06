@@ -6,6 +6,7 @@ namespace ApplicationLogger\Bundle\Twig;
 
 use Psr\Log\LoggerInterface;
 use Symfony\Bundle\SecurityBundle\Security;
+use Symfony\Component\AssetMapper\AssetMapperInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Twig\Extension\AbstractExtension;
 use Twig\TwigFunction;
@@ -26,7 +27,32 @@ class ApplicationLoggerExtension extends AbstractExtension
         private readonly ?Security $security = null,
         private readonly ?LoggerInterface $logger = null,
         private readonly ?RequestStack $requestStack = null,
+        private readonly ?AssetMapperInterface $assetMapper = null,
     ) {
+    }
+
+    /**
+     * Resolve the public URL of the SDK module so the injected `import` works on a clean
+     * install WITHOUT the host application adding an importmap entry.
+     *
+     * The bundle registers assets/dist under the "@application-logger" AssetMapper namespace,
+     * so the SDK's logical path is "@application-logger/logger.js". When AssetMapper is
+     * available we resolve that to its digested public path (e.g. /assets/logger-abc123.js)
+     * and import from the concrete URL. When AssetMapper is absent (e.g. a Webpack/esbuild
+     * host), we fall back to the bare specifier, which such hosts are expected to alias.
+     */
+    private function resolveSdkModule(): string
+    {
+        try {
+            $publicPath = $this->assetMapper?->getPublicPath('@application-logger/logger.js');
+            if (\is_string($publicPath) && '' !== $publicPath) {
+                return $publicPath;
+            }
+        } catch (\Throwable $e) {
+            $this->logError('Could not resolve SDK asset path via AssetMapper: '.$e->getMessage());
+        }
+
+        return '@application-logger/logger';
     }
 
     public function getFunctions(): array
@@ -39,10 +65,12 @@ class ApplicationLoggerExtension extends AbstractExtension
     }
 
     /**
-     * Render JavaScript SDK initialization script.
+     * Render JavaScript SDK initialization script (all fragments concatenated).
      *
-     * Outputs a <script type="module"> tag that imports the ApplicationLogger
-     * class and initializes it with the configured options.
+     * Outputs the nuclear trap, early error buffer, SDK init module and user
+     * context module as a single HTML string, in defense-in-depth order. This is
+     * a thin convenience wrapper around {@see renderFragments()} for manual
+     * `{{ application_logger_init() }}` usage and backward compatibility.
      *
      * This method is designed to never throw exceptions - it will silently fail
      * and return an empty string if any errors occur. This ensures the application
@@ -52,37 +80,61 @@ class ApplicationLoggerExtension extends AbstractExtension
      */
     public function renderInit(array $options = []): string
     {
+        $fragments = $this->renderFragments($options);
+
+        return $fragments['headStart'].$fragments['headEnd'].$fragments['bodyEnd'];
+    }
+
+    /**
+     * Render the SDK scripts as separate fragments keyed by their target DOM position.
+     *
+     * Each fragment is a self-contained block of one or more <script> tags (with the
+     * CSP nonce already applied) that the auto-injection subscriber drops in at the
+     * matching position. Exposing them directly avoids assembling everything into one
+     * blob and then splitting it apart again by sniffing magic strings.
+     *
+     * Positions (must match the historical injection placement exactly):
+     * - headStart: nuclear trap, injected right after <head> (earliest execution)
+     * - headEnd:   early error buffer, injected before </head>
+     * - bodyEnd:   SDK init + user context modules, injected before </body> (deferred)
+     *
+     * The nuclear trap and buffer MUST stay inline in the head and run BEFORE the
+     * deferred module so they can catch errors that occur before the SDK loads.
+     *
+     * Never throws - returns empty fragments on any failure (resilience priority).
+     *
+     * @param array<string, mixed> $options Override default configuration
+     *
+     * @return array{headStart: string, headEnd: string, bodyEnd: string}
+     */
+    public function renderFragments(array $options = []): array
+    {
+        $empty = ['headStart' => '', 'headEnd' => '', 'bodyEnd' => ''];
+
         try {
             // Skip if JavaScript SDK is disabled
             if (!isset($this->config['enabled']) || !$this->config['enabled']) {
-                return '';
+                return $empty;
             }
 
             // Validate required configuration
             if (!$this->validateConfiguration()) {
                 $this->logError('JavaScript SDK configuration is invalid - missing required fields');
 
-                return '';
+                return $empty;
             }
 
             // Build configuration object
             $config = $this->buildConfig($options);
 
-            // Generate scripts in defense-in-depth order:
-            // 1. Nuclear trap (ultra-minimal, captures catastrophic errors)
-            $nuclearTrap = $this->generateNuclearTrap();
-
-            // 2. Early error buffer (lightweight, captures early errors)
-            $bufferScript = $this->generateBufferScript();
-
-            // 3. Full SDK initialization (module, deferred)
-            $initScript = $this->generateInitScript($config);
-
-            // 4. User context (if authenticated)
-            $userScript = $this->generateUserScript();
-
-            // Return in order: nuclear trap → buffer → SDK → user context
-            return $nuclearTrap.$bufferScript.$initScript.$userScript;
+            return [
+                // 1. Nuclear trap (ultra-minimal, captures catastrophic errors) - head start
+                'headStart' => $this->generateNuclearTrap(),
+                // 2. Early error buffer (lightweight, captures early errors) - head end
+                'headEnd' => $this->generateBufferScript(),
+                // 3. Full SDK init (deferred) + 4. user context (if authenticated) - body end
+                'bodyEnd' => $this->generateInitScript($config).$this->generateUserScript(),
+            ];
         } catch (\Throwable $e) {
             // Never throw - resilience is priority
             $this->logError('Failed to render JavaScript SDK initialization', [
@@ -90,7 +142,7 @@ class ApplicationLoggerExtension extends AbstractExtension
                 'trace' => $e->getTraceAsString(),
             ]);
 
-            return '';
+            return $empty;
         }
     }
 
@@ -114,6 +166,10 @@ class ApplicationLoggerExtension extends AbstractExtension
             'scrubFields' => $this->config['scrub_fields'],
         ];
 
+        // Forward the configured session-replay knobs to the JS SDK using the camelCase
+        // keys it actually reads (see buildSessionReplayConfig()).
+        $defaults += $this->buildSessionReplayConfig();
+
         // Add session ID if available
         $sessionId = $this->getSessionId();
         if (null !== $sessionId) {
@@ -123,8 +179,52 @@ class ApplicationLoggerExtension extends AbstractExtension
         // Merge with custom options
         $config = array_merge($defaults, $options);
 
-        // Remove null values
+        // Remove ONLY null values. Legitimate `false` (e.g. sessionReplayEnabled,
+        // exposeApi) and `0` must survive so the SDK receives the configured value.
         return array_filter($config, fn ($value) => null !== $value);
+    }
+
+    /**
+     * Map the bundle's `session_replay.*` config (snake_case) to the exact camelCase
+     * keys the JS SDK consumes (see assets/src/index.js and assets/src/click-tracker.js).
+     *
+     * Returns an empty array when no session_replay config was injected, so the SDK
+     * falls back to its own hardcoded defaults. Each PHP key maps explicitly to its
+     * JS counterpart - there is no naive snake->camel transform, the names are pinned.
+     *
+     * @return array<string, mixed>
+     */
+    private function buildSessionReplayConfig(): array
+    {
+        $replay = $this->config['session_replay'] ?? null;
+
+        if (!\is_array($replay)) {
+            return [];
+        }
+
+        // PHP config key => JS SDK config key (verbatim, as read by the SDK).
+        $map = [
+            'enabled' => 'sessionReplayEnabled',
+            'buffer_before_error_seconds' => 'bufferBeforeErrorSeconds',
+            'buffer_before_error_clicks' => 'bufferBeforeErrorClicks',
+            'buffer_after_error_seconds' => 'bufferAfterErrorSeconds',
+            'buffer_after_error_clicks' => 'bufferAfterErrorClicks',
+            'click_debounce_ms' => 'clickDebounceMs',
+            'snapshot_throttle_ms' => 'snapshotThrottleMs',
+            'max_snapshot_size' => 'maxSnapshotSize',
+            'session_timeout_minutes' => 'sessionTimeoutMinutes',
+            'max_buffer_size_mb' => 'maxBufferSizeMB',
+            'expose_api' => 'exposeApi',
+        ];
+
+        $jsConfig = [];
+        foreach ($map as $phpKey => $jsKey) {
+            if (\array_key_exists($phpKey, $replay)) {
+                $jsConfig[$jsKey] = $replay[$phpKey];
+            }
+        }
+
+        return $jsConfig;
     }
 
     /**
@@ -147,9 +247,7 @@ class ApplicationLoggerExtension extends AbstractExtension
      */
     private function generateNuclearTrap(): string
     {
-        // Get CSP nonce from request attributes
-        $nonce = $this->getCspNonce();
-        $nonceAttr = $nonce ? ' nonce="'.htmlspecialchars($nonce, \ENT_QUOTES, 'UTF-8').'"' : '';
+        $nonceAttr = $this->nonceAttribute();
 
         // Ultra-minimal, no dependencies, compressed, bulletproof
         // Handles: errors, promise rejections, localStorage failures, quota exceeded
@@ -169,9 +267,7 @@ HTML;
      */
     private function generateBufferScript(): string
     {
-        // Get CSP nonce from request attributes
-        $nonce = $this->getCspNonce();
-        $nonceAttr = $nonce ? ' nonce="'.htmlspecialchars($nonce, \ENT_QUOTES, 'UTF-8').'"' : '';
+        $nonceAttr = $this->nonceAttribute();
 
         return <<<HTML
 <script{$nonceAttr}>
@@ -304,13 +400,14 @@ HTML;
             return ''; // Silently fail - resilience priority
         }
 
-        // Get CSP nonce from request attributes
-        $nonce = $this->getCspNonce();
-        $nonceAttr = $nonce ? ' nonce="'.htmlspecialchars($nonce, \ENT_QUOTES, 'UTF-8').'"' : '';
+        $nonceAttr = $this->nonceAttribute();
+
+        // Resolve a concrete module URL so the import works without a host importmap entry.
+        $sdkModule = $this->resolveSdkModule();
 
         return <<<HTML
 <script type="module"{$nonceAttr}>
-    import ApplicationLogger from '@application-logger/logger';
+    import ApplicationLogger from '{$sdkModule}';
 
     const logger = new ApplicationLogger({$configJson});
     logger.init();
@@ -360,9 +457,7 @@ HTML;
             return ''; // Silently fail
         }
 
-        // Get CSP nonce from request attributes
-        $nonce = $this->getCspNonce();
-        $nonceAttr = $nonce ? ' nonce="'.htmlspecialchars($nonce, \ENT_QUOTES, 'UTF-8').'"' : '';
+        $nonceAttr = $this->nonceAttribute();
 
         return <<<HTML
 <script type="module"{$nonceAttr}>
@@ -429,6 +524,22 @@ HTML;
             // Silently fail - session ID is optional for JS SDK
             return null;
         }
+    }
+
+    /**
+     * Build the ` nonce="..."` attribute for an injected <script> tag.
+     *
+     * Centralises the CSP nonce lookup + escaping so every script generator applies
+     * it identically. Returns an empty string when no nonce is available, so the
+     * attribute is simply omitted.
+     */
+    private function nonceAttribute(): string
+    {
+        $nonce = $this->getCspNonce();
+
+        return null !== $nonce
+            ? ' nonce="'.htmlspecialchars($nonce, \ENT_QUOTES, 'UTF-8').'"'
+            : '';
     }
 
     /**

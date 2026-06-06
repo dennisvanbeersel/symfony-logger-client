@@ -393,6 +393,76 @@ class ApplicationLoggerExtensionTest extends TestCase
         $this->assertSame('', $output);
     }
 
+    public function testRenderInitEmitsSessionReplayKeysWithCamelCaseNames(): void
+    {
+        $config = $this->getDefaultConfig();
+        $config['session_replay'] = [
+            'enabled' => true,
+            'buffer_before_error_seconds' => 45,
+            'buffer_before_error_clicks' => 12,
+            'buffer_after_error_seconds' => 50,
+            'buffer_after_error_clicks' => 8,
+            'click_debounce_ms' => 250,
+            'snapshot_throttle_ms' => 750,
+            'max_snapshot_size' => 2097152,
+            'session_timeout_minutes' => 90,
+            'max_buffer_size_mb' => 10,
+            'expose_api' => true,
+        ];
+
+        $extension = new ApplicationLoggerExtension($config);
+        $output = $extension->renderInit();
+
+        // Each configured knob must reach the SDK config under the exact camelCase key
+        // index.js / click-tracker.js read.
+        $this->assertStringContainsString('"sessionReplayEnabled":true', $output);
+        $this->assertStringContainsString('"bufferBeforeErrorSeconds":45', $output);
+        $this->assertStringContainsString('"bufferBeforeErrorClicks":12', $output);
+        $this->assertStringContainsString('"bufferAfterErrorSeconds":50', $output);
+        $this->assertStringContainsString('"bufferAfterErrorClicks":8', $output);
+        $this->assertStringContainsString('"clickDebounceMs":250', $output);
+        $this->assertStringContainsString('"snapshotThrottleMs":750', $output);
+        $this->assertStringContainsString('"maxSnapshotSize":2097152', $output);
+        $this->assertStringContainsString('"sessionTimeoutMinutes":90', $output);
+        $this->assertStringContainsString('"maxBufferSizeMB":10', $output);
+        $this->assertStringContainsString('"exposeApi":true', $output);
+
+        // Snake_case keys must NOT leak into the JS config.
+        $this->assertStringNotContainsString('buffer_before_error_seconds', $output);
+        $this->assertStringNotContainsString('expose_api', $output);
+    }
+
+    public function testRenderInitPreservesFalseSessionReplayValues(): void
+    {
+        $config = $this->getDefaultConfig();
+        $config['session_replay'] = [
+            'enabled' => false,
+            'expose_api' => false,
+        ];
+
+        $extension = new ApplicationLoggerExtension($config);
+        $output = $extension->renderInit();
+
+        // Legitimate `false` booleans must survive the null-only array_filter so the SDK
+        // does not silently fall back to its `true` defaults.
+        $this->assertStringContainsString('"sessionReplayEnabled":false', $output);
+        $this->assertStringContainsString('"exposeApi":false', $output);
+    }
+
+    public function testRenderInitOmitsSessionReplayKeysWhenNotConfigured(): void
+    {
+        $config = $this->getDefaultConfig();
+        // No 'session_replay' key at all.
+
+        $extension = new ApplicationLoggerExtension($config);
+        $output = $extension->renderInit();
+
+        // Without injected config the SDK keeps its own hardcoded defaults: emit nothing.
+        $this->assertStringNotContainsString('sessionReplayEnabled', $output);
+        $this->assertStringNotContainsString('bufferBeforeErrorSeconds', $output);
+        $this->assertStringNotContainsString('exposeApi', $output);
+    }
+
     /**
      * Get default configuration for tests.
      *

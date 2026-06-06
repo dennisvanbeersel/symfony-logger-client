@@ -37,7 +37,7 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseSkipsWhenDisabled(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->expects($this->never())->method('renderInit');
+        $twigExtension->expects($this->never())->method('renderFragments');
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -55,7 +55,7 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseSkipsWhenAutoInjectDisabled(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->expects($this->never())->method('renderInit');
+        $twigExtension->expects($this->never())->method('renderFragments');
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: false, // Auto-inject disabled
@@ -73,7 +73,7 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseSkipsSubRequests(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->expects($this->never())->method('renderInit');
+        $twigExtension->expects($this->never())->method('renderFragments');
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -95,7 +95,7 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseSkipsNonHtmlResponses(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->expects($this->never())->method('renderInit');
+        $twigExtension->expects($this->never())->method('renderFragments');
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -116,7 +116,7 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseSkipsWhenNoBodyTag(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->expects($this->never())->method('renderInit');
+        $twigExtension->expects($this->never())->method('renderFragments');
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -134,8 +134,8 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseInjectsScriptBeforeBodyTag(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->method('renderInit')
-            ->willReturn('<script>console.log("test");</script>');
+        $twigExtension->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '<script>console.log("test");</script>']);
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -167,8 +167,8 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseSkipsErrorResponses(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->method('renderInit')
-            ->willReturn('<script>console.log("test");</script>');
+        $twigExtension->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '<script>console.log("test");</script>']);
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -195,8 +195,8 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseHandlesCaseInsensitiveBodyTag(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->method('renderInit')
-            ->willReturn('<script>test</script>');
+        $twigExtension->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '<script>test</script>']);
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -229,8 +229,8 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseSkipsWhenScriptIsEmpty(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->method('renderInit')
-            ->willReturn(''); // Empty script
+        $twigExtension->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '']); // Empty fragments
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -250,7 +250,7 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseHandlesExceptionGracefully(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->method('renderInit')
+        $twigExtension->method('renderFragments')
             ->willThrowException(new \RuntimeException('Test exception'));
 
         $subscriber = new JavaScriptInjectionSubscriber(
@@ -272,8 +272,8 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseWorksWithHtmlContentType(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->method('renderInit')
-            ->willReturn('<script>test</script>');
+        $twigExtension->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '<script>test</script>']);
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -296,8 +296,8 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseWorksWhenContentTypeNotSet(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->method('renderInit')
-            ->willReturn('<script>test</script>');
+        $twigExtension->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '<script>test</script>']);
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -321,8 +321,8 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseInjectsOnlyOnce(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->method('renderInit')
-            ->willReturn('<script>test</script>');
+        $twigExtension->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '<script>test</script>']);
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,
@@ -345,8 +345,8 @@ class JavaScriptInjectionSubscriberTest extends TestCase
     public function testOnKernelResponseHandlesMultilineBodyTag(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
-        $twigExtension->method('renderInit')
-            ->willReturn('<script>test</script>');
+        $twigExtension->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '<script>test</script>']);
 
         $subscriber = new JavaScriptInjectionSubscriber(
             autoInject: true,

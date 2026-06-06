@@ -14,7 +14,6 @@ use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpFoundation\Session\Session;
 use Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage;
 use Symfony\Component\HttpKernel\Event\RequestEvent;
-use Symfony\Component\HttpKernel\Event\ResponseEvent;
 use Symfony\Component\HttpKernel\HttpKernelInterface;
 use Symfony\Component\HttpKernel\KernelEvents;
 
@@ -30,17 +29,13 @@ final class SessionTrackingSubscriberTest extends TestCase
         $this->session = new Session(new MockArraySessionStorage());
         $this->session->start(); // Start the session
 
-        $config = [
-            'enabled' => true,
-            'track_page_views' => true,
-            'idle_timeout' => 1800,
-            'ignored_routes' => ['_profiler', '_wdt'],
-            'ignored_paths' => ['/api/', '/health'],
-        ];
-
         $this->subscriber = new SessionTrackingSubscriber(
             $this->apiClient,
-            $config,
+            true,
+            true,
+            1800,
+            ['_profiler', '_wdt'],
+            ['/api/', '/health'],
             new DataScrubber(['password', 'token', 'api_key', 'secret', 'authorization'])
         );
     }
@@ -60,7 +55,9 @@ final class SessionTrackingSubscriberTest extends TestCase
         $events = SessionTrackingSubscriber::getSubscribedEvents();
 
         $this->assertArrayHasKey(KernelEvents::REQUEST, $events);
-        $this->assertArrayHasKey(KernelEvents::RESPONSE, $events);
+        // RESPONSE is no longer subscribed: the listener was empty (M8). We must
+        // not subscribe to an event we don't handle.
+        $this->assertArrayNotHasKey(KernelEvents::RESPONSE, $events);
     }
 
     public function testOnKernelRequestCreatesNewSession(): void
@@ -150,7 +147,10 @@ final class SessionTrackingSubscriberTest extends TestCase
                 $existingSessionId,
                 $this->callback(function (array $data) {
                     $this->assertArrayHasKey('type', $data);
-                    $this->assertEquals('PAGE_VIEW', $data['type']);
+                    // MUST match the platform SessionEventTypeEnum backing value (lower_snake_case).
+                    // The platform silently drops unknown event types, so an upper-case value here
+                    // would never persist (verified end-to-end in the dogfood deep-integration spec).
+                    $this->assertEquals('page_view', $data['type']);
 
                     return true;
                 })
@@ -191,34 +191,29 @@ final class SessionTrackingSubscriberTest extends TestCase
         $this->assertNotEquals('old-session-id', $newSessionId);
     }
 
-    public function testOnKernelResponseDoesNotTrackWhenDisabled(): void
+    public function testDoesNotTrackWhenDisabled(): void
     {
         // Create subscriber with disabled tracking
-        $disabledConfig = [
-            'enabled' => false,
-            'track_page_views' => true,
-            'idle_timeout' => 1800,
-            'ignored_routes' => [],
-            'ignored_paths' => [],
-        ];
-
         $subscriber = new SessionTrackingSubscriber(
             $this->apiClient,
-            $disabledConfig,
+            false,
+            true,
+            1800,
+            [],
+            [],
             new DataScrubber(['password', 'token', 'api_key', 'secret', 'authorization'])
         );
 
         $request = Request::create('/test');
         $request->setSession($this->session);
-        $response = new Response();
 
         $kernel = $this->createKernelStub();
-        $event = new ResponseEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $response);
+        $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
 
-        // Should not make any API calls
+        // Should not make any API calls when tracking is disabled.
         $this->apiClient->expects($this->never())->method($this->anything());
 
-        $subscriber->onKernelResponse($event);
+        $subscriber->onKernelRequest($event);
     }
 
     public function testSessionDataIncludesUserAgent(): void
@@ -241,6 +236,38 @@ final class SessionTrackingSubscriberTest extends TestCase
 
         $this->apiClient->expects($this->once())
             ->method('addSessionEvent');
+
+        $this->subscriber->onKernelRequest($event);
+    }
+
+    public function testPageViewUrlScrubsSensitiveQueryParam(): void
+    {
+        // A page_view URL with a sensitive query param must have its VALUE redacted
+        // before it ever leaves the host app (same credential-leak class as C1).
+        $request = Request::create('/dashboard?token=secret123&page=2');
+        $request->setSession($this->session);
+
+        $kernel = $this->createKernelStub();
+        $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
+
+        $this->apiClient->expects($this->once())->method('createSession');
+
+        $this->apiClient->expects($this->once())
+            ->method('addSessionEvent')
+            ->with(
+                $this->anything(),
+                $this->callback(function (array $data): bool {
+                    $this->assertSame('page_view', $data['type']);
+                    $this->assertArrayHasKey('url', $data);
+                    // Sensitive value redacted, non-sensitive query + path intact.
+                    $this->assertStringNotContainsString('secret123', $data['url']);
+                    $this->assertStringContainsString('token=[REDACTED]', $data['url']);
+                    $this->assertStringContainsString('page=2', $data['url']);
+                    $this->assertStringContainsString('/dashboard', $data['url']);
+
+                    return true;
+                })
+            );
 
         $this->subscriber->onKernelRequest($event);
     }

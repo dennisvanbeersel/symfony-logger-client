@@ -2,8 +2,19 @@
     "name": "dennisvanbeersel/symfony-logger-client",
     "description": "Symfony bundle for Application Logger error tracking platform",
     "type": "symfony-bundle",
+    "homepage": "https://applogger.eu",
     "license": "MIT",
     "keywords": ["symfony", "error-tracking", "monitoring", "logging", "sentry"],
+    "authors": [
+        {
+            "name": "Dennis Van Beersel",
+            "homepage": "https://applogger.eu"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/dennisvanbeersel/symfony-logger-client/issues",
+        "source": "https://github.com/dennisvanbeersel/symfony-logger-client"
+    },
     "require": {
         "php": ">=8.2",
         "symfony/framework-bundle": "^6.4|^7.0",
@@ -18,6 +29,7 @@
         "friendsofphp/php-cs-fixer": "^3.89",
         "phpstan/phpstan": "^2.0",
         "phpstan/phpstan-symfony": "^2.0",
+        "symfony/asset-mapper": "^6.4|^7.0",
         "symfony/security-bundle": "^6.4|^7.0",
         "symfony/twig-bundle": "^6.4|^7.0",
         "twig/twig": "^3.0"

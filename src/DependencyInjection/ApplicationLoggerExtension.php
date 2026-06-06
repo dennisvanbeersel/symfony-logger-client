@@ -22,6 +22,39 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
     {
         // Register bundle assets with AssetMapper
         $this->prependAssetMapper($container);
+
+        // Auto-wire the Monolog handler so a clean install captures logs with no
+        // manual monolog.yaml edits (zero-config).
+        $this->prependMonolog($container);
+    }
+
+    /**
+     * Self-wire the bundle's Monolog handler into the host's Monolog configuration.
+     *
+     * This is NOT gated on `enabled`: that value may be an unresolved env placeholder
+     * (`%env(bool:...)%`) at compile time. Instead the handler itself no-ops at runtime
+     * when `application_logger.enabled` is false (see ApplicationLoggerHandler::write()).
+     */
+    private function prependMonolog(ContainerBuilder $container): void
+    {
+        if (!$container->hasExtension('monolog')) {
+            return;
+        }
+
+        $container->prependExtensionConfig('monolog', [
+            'handlers' => [
+                'application_logger' => [
+                    'type' => 'service',
+                    'id' => \ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler::class,
+                    // Exclude the framework channels that carry UNCAUGHT-exception logs
+                    // (request/php): the ExceptionSubscriber already ships those, so
+                    // capturing them here too would double-record every uncaught error.
+                    // Explicit $logger->error(...) on the app channel (and non-exception
+                    // logs for log-aggregation) still flow through.
+                    'channels' => ['!event', '!request', '!php'],
+                ],
+            ],
+        ]);
     }
 
     /**
@@ -55,12 +88,13 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
         // Register all configuration as parameters for use in services.yaml
         $this->registerConfigurationParameters($container, $config);
 
-        // Only register services if enabled
-        if (!$config['enabled']) {
-            return;
-        }
-
-        // Load services from YAML file
+        // Services are ALWAYS loaded, even when `enabled` is false. The compile-time
+        // value of `enabled` may be an unresolved env placeholder (`%env(bool:...)%`),
+        // and prependMonolog() registers a Monolog handler that references the
+        // ApplicationLoggerHandler service — gating the service load on `enabled` here
+        // would leave that reference dangling and break the container. The real gate is
+        // the RUNTIME kill-switch (ResilientHttpDispatcher::post(), the Monolog handler
+        // write(), and the Twig extension), which makes a disabled bundle fully inert.
         $loader = new YamlFileLoader($container, new FileLocator(\dirname(__DIR__, 2).'/config'));
         $loader->load('services.yaml');
     }
@@ -106,6 +140,19 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
         $container->setParameter('application_logger.session_tracking.idle_timeout', $config['session_tracking']['idle_timeout']);
         $container->setParameter('application_logger.session_tracking.ignored_routes', $config['session_tracking']['ignored_routes']);
         $container->setParameter('application_logger.session_tracking.ignored_paths', $config['session_tracking']['ignored_paths']);
+
+        // Session replay parameters (consumed by the JS SDK via the Twig extension)
+        $container->setParameter('application_logger.session_replay.enabled', $config['session_replay']['enabled']);
+        $container->setParameter('application_logger.session_replay.buffer_before_error_seconds', $config['session_replay']['buffer_before_error_seconds']);
+        $container->setParameter('application_logger.session_replay.buffer_before_error_clicks', $config['session_replay']['buffer_before_error_clicks']);
+        $container->setParameter('application_logger.session_replay.buffer_after_error_seconds', $config['session_replay']['buffer_after_error_seconds']);
+        $container->setParameter('application_logger.session_replay.buffer_after_error_clicks', $config['session_replay']['buffer_after_error_clicks']);
+        $container->setParameter('application_logger.session_replay.click_debounce_ms', $config['session_replay']['click_debounce_ms']);
+        $container->setParameter('application_logger.session_replay.snapshot_throttle_ms', $config['session_replay']['snapshot_throttle_ms']);
+        $container->setParameter('application_logger.session_replay.max_snapshot_size', $config['session_replay']['max_snapshot_size']);
+        $container->setParameter('application_logger.session_replay.session_timeout_minutes', $config['session_replay']['session_timeout_minutes']);
+        $container->setParameter('application_logger.session_replay.max_buffer_size_mb', $config['session_replay']['max_buffer_size_mb']);
+        $container->setParameter('application_logger.session_replay.expose_api', $config['session_replay']['expose_api']);
 
         // JavaScript SDK parameters
         $container->setParameter('application_logger.javascript.enabled', $config['javascript']['enabled']);

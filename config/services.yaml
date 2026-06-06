@@ -35,6 +35,9 @@ services:
             $logEndpoint: '%application_logger.log_endpoint%'
             $logToken: '%application_logger.log_token%'
             $logPath: '%application_logger.log_path%'
+            # Runtime kill-switch: no outbound telemetry when disabled (handles env-gated
+            # enabled that can't be resolved at container compile time).
+            $enabled: '%application_logger.enabled%'
 
     # Context Collector - gathers request/user/server context
     ApplicationLogger\Bundle\Service\ContextCollector:
@@ -49,12 +52,20 @@ services:
         arguments:
             $maxBreadcrumbs: '%application_logger.max_breadcrumbs%'
 
+    # Error Payload Factory - shared error-pipeline payload builder (DRY: used by
+    # both ExceptionSubscriber and the Monolog handler so the field set stays in sync).
+    ApplicationLogger\Bundle\Service\ErrorPayloadFactory:
+        arguments:
+            $contextCollector: '@ApplicationLogger\Bundle\Service\ContextCollector'
+            $breadcrumbCollector: '@ApplicationLogger\Bundle\Service\BreadcrumbCollector'
+
     # Exception Subscriber - captures uncaught exceptions
     ApplicationLogger\Bundle\EventSubscriber\ExceptionSubscriber:
         arguments:
             $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
             $contextCollector: '@ApplicationLogger\Bundle\Service\ContextCollector'
             $breadcrumbCollector: '@ApplicationLogger\Bundle\Service\BreadcrumbCollector'
+            $payloadFactory: '@ApplicationLogger\Bundle\Service\ErrorPayloadFactory'
             $debug: '%application_logger.debug%'
         tags:
             - { name: kernel.event_subscriber }
@@ -63,12 +74,11 @@ services:
     ApplicationLogger\Bundle\EventSubscriber\SessionTrackingSubscriber:
         arguments:
             $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
-            $config:
-                enabled: '%application_logger.session_tracking.enabled%'
-                track_page_views: '%application_logger.session_tracking.track_page_views%'
-                idle_timeout: '%application_logger.session_tracking.idle_timeout%'
-                ignored_routes: '%application_logger.session_tracking.ignored_routes%'
-                ignored_paths: '%application_logger.session_tracking.ignored_paths%'
+            $enabled: '%application_logger.session_tracking.enabled%'
+            $trackPageViews: '%application_logger.session_tracking.track_page_views%'
+            $idleTimeout: '%application_logger.session_tracking.idle_timeout%'
+            $ignoredRoutes: '%application_logger.session_tracking.ignored_routes%'
+            $ignoredPaths: '%application_logger.session_tracking.ignored_paths%'
             $scrubber: '@ApplicationLogger\Bundle\Service\DataScrubber'
             $logger: '@?logger'
         tags:
@@ -79,8 +89,9 @@ services:
         arguments:
             $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
             $contextCollector: '@ApplicationLogger\Bundle\Service\ContextCollector'
-            $breadcrumbCollector: '@ApplicationLogger\Bundle\Service\BreadcrumbCollector'
             $scrubber: '@ApplicationLogger\Bundle\Service\DataScrubber'
+            $payloadFactory: '@ApplicationLogger\Bundle\Service\ErrorPayloadFactory'
+            $enabled: '%application_logger.enabled%'
             $captureLevel: '%application_logger.capture_level%'
             $environment: '%application_logger.environment%'
             $batchSize: '%application_logger.log_batch_size%'
@@ -97,9 +108,26 @@ services:
                 release: '%application_logger.javascript.release%'
                 debug: '%application_logger.javascript.debug%'
                 scrub_fields: '%application_logger.javascript.scrub_fields%'
+                # Session replay knobs, forwarded verbatim to the JS SDK (snake->camel
+                # mapping happens in the Twig extension's buildSessionReplayConfig()).
+                session_replay:
+                    enabled: '%application_logger.session_replay.enabled%'
+                    buffer_before_error_seconds: '%application_logger.session_replay.buffer_before_error_seconds%'
+                    buffer_before_error_clicks: '%application_logger.session_replay.buffer_before_error_clicks%'
+                    buffer_after_error_seconds: '%application_logger.session_replay.buffer_after_error_seconds%'
+                    buffer_after_error_clicks: '%application_logger.session_replay.buffer_after_error_clicks%'
+                    click_debounce_ms: '%application_logger.session_replay.click_debounce_ms%'
+                    snapshot_throttle_ms: '%application_logger.session_replay.snapshot_throttle_ms%'
+                    max_snapshot_size: '%application_logger.session_replay.max_snapshot_size%'
+                    session_timeout_minutes: '%application_logger.session_replay.session_timeout_minutes%'
+                    max_buffer_size_mb: '%application_logger.session_replay.max_buffer_size_mb%'
+                    expose_api: '%application_logger.session_replay.expose_api%'
             $security: '@?security.helper'
             $logger: '@?logger'
             $requestStack: '@request_stack'
+            # Optional: when AssetMapper is present, the SDK module is imported from its
+            # resolved public URL so no host importmap entry is required (works on install).
+            $assetMapper: '@?asset_mapper'
         tags:
             - { name: twig.extension }
 

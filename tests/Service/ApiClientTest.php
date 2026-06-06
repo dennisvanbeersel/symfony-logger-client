@@ -10,6 +10,8 @@ use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Cache\Adapter\ArrayAdapter;
+use Symfony\Component\HttpClient\MockHttpClient;
+use Symfony\Component\HttpClient\Response\MockResponse;
 
 final class ApiClientTest extends TestCase
 {
@@ -320,5 +322,40 @@ final class ApiClientTest extends TestCase
         fclose($resource);
 
         $this->addToAssertionCount(1);
+    }
+
+    public function testDisabledClientSendsNoOutboundRequests(): void
+    {
+        // A4 safety: when the bundle is disabled (e.g. a fresh recipe install before the
+        // user opts in via APPLICATION_LOGGER_ENABLED=true) NO telemetry must leave the host,
+        // regardless of which path triggers it.
+        $requestCount = 0;
+        $httpClient = new MockHttpClient(function () use (&$requestCount): MockResponse {
+            ++$requestCount;
+
+            return new MockResponse('{}', ['http_code' => 202]);
+        });
+
+        $client = new ApiClient(
+            dsn: 'https://your-logger-host.com/your-project-id',
+            apiKey: 'placeholder',
+            timeout: 2.0,
+            retryAttempts: 0,
+            async: false,
+            circuitBreaker: $this->circuitBreaker,
+            logger: $this->logger,
+            httpClient: $httpClient,
+            logEndpoint: 'https://your-logger-host.com',
+            logToken: 'sk_log_placeholder',
+            enabled: false,
+        );
+
+        $client->sendError(['type' => 'X', 'message' => 'should not be sent']);
+        $client->sendLogs([['message' => 'nope', 'severity' => 'error']]);
+        $client->createSession(['session_id' => 'abc']);
+        $client->addSessionEvent('abc', ['type' => 'click']);
+        $client->endSession('abc');
+
+        self::assertSame(0, $requestCount, 'disabled ApiClient must make zero outbound requests');
     }
 }

@@ -65,12 +65,17 @@ class CircuitBreaker
     }
 
     /**
-     * Check if circuit is open (service is down, reject requests).
+     * Decide whether a request may proceed, MUTATING state as a side effect (CQS:
+     * this is the command). Drives the OPEN->HALF_OPEN transition when the timeout
+     * has elapsed and consumes a HALF_OPEN probe slot (incrementing attempts and
+     * persisting). Callers gate every outbound request on this.
+     *
+     * @return bool true if the request is allowed (circuit not OPEN); false to skip
      */
-    public function isOpen(): bool
+    public function allowRequest(): bool
     {
         if (!$this->enabled) {
-            return false;
+            return true;
         }
 
         // Re-read shared state if our in-memory copy is stale. In worker mode the
@@ -88,6 +93,23 @@ class CircuitBreaker
             ++$this->halfOpenAttempts;
             $this->saveState();
         }
+
+        return self::STATE_OPEN !== $this->state;
+    }
+
+    /**
+     * Pure read of whether the circuit is currently OPEN (no mutation, no probe
+     * transition). Kept for external monitoring/tests that must observe state
+     * without consuming a HALF_OPEN slot. The request-gating decision lives in
+     * {@see allowRequest()}.
+     */
+    public function isOpen(): bool
+    {
+        if (!$this->enabled) {
+            return false;
+        }
+
+        $this->refreshIfStale();
 
         return self::STATE_OPEN === $this->state;
     }

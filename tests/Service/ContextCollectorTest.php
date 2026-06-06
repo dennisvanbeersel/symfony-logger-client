@@ -79,6 +79,31 @@ final class ContextCollectorTest extends TestCase
         $this->assertEquals('foo=bar', $requestContext['query_string']);
     }
 
+    public function testCollectRequestScrubsSensitiveQueryStringValues(): void
+    {
+        $request = Request::create('https://example.com/reset?password=hunter2&page=2', 'GET');
+        $this->requestStack->push($request);
+
+        $collector = $this->createCollector();
+        $requestContext = $collector->collectRequest();
+
+        $this->assertNotNull($requestContext);
+
+        // url must keep host/path but redact the sensitive query value.
+        // Note: Symfony's getUri()/getQueryString() normalise (sort) query pairs,
+        // so 'page' precedes 'password' here; the scrubber preserves that order.
+        $this->assertSame(
+            'https://example.com/reset?page=2&password=[REDACTED]',
+            $requestContext['url']
+        );
+
+        // query_string must be redacted independently.
+        $this->assertSame('page=2&password=[REDACTED]', $requestContext['query_string']);
+
+        // The raw secret must not appear anywhere in the request payload.
+        $this->assertStringNotContainsString('hunter2', json_encode($requestContext) ?: '');
+    }
+
     public function testCollectRequestReturnsNullWithoutRequest(): void
     {
         $collector = $this->createCollector();
@@ -190,6 +215,49 @@ final class ContextCollectorTest extends TestCase
 
         // IP should be anonymized
         $this->assertEquals('10.0.0.0', $userContext['ip_address']);
+    }
+
+    public function testCollectUserDoesNotLeakRawSessionId(): void
+    {
+        $request = Request::create('/test');
+        $session = new Session(new MockArraySessionStorage());
+        $session->start();
+        $request->setSession($session);
+        $this->requestStack->push($request);
+
+        $rawSessionId = $session->getId();
+        $this->assertNotSame('', $rawSessionId, 'Precondition: session must have an id');
+
+        $collector = $this->createCollector();
+        $userContext = $collector->collectUser();
+
+        $this->assertNotNull($userContext);
+        // The raw, hijackable PHP session id must never be emitted verbatim.
+        $this->assertNotEquals($rawSessionId, $userContext['session_id']);
+        // It must be a SHA-256 hash of the raw id (64 hex chars).
+        $this->assertSame(hash('sha256', $rawSessionId), $userContext['session_id']);
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{64}$/', (string) $userContext['session_id']);
+    }
+
+    public function testCollectRequestRedactsCookieHeader(): void
+    {
+        $request = Request::create('/test');
+        $request->headers->set('Cookie', 'PHPSESSID=abc123; csrf_token=topsecret; remember_me=longlivedsecret');
+        $request->headers->set('Set-Cookie', 'PHPSESSID=newvalue; HttpOnly');
+        $request->headers->set('Content-Type', 'application/json');
+        $this->requestStack->push($request);
+
+        $collector = $this->createCollector();
+        $requestContext = $collector->collectRequest();
+
+        $this->assertNotNull($requestContext);
+        $this->assertEquals('[REDACTED]', $requestContext['headers']['cookie']);
+        $this->assertEquals('[REDACTED]', $requestContext['headers']['set-cookie']);
+        // Raw cookie material must not appear anywhere in the headers payload.
+        $this->assertStringNotContainsString('PHPSESSID', json_encode($requestContext['headers']) ?: '');
+        $this->assertStringNotContainsString('topsecret', json_encode($requestContext['headers']) ?: '');
+        // Non-sensitive headers remain intact.
+        $this->assertNotEquals('[REDACTED]', $requestContext['headers']['content-type']);
     }
 
     public function testCollectUserReturnsNullWithoutSession(): void

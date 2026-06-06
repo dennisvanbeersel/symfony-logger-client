@@ -10,7 +10,6 @@ use Psr\Log\LoggerInterface;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\Session\SessionInterface;
 use Symfony\Component\HttpKernel\Event\RequestEvent;
-use Symfony\Component\HttpKernel\Event\ResponseEvent;
 use Symfony\Component\HttpKernel\KernelEvents;
 use Symfony\Component\Uid\Uuid;
 
@@ -20,18 +19,23 @@ use Symfony\Component\Uid\Uuid;
  * Generates session IDs, tracks page views, and sends data to the API.
  * Designed to be non-intrusive and resilient.
  */
-class SessionTrackingSubscriber implements EventSubscriberInterface
+final class SessionTrackingSubscriber implements EventSubscriberInterface
 {
     private const SESSION_KEY = '_application_logger_session_id';
     private const LAST_ACTIVITY_KEY = '_application_logger_last_activity';
     private const REGISTERED_KEY = '_application_logger_session_registered';
 
     /**
-     * @param array{enabled: bool, track_page_views: bool, idle_timeout: int, ignored_routes: array<string>, ignored_paths: array<string>} $config
+     * @param array<string> $ignoredRoutes
+     * @param array<string> $ignoredPaths
      */
     public function __construct(
         private readonly ApiClient $apiClient,
-        private readonly array $config,
+        private readonly bool $enabled,
+        private readonly bool $trackPageViews,
+        private readonly int $idleTimeout,
+        private readonly array $ignoredRoutes,
+        private readonly array $ignoredPaths,
         private readonly DataScrubber $scrubber,
         private readonly ?LoggerInterface $logger = null,
     ) {
@@ -41,13 +45,12 @@ class SessionTrackingSubscriber implements EventSubscriberInterface
     {
         return [
             KernelEvents::REQUEST => ['onKernelRequest', -100],
-            KernelEvents::RESPONSE => ['onKernelResponse', -100],
         ];
     }
 
     public function onKernelRequest(RequestEvent $event): void
     {
-        if (!$this->config['enabled']) {
+        if (!$this->enabled) {
             return;
         }
 
@@ -82,7 +85,7 @@ class SessionTrackingSubscriber implements EventSubscriberInterface
             $lastActivity = $session->get(self::LAST_ACTIVITY_KEY);
 
             // Check if session has expired (idle timeout)
-            $idleTimeout = $this->config['idle_timeout'];
+            $idleTimeout = $this->idleTimeout;
             $now = time();
 
             $expired = false;
@@ -117,10 +120,16 @@ class SessionTrackingSubscriber implements EventSubscriberInterface
             }
 
             // Track page view
-            if ($this->config['track_page_views']) {
+            if ($this->trackPageViews) {
+                // Event type MUST match the platform's SessionEventTypeEnum backing values,
+                // which are lower_snake_case ('page_view'). The platform drops unknown types
+                // silently (SessionEventTypeEnum::tryFrom returns null), so an upper-case
+                // 'PAGE_VIEW' here would never persist — keep this in sync with the enum.
                 $this->apiClient->addSessionEvent($sessionId, [
-                    'type' => 'PAGE_VIEW',
-                    'url' => $request->getUri(),
+                    'type' => 'page_view',
+                    // Scrub sensitive query-string VALUES (e.g. ?token=...) before the
+                    // URL ever leaves the host app. Same credential-leak class as C1.
+                    'url' => $this->scrubber->scrubUrl($request->getUri()),
                     'timestamp' => (new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM),
                 ]);
             }
@@ -131,12 +140,6 @@ class SessionTrackingSubscriber implements EventSubscriberInterface
                 'trace' => $e->getTraceAsString(),
             ]);
         }
-    }
-
-    public function onKernelResponse(ResponseEvent $event): void
-    {
-        // Currently just updates last activity time
-        // Could be extended to track response status, duration, etc.
     }
 
     /**
@@ -170,7 +173,7 @@ class SessionTrackingSubscriber implements EventSubscriberInterface
      */
     private function shouldIgnoreRoute(string $route): bool
     {
-        foreach ($this->config['ignored_routes'] as $ignoredRoute) {
+        foreach ($this->ignoredRoutes as $ignoredRoute) {
             if (str_starts_with($route, $ignoredRoute)) {
                 return true;
             }
@@ -184,7 +187,7 @@ class SessionTrackingSubscriber implements EventSubscriberInterface
      */
     private function shouldIgnorePath(string $path): bool
     {
-        foreach ($this->config['ignored_paths'] as $ignoredPath) {
+        foreach ($this->ignoredPaths as $ignoredPath) {
             if (str_starts_with($path, $ignoredPath)) {
                 return true;
             }
