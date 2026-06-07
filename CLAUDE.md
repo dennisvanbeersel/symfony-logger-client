@@ -10,16 +10,19 @@ This is a **client library** for the AppLogger error tracking platform. It enabl
 
 ### What This Bundle Does
 
-- Captures PHP exceptions and Monolog errors
+- Captures PHP exceptions and Monolog errors (error tracking pipeline)
+- Ships non-exception Monolog records to **log aggregation** (ClickHouse via the
+  Go log-collector) — a distinct, optional feature from error tracking
 - Provides a JavaScript SDK for frontend error tracking
-- Sends errors to AppLogger API with resilience patterns
+- Sends errors/logs to AppLogger with resilience patterns (non-blocking, completed
+  after the response via `kernel.terminate`)
 - Collects breadcrumbs and context for debugging
 - Sanitizes sensitive data (GDPR compliance)
 
 ### Technology Stack
 
 - **PHP 8.2+** with strict types
-- **Symfony 6.4 / 7.x** bundle architecture
+- **Symfony 6.4 / 7.x / 8.x** bundle architecture (`^6.4|^7.0|^8.0`)
 - **JavaScript ES6+** SDK (bundled, not separate npm package)
 - **Rollup** for JS build (ESM + UMD outputs)
 
@@ -32,19 +35,24 @@ This is a **client library** for the AppLogger error tracking platform. It enabl
 ├── src/
 │   ├── ApplicationLoggerBundle.php      # Bundle entry point
 │   ├── DependencyInjection/
-│   │   ├── ApplicationLoggerExtension.php  # Service registration
+│   │   ├── ApplicationLoggerExtension.php  # Service registration + prepend (auto-wires Monolog handler + AssetMapper)
+│   │   ├── Compiler/RemoveTwigServicesPass.php # Drops Twig services when Twig absent
 │   │   └── Configuration.php               # Bundle config schema
 │   ├── EventSubscriber/
 │   │   ├── ExceptionSubscriber.php         # Catches uncaught exceptions
+│   │   ├── FlushTelemetrySubscriber.php    # Drains async sends on kernel.terminate (post-response)
 │   │   ├── SessionTrackingSubscriber.php   # Tracks user sessions
 │   │   └── JavaScriptInjectionSubscriber.php # Auto-injects JS SDK
 │   ├── Monolog/Handler/
-│   │   └── ApplicationLoggerHandler.php    # Monolog integration
+│   │   └── ApplicationLoggerHandler.php    # Routes records: exceptions → errors, plain logs → log aggregation
 │   ├── Service/
-│   │   ├── ApiClient.php                   # HTTP client with resilience
+│   │   ├── ApiClient.php                   # Thin endpoint facade (errors + logs + sessions)
+│   │   ├── Http/ResilientHttpDispatcher.php # Owns all transport: async/sync POST, retry, circuit breaker, flushAndComplete()
 │   │   ├── BreadcrumbCollector.php         # Breadcrumb trail
 │   │   ├── CircuitBreaker.php              # Circuit breaker pattern
 │   │   ├── ContextCollector.php            # Request/user context
+│   │   ├── DataScrubber.php                # Sensitive-data scrubbing (GDPR)
+│   │   ├── ErrorPayloadFactory.php         # Builds error payloads from Throwables
 │   │   └── DsnGenerator.php                # DSN parsing/validation
 │   ├── Twig/
 │   │   └── ApplicationLoggerExtension.php  # Twig globals/functions
@@ -164,9 +172,10 @@ try {
 - `OPEN` (failed): Skip all requests (saves resources)
 - `HALF_OPEN` (testing): Allow 1 test request after timeout
 
-### 4. Fire-and-Forget Mode
+### 4. Fire-and-Forget Mode (Non-Blocking + Reliable)
 
-Default mode - return immediately, don't wait for API response:
+Default mode (`async: true`) - return immediately, never block the host request,
+but still RELIABLY deliver telemetry.
 
 ```php
 // ✅ Async mode - returns in < 1ms
@@ -175,6 +184,35 @@ $this->httpClient->request('POST', $url, [
 ]);
 // Method returns immediately, request continues in background
 ```
+
+**How reliable delivery works (changed: post-response completion):**
+
+The transport lives in `Service/Http/ResilientHttpDispatcher`. In async mode
+`post()` initiates the POST and does ONE non-blocking poll (`stream($response, 0.0)`)
+to surface immediate connection failures (so the circuit breaker can trip), then
+returns — adding ~0ms to the host request. The in-flight handle is retained in
+`$pendingResponses`.
+
+Completion happens AFTER the response is sent to the client:
+
+- **Web (PHP-FPM / FrankenPHP non-worker / built-in server):**
+  `FlushTelemetrySubscriber` listens on `kernel.terminate` (priority `-1024`) and
+  calls `ApiClient::flush()` → `ResilientHttpDispatcher::flushAndComplete()`, which
+  loops `stream()` until every handle reaches `isLast()` or the timeout expires.
+  This runs after `fastcgi_finish_request()` / the runtime flush, so the user is
+  never delayed. WITHOUT this, a per-request SAPI would GC-cancel the cURL handle
+  before transmission and silently lose the event.
+- **CLI / Messenger workers (no `kernel.terminate`):** `__destruct` calls
+  `flushAndComplete()` with a bounded timeout as a fallback.
+
+Each completed transfer records a deterministic circuit-breaker outcome
+(2xx/3xx success; 4xx/5xx, timeout or transport error → failure). The whole path
+is bounded by `timeout` and never throws into the host app.
+
+**Same-host self-monitoring:** because the send completes after the response is
+flushed (and the platform ingestion is disconnect-safe), it is safe to point the
+bundle at the same host it runs on with `async: true`. Separate-host installs are
+the norm and are always non-blocking.
 
 ### 5. Data Sanitization (GDPR)
 
@@ -532,6 +570,38 @@ describe('Transport', () => {
 ```
 
 ---
+
+## Log Aggregation (Distinct From Error Tracking)
+
+The bundle ships TWO independent pipelines through one auto-wired Monolog handler
+(`Monolog/Handler/ApplicationLoggerHandler`):
+
+- **Error tracking:** records carrying a `Throwable` (`context['exception']`) →
+  `ApiClient::sendError()` → `POST {dsn-host}/api/v1/errors` (PostgreSQL, grouped/
+  fingerprinted). Auth: `X-Api-Key: <api_key>`.
+- **Log aggregation:** records WITHOUT an exception → buffered, then
+  `ApiClient::sendLogs()` → `POST {log_endpoint}/v1/logs` (single) or
+  `/v1/logs/batch` (`{"logs":[…]}`, max 1000) → the Go log-collector (ClickHouse).
+  Auth: `X-Api-Key: <log_token>` (`sk_log_…`). Success = HTTP 202.
+
+Key facts:
+
+- **Auto-wired, zero-config.** `ApplicationLoggerExtension::prependMonolog()`
+  registers the handler on channels `['!event', '!request', '!php']` (the excluded
+  framework channels carry uncaught-exception logs already shipped by
+  `ExceptionSubscriber`, avoiding double-recording). Customers do NOT edit
+  `monolog.yaml`.
+- **Config:** `log_endpoint` + `log_token` enable aggregation; `capture_level`
+  (default `error`) is the minimum Monolog level handled; `log_batch_size`
+  (default 50) and `max_log_buffer` (default 1000) bound buffering; `log_path`
+  defaults to `/v1/logs`. If `log_endpoint`/`log_token` are null, `sendLogs()`
+  silently no-ops (never an error).
+- **Behavior:** batched, async, non-blocking — same `ResilientHttpDispatcher`
+  guarantees as error tracking. Context is scrubbed and flattened to
+  `map<string,string>`.
+- **LogEntry contract:** `timestamp` (RFC3339), `severity` (syslog keyword),
+  `message` (≤8000), `app_name` (channel, ≤255), `environment`, `context`
+  (`channel` preserved inside it).
 
 ## Configuration Schema
 

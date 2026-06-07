@@ -5,7 +5,7 @@
 **🛡️ Privacy-First Error Tracking for Symfony - Hosted in EU**
 
 [![PHP](https://img.shields.io/badge/php-%5E8.2-blue?style=flat-square)](https://www.php.net/)
-[![Symfony](https://img.shields.io/badge/symfony-6.4%20%7C%207.x-green?style=flat-square)](https://symfony.com/)
+[![Symfony](https://img.shields.io/badge/symfony-6.4%20%7C%207.x%20%7C%208.x-green?style=flat-square)](https://symfony.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](https://github.com/dennisvanbeersel/application-logger/blob/master/LICENSE)
 [![Tests](https://img.shields.io/badge/tests-passing-success?style=flat-square)](https://github.com/dennisvanbeersel/symfony-logger-client)
 [![PHPStan](https://img.shields.io/badge/PHPStan-level%206-success?style=flat-square)](https://github.com/dennisvanbeersel/symfony-logger-client)
@@ -58,7 +58,8 @@ We achieve this through battle-tested resilience patterns:
 |---------|------------|-------------------|--------|
 | **Timeout** | ⚡ 2s max (configurable) | ⏰ Often 30s+ or none | **50ms vs 30s+ delay** |
 | **Circuit Breaker** | ✅ Automatic failover | ❌ Keep retrying | **Stops wasting resources** |
-| **Fire & Forget** | ✅ Returns instantly | ❌ Waits for response | **<1ms vs 2000ms** |
+| **Fire & Forget** | ✅ Returns instantly, sends after response | ❌ Waits for response | **~0ms vs 2000ms** |
+| **Reliable async delivery** | ✅ Completed on `kernel.terminate` | ⚠️ Lost under PHP-FPM | **No silent data loss** |
 | **Exception Safety** | ✅ Never throws | ⚠️ Can crash app | **100% uptime guarantee** |
 | **JS Offline Queue** | ✅ localStorage backup | ❌ Errors lost | **Zero data loss** |
 | **JS Rate Limiting** | ✅ Token bucket | ❌ Can overwhelm API | **Protected from error storms** |
@@ -83,6 +84,33 @@ $elapsed = microtime(true) - $start;   // <1ms
 // User doesn't notice anything 🎉
 ```
 
+### Non-Blocking, Reliable Delivery (How `async: true` Works)
+
+In the default fire-and-forget mode the bundle **never blocks the host request**,
+yet still **reliably delivers** telemetry — even under per-request SAPIs like
+PHP-FPM and FrankenPHP (non-worker mode), where naive fire-and-forget loses data:
+
+1. **During the request:** the HTTP POST is *initiated* (a single non-blocking
+   poll surfaces immediate connection failures so the circuit breaker can trip),
+   then the method returns — adding ~0ms to the user-visible response.
+2. **After the response is sent:** a `kernel.terminate` listener
+   (`FlushTelemetrySubscriber`) drives the in-flight transfer to completion. This
+   runs *after* Symfony has already flushed the response to the client
+   (`fastcgi_finish_request()` under FPM, the runtime flush under FrankenPHP), so
+   the user is never delayed. Without this step, per-request SAPIs would garbage-
+   collect and abort the cURL handle before the request was transmitted, silently
+   losing the event.
+3. **CLI & Messenger workers:** there is no `kernel.terminate` there, so a bounded
+   `__destruct` fallback drains any pending transfers on shutdown.
+
+Each completed transfer feeds its outcome (2xx/3xx success, 4xx/5xx or
+transport error failure) back into the circuit breaker, all bounded by the
+configured `timeout` and never throwing into the host application.
+
+> **Same-host self-monitoring:** because the send completes *after* the response
+> is flushed, it is safe to point the bundle at the same host it runs on with
+> `async: true`. Separate-host installs (the norm) are always non-blocking too.
+
 ---
 
 ## ✨ Features
@@ -96,6 +124,7 @@ $elapsed = microtime(true) - $start;   // <1ms
 **Automatic Capture**
 - 🚨 Uncaught exceptions
 - 📝 Monolog error logs
+- 📡 Log aggregation (centralized app logs)
 - 🔢 HTTP status codes (404, 500, etc.)
 - 👤 User context from Symfony Security
 - 📊 Request/response data
@@ -199,6 +228,111 @@ This bundle provides comprehensive monitoring for both backend and frontend:
 
 ---
 
+## 📡 Log Aggregation (Centralized Application Logs)
+
+Beyond error tracking, this bundle can ship your **application logs** (any Monolog
+record) to AppLogger's **log aggregation** backend — a Papertrail/Loggly-style
+centralized logging service backed by ClickHouse via the AppLogger log-collector.
+This is a **distinct, optional feature** from error/exception tracking:
+
+| | Error tracking | Log aggregation |
+|---|----------------|-----------------|
+| **What** | Exceptions, grouped & fingerprinted | Plain application log lines |
+| **Triggered by** | A Monolog record with an attached `Throwable` | A Monolog record **without** an exception |
+| **Endpoint** | `POST {dsn-host}/api/v1/errors` | `POST {log_endpoint}/v1/logs` (+ `/batch`) |
+| **Auth** | `X-Api-Key: <api_key>` | `X-Api-Key: <log_token>` (`sk_log_…`) |
+| **Storage** | PostgreSQL (error groups) | ClickHouse (high-throughput) |
+
+The single auto-wired Monolog handler routes each record automatically: records
+**with** an exception go to the error pipeline; records **without** one go to log
+aggregation. If log aggregation is not configured, plain log records are simply
+**not shipped anywhere** (the handler silently no-ops — it never errors).
+
+### Enabling Log Aggregation
+
+Add a log endpoint and ingestion token (from your AppLogger dashboard) — that's it:
+
+```yaml
+# config/packages/application_logger.yaml
+application_logger:
+    # ... error tracking config (dsn, api_key) ...
+
+    # Log aggregation (optional)
+    log_endpoint: '%env(APPLICATION_LOGGER_LOG_ENDPOINT)%'  # e.g. https://your-slug.logs.applogger.eu
+    log_token: '%env(APPLICATION_LOGGER_LOG_TOKEN)%'        # sk_log_…
+
+    # Minimum Monolog level shipped (debug|info|notice|warning|error|critical|alert|emergency)
+    capture_level: info
+```
+
+```bash
+# .env.local
+APPLICATION_LOGGER_LOG_ENDPOINT=https://your-slug.logs.applogger.eu
+APPLICATION_LOGGER_LOG_TOKEN=sk_log_xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Now every `$logger->info()`, `$logger->warning()`, etc. (at or above
+`capture_level`) is shipped to log aggregation. Records carrying an exception keep
+going to error tracking.
+
+> **Zero manual wiring.** The bundle auto-registers its Monolog handler via a
+> container prepend, so you do **not** need to add anything to `monolog.yaml`. The
+> handler is attached to all channels except `event`, `request` and `php` (those
+> framework channels carry uncaught-exception logs already shipped by the
+> exception subscriber, so excluding them avoids double-recording).
+
+### Behavior
+
+- **Batched & async:** records are buffered and flushed in a single HTTP request
+  (default `log_batch_size: 50`), using the **same dispatcher and guarantees** as
+  error tracking — non-blocking, completed after the response, circuit-breaker
+  protected, never throwing.
+- **Memory-bounded:** at most `max_log_buffer` records (default 1000) are buffered;
+  the oldest are dropped beyond that.
+- **Batch cap:** the collector hard-caps batches at **1000** entries; larger
+  buffers are chunked defensively.
+- **Sensitive data scrubbed:** log context is run through the same scrubber as
+  errors, then flattened to a string map for the collector.
+
+### The LogEntry Contract
+
+Each shipped record maps to a collector `LogEntry`:
+
+| Field | Source | Notes |
+|-------|--------|-------|
+| `timestamp` | record datetime | RFC 3339 / ATOM |
+| `severity` | Monolog level | syslog keyword (`debug`…`emergency`) |
+| `message` | record message | truncated to 8000 chars |
+| `app_name` | Monolog channel | truncated to 255 chars |
+| `environment` | `environment` config | e.g. `production` |
+| `context` | record context | scrubbed, flattened to `map<string,string>` (original channel preserved as `context.channel`) |
+
+Single records `POST {log_endpoint}/v1/logs`; multiple records
+`POST {log_endpoint}/v1/logs/batch` with body `{"logs": [LogEntry, …]}`. A
+successful ingestion returns **HTTP 202 Accepted**.
+
+### Log Aggregation Only (No Error Tracking)
+
+`dsn` and `api_key` are still required by the bundle (they configure the error
+client), but if you only want centralized logs, set a high `capture_level` so
+routine logs flow to aggregation while leaving error tracking effectively idle —
+or simply enable both. A typical "logs + errors" setup:
+
+```yaml
+application_logger:
+    dsn: '%env(APPLICATION_LOGGER_DSN)%'
+    api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
+
+    # Error tracking is automatic (exceptions → /api/v1/errors)
+
+    # Log aggregation for everything info-and-above
+    log_endpoint: '%env(APPLICATION_LOGGER_LOG_ENDPOINT)%'
+    log_token: '%env(APPLICATION_LOGGER_LOG_TOKEN)%'
+    capture_level: info
+```
+
+---
+
 ## 🚀 Quick Start
 
 ### Installation
@@ -265,8 +399,19 @@ application_logger:
         timeout: 60           # Stay open for N seconds
         half_open_attempts: 1 # Test requests before closing
 
-    # What to Capture
-    capture_level: error      # Monolog level: debug, info, warning, error, critical
+    # What to Capture (minimum Monolog level routed by the handler)
+    capture_level: error      # debug, info, notice, warning, error, critical, alert, emergency
+
+    # Log Aggregation (optional) - ship non-exception logs to centralized logging.
+    # Leave null to disable; plain log records are then not shipped anywhere.
+    log_endpoint: null        # e.g. https://your-slug.logs.applogger.eu
+    log_token: null           # log ingestion token (sk_log_…)
+    log_path: '/v1/logs'      # collector ingestion path (batch is this + "/batch")
+    log_batch_size: 50        # buffer N records before flushing one batch (1-1000)
+    max_log_buffer: 1000      # hard cap on buffered records (1-10000)
+
+    # Error ingestion path on the platform API
+    endpoint_path: '/api/v1/errors'
 
     # Breadcrumbs
     max_breadcrumbs: 50       # Maximum breadcrumbs to keep (10-100)
@@ -339,22 +484,30 @@ The bundle automatically captures:
 
 **No code changes required!** Just install and configure.
 
-#### Monolog Integration
+#### Monolog Integration (Auto-Wired)
 
-Send error-level logs to AppLogger:
+The bundle **automatically registers its Monolog handler** for you — there is
+**no need to edit `monolog.yaml`**. On install, every Monolog record is routed:
+
+- records carrying an exception → **error tracking** (`/api/v1/errors`)
+- plain records (no exception), at or above `capture_level` → **log aggregation**
+  (when `log_endpoint`/`log_token` are configured; otherwise silently dropped)
+
+So `$logger->error('...', ['exception' => $e])` is tracked as an error, while
+`$logger->info('User signed in')` is shipped to log aggregation. The handler is
+attached to all channels except `event`, `request` and `php` (those carry
+uncaught-exception logs already shipped by the exception subscriber).
+
+Control the floor with `capture_level`:
 
 ```yaml
-# config/packages/monolog.yaml
-monolog:
-    handlers:
-        application_logger:
-            type: service
-            id: ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler
-            level: error
-            channels: ['!event']  # Exclude to avoid duplication
+# config/packages/application_logger.yaml
+application_logger:
+    capture_level: info  # debug|info|notice|warning|error|critical|alert|emergency
 ```
 
-Now all `$logger->error()`, `$logger->critical()`, etc. calls are tracked.
+> See [Log Aggregation](#-log-aggregation-centralized-application-logs) for
+> shipping plain logs to centralized logging.
 
 #### Manual Error Capture
 
@@ -579,8 +732,17 @@ $elapsed = microtime(true) - $start;
 $start = microtime(true);
 $apiClient->sendError($payload);
 $elapsed = microtime(true) - $start;
-// $elapsed is typically < 1ms (request queued, method returns)
+// $elapsed is typically < 1ms (request initiated, method returns)
 ```
+
+**Reliable post-response completion:** the request is *initiated* during your
+request (adding ~0ms) and *completed* on `kernel.terminate` — after Symfony has
+already sent the response to the client. This makes async delivery reliable even
+on per-request SAPIs (PHP-FPM, FrankenPHP non-worker mode) where a naive fire-
+and-forget request would be aborted before transmission. CLI commands and
+Messenger consumers fall back to a bounded `__destruct` drain on shutdown. The
+host request is never delayed. (See
+[Non-Blocking, Reliable Delivery](#non-blocking-reliable-delivery-how-async-true-works).)
 
 ### Offline Queue (JavaScript)
 
@@ -866,7 +1028,7 @@ npm run test:coverage
 
 **Minimum:**
 - PHP 8.2+
-- Symfony 6.4 or 7.x
+- Symfony 6.4, 7.x or 8.x
 - ext-json, ext-curl
 
 **Recommended:**

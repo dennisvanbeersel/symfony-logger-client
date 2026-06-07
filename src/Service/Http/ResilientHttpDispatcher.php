@@ -16,6 +16,8 @@ use Symfony\Contracts\HttpClient\ResponseInterface;
  * dispatch envelope, async/sync POST, bounded retry/backoff, circuit-breaker
  * interaction, and the fire-and-forget cURL handle lifecycle.
  *
+ * @internal Not part of the bundle's public API; subject to change without notice.
+ *
  * Extracted from ApiClient (SRP) so the latter is a thin endpoint facade that
  * only builds URL + payload + headers and hands them here. Every outbound path
  * funnels through {@see post()}, which means the circuit-breaker guard, the
@@ -81,9 +83,150 @@ final class ResilientHttpDispatcher
 
     public function __destruct()
     {
-        // Best-effort drain so in-flight fire-and-forget requests complete and any
-        // late transport failure is recorded. Never throws.
-        $this->flushPendingResponses();
+        // Best-effort drive-to-completion for in-flight fire-and-forget requests.
+        // Uses a small bounded timeout so CLI/worker contexts (where kernel.terminate
+        // never fires) still deliver telemetry. If the terminate subscriber already
+        // flushed (web path), $pendingResponses is empty and this is a no-op.
+        // Never throws during shutdown.
+        $this->flushAndComplete(min($this->timeout, 1.0));
+    }
+
+    /**
+     * Drive all pending fire-and-forget transfers to completion (or timeout).
+     *
+     * Unlike {@see flushPendingResponses()} which only reads `getInfo('http_code')` then
+     * cancels (pessimistically marking unfinished handles as failures), this method
+     * ACTIVELY polls the HTTP transport via `stream()` until every handle reaches
+     * `isLast()` or the per-handle timeout expires. This is the key to reliable
+     * delivery in per-request SAPIs (PHP-FPM, PHP built-in server, FrankenPHP
+     * non-worker mode): the cURL transfer only progresses when the client is polled,
+     * so without this the GC-cancel in `flushPendingResponses()` aborted the POST
+     * before a single byte was transmitted.
+     *
+     * Caller contract:
+     *   - MUST be invoked AFTER the response is already sent to the user (e.g. from
+     *     {@see FlushTelemetrySubscriber} on `kernel.terminate`, or from `__destruct`
+     *     for CLI/worker contexts). This method blocks — briefly, by at most
+     *     `$maxWait` seconds — and must never run on the hot request path.
+     *   - Never throws; all transport errors are caught and recorded on the breaker.
+     *   - If called when `$pendingResponses` is empty, returns immediately (no-op).
+     *
+     * @param float|null $maxWait Idle/inactivity timeout passed to each `stream()` poll:
+     *                            if no chunk arrives within this window the handle is
+     *                            considered timed-out and a pessimistic failure is
+     *                            recorded. It is NOT a single total budget for the whole
+     *                            flush; in practice one poll loop drains all in-flight
+     *                            handles concurrently so the actual wall-clock wait is
+     *                            close to $maxWait regardless of the number of handles.
+     *                            Null uses the dispatcher's configured timeout.
+     */
+    public function flushAndComplete(?float $maxWait = null): void
+    {
+        if ([] === $this->pendingResponses) {
+            return;
+        }
+
+        $wait = $maxWait ?? $this->timeout;
+        $responses = $this->pendingResponses;
+        $this->pendingResponses = [];
+
+        // Count pending handles per object identity. The real CurlHttpClient always
+        // returns distinct response objects, but test doubles may return the same
+        // instance for multiple requests. We track counts so each logical request
+        // (even duplicates) is accounted for independently.
+        /** @var array<int, int> $pendingCount object-id → remaining count */
+        $pendingCount = [];
+        foreach ($responses as $response) {
+            $id = spl_object_id($response);
+            $pendingCount[$id] = ($pendingCount[$id] ?? 0) + 1;
+        }
+
+        // Total unresolved handles; decremented as each one is settled.
+        $unresolved = \count($responses);
+
+        try {
+            // stream() multiplexes ALL handles concurrently; each iteration yields one
+            // ($response, $chunk) pair. We stop when every handle has produced an
+            // isLast() chunk (or a timeout/error), i.e. $unresolved drops to zero.
+            foreach ($this->httpClient->stream($responses, $wait) as $response => $chunk) {
+                $id = spl_object_id($response);
+
+                // Only process if we still expect chunks for this response.
+                if (!isset($pendingCount[$id]) || $pendingCount[$id] <= 0) {
+                    continue;
+                }
+
+                try {
+                    if ($chunk->isTimeout()) {
+                        // Handle did not complete within $wait; record pessimistic failure.
+                        $this->circuitBreaker->recordFailure();
+                        --$pendingCount[$id];
+                        --$unresolved;
+                        continue;
+                    }
+
+                    if ($chunk->isLast()) {
+                        // Transfer complete; read the final status.
+                        $this->recordOutcome($response);
+                        --$pendingCount[$id];
+                        --$unresolved;
+                        continue;
+                    }
+
+                    // Intermediate chunk (headers received but body still streaming).
+                    // Do NOT settle here — wait for isLast() so we record exactly one
+                    // outcome per handle and never miss the final HTTP status code.
+                    // Stream() will keep yielding chunks for this handle until isLast().
+                } catch (\Throwable) {
+                    // Per-chunk error: record failure and settle this slot.
+                    $this->circuitBreaker->recordFailure();
+                    --$pendingCount[$id];
+                    --$unresolved;
+                }
+
+                if ($unresolved <= 0) {
+                    break;
+                }
+            }
+        } catch (\Throwable) {
+            // stream() itself threw (e.g. client shut down). Record a pessimistic
+            // failure for every handle we could not confirm.
+            $unresolved = 0;
+            foreach ($pendingCount as $count) {
+                for ($i = 0; $i < $count; ++$i) {
+                    $this->circuitBreaker->recordFailure();
+                }
+            }
+            $pendingCount = [];
+            // Cancel every handle so CurlResponse::__destruct() does not later try to
+            // initialize an unconsumed response and throw a TransportException from a
+            // destructor (a fatal-level error at host shutdown). Mirrors the cancel in
+            // flushPendingResponses()'s finally block.
+            foreach ($responses as $response) {
+                try {
+                    $response->cancel();
+                } catch (\Throwable) {
+                    // ignore — never throw during cleanup
+                }
+            }
+        }
+
+        // Any handles that never produced a settling chunk (e.g. stream ended early):
+        // record pessimistic failures and cancel to free cURL resources.
+        if ($unresolved > 0) {
+            foreach ($responses as $response) {
+                $id = spl_object_id($response);
+                if (isset($pendingCount[$id]) && $pendingCount[$id] > 0) {
+                    $this->circuitBreaker->recordFailure();
+                    --$pendingCount[$id];
+                    try {
+                        $response->cancel();
+                    } catch (\Throwable) {
+                        // ignore
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -240,6 +383,13 @@ final class ResilientHttpDispatcher
     private function recordOutcome(ResponseInterface $response): void
     {
         try {
+            // getStatusCode() behaviour depends on the caller:
+            //  - async fast path: stream() has already yielded a non-timeout chunk, so
+            //    CurlHttpClient has cached http_code via its header-parse callback and
+            //    cleared the response initializer -> returns the status immediately
+            //    (non-blocking). This is what keeps the host request fast.
+            //  - sync path: intentionally blocks up to `timeout` until headers arrive.
+            // Never add getContent()/body reads here: that would block the host request.
             $status = $response->getStatusCode();
 
             if ($status >= 200 && $status < 400) {
@@ -275,7 +425,7 @@ final class ResilientHttpDispatcher
 
     /**
      * Drain retained fire-and-forget responses and record a DETERMINISTIC breaker
-     * outcome for each (I6).
+     * outcome for each.
      *
      * Previously a handle that had not yet produced an http_code at drain time was
      * simply cancelled, recording NEITHER success nor failure - so a slow 5xx or a

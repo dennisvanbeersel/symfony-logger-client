@@ -86,6 +86,37 @@ final class ResilientHttpDispatcherTest extends TestCase
         $this->assertSame(0, $state['failureCount']);
     }
 
+    /**
+     * REQ-04 — Customer-protection guard: in async mode, post() against a
+     * never-completing response (the poll only ever sees a timeout chunk, the handle
+     * never resolves) must return PROMPTLY. The host hot path is non-blocking and
+     * bounded — it parks the handle and returns rather than waiting for completion.
+     */
+    public function testAsyncPostAgainstNeverCompletingResponseReturnsPromptly(): void
+    {
+        $breaker = $this->breaker();
+        // streamTimesOut: true -> the poll always sees "still in flight"; the handle
+        // never completes. http_code stays 0 forever.
+        $http = new FakeHttpClient(new FakeResponse(httpCode: 0, streamTimesOut: true));
+
+        $dispatcher = $this->dispatcher($breaker, $http);
+
+        $start = microtime(true);
+        $dispatched = $dispatcher->post('https://x/y', ['event' => 'test'], []);
+        $elapsed = microtime(true) - $start;
+
+        $this->assertTrue($dispatched, 'post() must dispatch (and park) the in-flight handle');
+        // Generous ceiling: the host path must not block on the 2.0s transport timeout.
+        // A non-blocking park returns in well under a millisecond; 0.5s leaves ample
+        // slack for CI jitter while still failing hard if post() ever waits for the
+        // full transfer/timeout.
+        $this->assertLessThan(
+            0.5,
+            $elapsed,
+            'async post() must return promptly (non-blocking) even when the response never completes',
+        );
+    }
+
     public function testInFlightThenConfirmed5xxAtDrainRecordsFailure(): void
     {
         // In flight at poll time, but the handle DOES expose a 5xx code at drain.

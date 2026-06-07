@@ -55,10 +55,14 @@ application_logger:
     endpoint_path: '/api/v1/errors'
 
     # Capture Settings
-    # Minimum Monolog level to capture
+    # Minimum Monolog level handled by the auto-wired handler. Records at/above this
+    # level are routed: those WITH an exception -> error tracking, those WITHOUT ->
+    # log aggregation (when log_endpoint/log_token are set; otherwise dropped).
+    # Set to 'info' to ship general app logs to log aggregation.
     capture_level: error # debug|info|notice|warning|error|critical|alert|emergency
 
-    # Field names to scrub from error data (security)
+    # Field names to scrub from error AND log-aggregation data (security).
+    # Keep in sync with assets/src/scrub-fields.js (JS SDK uses the same list).
     scrub_fields:
         - password
         - token
@@ -66,7 +70,11 @@ application_logger:
         - secret
         - authorization
         - credit_card
+        - creditcard
+        - card_number
+        - cvv
         - ssn
+        - iban
 
     # Maximum number of breadcrumbs to track
     max_breadcrumbs: 50
@@ -187,7 +195,14 @@ application_logger:
         expose_api: true
 
     # Advanced Options
-    # Use async HTTP client (fire-and-forget for maximum resilience)
+    # Use async HTTP client (fire-and-forget for maximum resilience).
+    # When true (default), the outbound send is INITIATED during the request
+    # (adding ~0ms) and COMPLETED after the response is sent to the client, via a
+    # kernel.terminate listener — so the host request is never blocked, yet delivery
+    # stays reliable even under per-request SAPIs (PHP-FPM, FrankenPHP non-worker).
+    # CLI/Messenger contexts fall back to a bounded __destruct drain on shutdown.
+    # Set to false only if you need synchronous, in-request delivery (this blocks
+    # the host request up to `timeout` per attempt and is NOT recommended).
     async: true
 
     # Enable PHP debug logging

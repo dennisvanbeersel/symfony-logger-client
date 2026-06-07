@@ -1,0 +1,72 @@
+<?php
+
+declare(strict_types=1);
+
+namespace ApplicationLogger\Bundle\EventSubscriber;
+
+use ApplicationLogger\Bundle\Service\ApiClient;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+use Symfony\Component\HttpKernel\Event\TerminateEvent;
+use Symfony\Component\HttpKernel\KernelEvents;
+
+/**
+ * Drives pending async telemetry transfers to completion AFTER the HTTP response
+ * has been flushed to the client.
+ *
+ * THE PROBLEM THIS SOLVES
+ * -----------------------
+ * In async mode, {@see ResilientHttpDispatcher::post()} initiates a fire-and-forget
+ * POST and performs ONE zero-timeout poll (`stream($response, 0.0)`). If the
+ * response is still in flight after that poll, it is retained in `$pendingResponses`
+ * and the cURL transfer is expected to progress on subsequent polls. In a
+ * per-request SAPI (PHP-FPM, PHP built-in server, FrankenPHP non-worker mode),
+ * nothing polls the transfer again before end-of-request, so `__destruct()` runs
+ * `cancel()` — aborting the POST before it is transmitted and silently losing the
+ * telemetry event.
+ *
+ * THE FIX
+ * -------
+ * `kernel.terminate` fires AFTER Symfony has sent the response to the client
+ * (via `fastcgi_finish_request()` in FPM, or an equivalent runtime flush in
+ * FrankenPHP and the built-in server). Blocking briefly here to drain the pending
+ * cURL handles does NOT delay the user-visible response. This subscriber calls
+ * `ApiClient::flush()` → `ResilientHttpDispatcher::flushAndComplete()`, which loops
+ * `stream()` until every in-flight handle reaches `isLast()` or the configured
+ * timeout expires, recording a circuit-breaker outcome either way.
+ *
+ * CLI commands and Messenger consumers have no `kernel.terminate` event; they rely
+ * on the bounded `__destruct()` call instead (see `ResilientHttpDispatcher`).
+ *
+ * PRIORITY
+ * --------
+ * Priority -1024 ensures this runs last, after all other terminate work (session
+ * commit, profiler flush, etc.) that may itself generate telemetry we still want
+ * to capture.
+ */
+final readonly class FlushTelemetrySubscriber implements EventSubscriberInterface
+{
+    public function __construct(private readonly ApiClient $apiClient)
+    {
+    }
+
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            KernelEvents::TERMINATE => ['onKernelTerminate', -1024],
+        ];
+    }
+
+    /**
+     * Called after the response has been sent. Blocking here is safe because the
+     * user no longer waits for this process.
+     */
+    public function onKernelTerminate(TerminateEvent $_event): void
+    {
+        try {
+            $this->apiClient->flush();
+        } catch (\Throwable) {
+            // CRITICAL: Never let telemetry flush errors affect the host application.
+            // The flush is best-effort; if it fails for any reason, we silently discard.
+        }
+    }
+}

@@ -40,6 +40,7 @@ class ApiClient
     private readonly string $errorPath;
     private readonly string $publicKey;
     private readonly ResilientHttpDispatcher $dispatcher;
+    private readonly float $timeout;
 
     public function __construct(
         string $dsn,
@@ -63,6 +64,7 @@ class ApiClient
         }
 
         // Parse DSN and initialize readonly properties.
+        $this->timeout = $timeout;
         $this->endpoint = $this->parseDsnEndpoint($dsn, $errorPath);
         $this->errorPath = $errorPath;
         $this->publicKey = $apiKey;
@@ -195,6 +197,27 @@ class ApiClient
         $url = $this->buildApiUrl(\sprintf('/api/v1/sessions/%s/end', $sessionId));
 
         $this->dispatcher->post($url, $data, $this->getApiHeaders());
+    }
+
+    /**
+     * Drive all pending async transfers to completion, blocking until each one either
+     * finishes or the timeout expires.
+     *
+     * Intended to be called from {@see FlushTelemetrySubscriber} on `kernel.terminate`
+     * (i.e. AFTER the response has been sent to the client) so that fire-and-forget
+     * telemetry is reliably delivered in per-request SAPIs (PHP-FPM, FrankenPHP
+     * non-worker mode) without ever blocking the user-visible response.
+     *
+     * The post-response flush is capped at min(configured_timeout, 2.0) seconds so
+     * a misconfigured or slow backend cannot cause excessive post-response latency
+     * even when the dispatcher's configured timeout is higher.
+     *
+     * Safe to call when no requests are pending (no-op). Never throws.
+     */
+    public function flush(): void
+    {
+        // Cap at 2 s: the post-response flush must not stall FPM worker recycling.
+        $this->dispatcher->flushAndComplete(min($this->timeout, 2.0));
     }
 
     /**

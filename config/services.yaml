@@ -131,6 +131,16 @@ services:
         tags:
             - { name: twig.extension }
 
+    # Flush Telemetry Subscriber - drives pending async POSTs to completion after the
+    # response is sent (kernel.terminate), so fire-and-forget telemetry is reliably
+    # delivered in per-request SAPIs (PHP-FPM, FrankenPHP non-worker mode) without
+    # ever blocking the user-visible response.
+    ApplicationLogger\Bundle\EventSubscriber\FlushTelemetrySubscriber:
+        arguments:
+            $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
+        tags:
+            - { name: kernel.event_subscriber }
+
     # JavaScript Injection Subscriber - auto-injects SDK on HTML pages
     ApplicationLogger\Bundle\EventSubscriber\JavaScriptInjectionSubscriber:
         arguments:
