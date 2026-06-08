@@ -33,3 +33,6 @@ package-lock.json
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Generated recipes-contrib submission payload (rebuild via recipe/build-contrib.sh)
+/recipe/contrib/

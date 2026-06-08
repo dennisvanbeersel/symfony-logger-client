@@ -67,12 +67,39 @@ final class ApiClientTest extends TestCase
         $this->assertInstanceOf(ApiClient::class, $client);
     }
 
-    public function testEmptyDsnThrowsException(): void
+    public function testEmptyDsnDoesNotThrow(): void
     {
-        $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('DSN cannot be empty');
+        // A clean install whose Flex recipe was skipped leaves the DSN empty.
+        // The client MUST construct (cache:clear must not break) and stay inert.
+        $client = $this->createClient('');
 
-        $this->createClient('');
+        $this->assertInstanceOf(ApiClient::class, $client);
+    }
+
+    public function testEmptyDsnSendErrorDispatchesNothing(): void
+    {
+        $requests = 0;
+        $httpClient = new MockHttpClient(function () use (&$requests): MockResponse {
+            ++$requests;
+
+            return new MockResponse('', ['http_code' => 202]);
+        });
+
+        $client = new ApiClient(
+            '',            // empty DSN (unconfigured install)
+            '',            // empty API key
+            2.0,
+            0,
+            false,         // sync mode: if it were going to dispatch, it would fire now
+            $this->circuitBreaker,
+            $this->logger,
+            false,
+            $httpClient
+        );
+
+        $client->sendError(['message' => 'should not be sent']);
+
+        $this->assertSame(0, $requests, 'Empty DSN must keep the client inert (no HTTP request).');
     }
 
     public function testDsnWithoutProjectIdThrowsException(): void

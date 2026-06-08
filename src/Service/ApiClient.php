@@ -93,6 +93,11 @@ class ApiClient
      */
     public function sendError(array $payload): void
     {
+        // Inert when unconfigured: no DSN means no platform endpoint to POST to.
+        if ('' === $this->endpoint) {
+            return;
+        }
+
         $payload['timestamp'] = $payload['timestamp'] ?? (new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM);
         $payload['platform'] = $payload['platform'] ?? 'symfony';
 
@@ -279,12 +284,20 @@ class ApiClient
      * path segment is present (it guards malformed DSNs) but do not otherwise use
      * it - the public key is sent separately via the X-Api-Key header.
      *
-     * @throws \InvalidArgumentException on an empty or malformed DSN
+     * An empty DSN returns '' (unconfigured install → inert). A non-empty but
+     * malformed DSN is an active misconfiguration and still throws.
+     *
+     * @throws \InvalidArgumentException on a non-empty, malformed DSN
      */
     private function parseDsnEndpoint(string $dsn, string $errorPath): string
     {
-        if (empty($dsn)) {
-            throw new \InvalidArgumentException('ApplicationLogger DSN cannot be empty');
+        // An empty DSN means the bundle was installed but not configured (e.g. the
+        // Flex recipe was skipped/auto-generated). Stay inert rather than throw: the
+        // constructor must never break the host's container build (resilience rule #1).
+        // sendError() short-circuits on the resulting empty endpoint. A NON-empty but
+        // malformed DSN is still rejected below — that is an active misconfiguration.
+        if ('' === $dsn) {
+            return '';
         }
 
         try {

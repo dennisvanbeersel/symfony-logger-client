@@ -24,15 +24,18 @@ class Configuration implements ConfigurationInterface
         $rootNode
             ->children()
                 // Core configuration
+                // Empty (not required) by design: a clean `composer require` whose
+                // Flex recipe was skipped/auto-generated leaves the bundle enabled
+                // with NO config. Requiring these here would fail `cache:clear` and
+                // break the host application (resilience rule #1). An empty DSN keeps
+                // the bundle inert at runtime (ApiClient no-ops; see parseDsnEndpoint).
                 ->scalarNode('dsn')
-                    ->isRequired()
-                    ->cannotBeEmpty()
-                    ->info('Data Source Name - Project endpoint URL (format: https://host/project-id)')
+                    ->defaultValue('')
+                    ->info('Data Source Name - Project endpoint URL (format: https://host/project-id). Empty = bundle stays inert.')
                 ->end()
                 ->scalarNode('api_key')
-                    ->isRequired()
-                    ->cannotBeEmpty()
-                    ->info('API Key for authentication (sent as X-Api-Key header)')
+                    ->defaultValue('')
+                    ->info('API Key for authentication (sent as X-Api-Key header). Empty = bundle stays inert.')
                 ->end()
                 ->booleanNode('enabled')
                     ->defaultTrue()
