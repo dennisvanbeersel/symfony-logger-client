@@ -196,4 +196,110 @@ describe('BreadcrumbCollector.install() (real jsdom)', () => {
         expect(httpCrumb.data.status_code).toBe(404);
         expect(httpCrumb.level).toBe('warning');
     });
+
+    // RML-01: a second collector (SPA re-init / Turbo full reinit) must NOT
+    // stack a second fetch/console wrapper. Without the global sentinel each
+    // re-wrap captures the previous wrapper as "original" and pins the old
+    // instance in memory unbounded.
+    describe('global wrapper idempotency + unwrap (RML-01)', () => {
+        test('a second collector does not re-wrap fetch or console', () => {
+            window.fetch = async () => ({ ok: true, status: 200 });
+
+            const first = new BreadcrumbCollector(50);
+            first.install();
+
+            const wrappedFetch = window.fetch;
+            const wrappedConsoleError = console.error;
+            expect(wrappedFetch._appLoggerFetchWrapped).toBe(true);
+            expect(console.error._appLoggerConsoleWrapped).toBe(true);
+
+            // Re-instantiate + install (simulating an SDK re-init).
+            const second = new BreadcrumbCollector(50);
+            second.install();
+
+            // Same wrapper references — no second layer stacked.
+            expect(window.fetch).toBe(wrappedFetch);
+            expect(console.error).toBe(wrappedConsoleError);
+        });
+
+        test('uninstall restores the original fetch, console and history methods', () => {
+            const pristineFetch = async () => ({ ok: true, status: 200 });
+            window.fetch = pristineFetch;
+            const pristineConsoleError = console.error;
+            const pristinePushState = history.pushState;
+
+            const breadcrumbs = new BreadcrumbCollector(50);
+            breadcrumbs.install();
+
+            // Confirm they were wrapped.
+            expect(window.fetch).not.toBe(pristineFetch);
+            expect(console.error).not.toBe(pristineConsoleError);
+            expect(history.pushState).not.toBe(pristinePushState);
+
+            breadcrumbs.uninstall();
+
+            // Restored to the pristine originals; sentinels gone.
+            expect(window.fetch).toBe(pristineFetch);
+            expect(console.error).toBe(pristineConsoleError);
+            expect(history.pushState).toBe(pristinePushState);
+            expect(window.fetch._appLoggerFetchWrapped).toBeUndefined();
+            expect(console.error._appLoggerConsoleWrapped).toBeUndefined();
+            expect(breadcrumbs.installed).toBe(false);
+
+            // After uninstall a fresh install() re-arms cleanly.
+            breadcrumbs.install();
+            expect(window.fetch._appLoggerFetchWrapped).toBe(true);
+            expect(console.error._appLoggerConsoleWrapped).toBe(true);
+        });
+
+        test('uninstall is idempotent and never throws', () => {
+            const breadcrumbs = new BreadcrumbCollector(50);
+            breadcrumbs.install();
+            expect(() => {
+                breadcrumbs.uninstall();
+                breadcrumbs.uninstall();
+            }).not.toThrow();
+        });
+    });
+
+    // JS-3: uninstall() restored the monkeypatches but never removed the
+    // capture-phase document 'click' listener. So uninstall()->install() stacked
+    // a duplicate handler and a click recorded TWO breadcrumbs (and pinned the
+    // stale instance). These tests prove the click listener is now removed.
+    describe('uninstall removes the capture-phase click listener (JS-3)', () => {
+        test('a click after uninstall records no breadcrumb', () => {
+            const breadcrumbs = new BreadcrumbCollector(50);
+            breadcrumbs.install();
+            breadcrumbs.uninstall();
+
+            const button = document.createElement('button');
+            button.id = 'after-uninstall';
+            document.body.appendChild(button);
+
+            button.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+            expect(breadcrumbs.get().find(c => c.category === 'click')).toBeUndefined();
+
+            document.body.removeChild(button);
+        });
+
+        test('install -> uninstall -> install records exactly ONE click breadcrumb', () => {
+            const breadcrumbs = new BreadcrumbCollector(50);
+            breadcrumbs.install();
+            breadcrumbs.uninstall();
+            breadcrumbs.install();
+
+            const button = document.createElement('button');
+            button.id = 're-armed';
+            document.body.appendChild(button);
+
+            button.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+            const clicks = breadcrumbs.get().filter(c => c.category === 'click');
+            expect(clicks).toHaveLength(1);
+            expect(clicks[0].message).toContain('#re-armed');
+
+            document.body.removeChild(button);
+        });
+    });
 });

@@ -5,6 +5,7 @@
  * page transition detection, and localStorage persistence.
  */
 
+import { jest } from '@jest/globals';
 import { SessionManager } from '../src/session-manager.js';
 
 // Mock localStorage
@@ -282,6 +283,10 @@ describe('SessionManager', () => {
             const originalPushState = window.history.pushState;
             const originalReplaceState = window.history.replaceState;
 
+            // The constructor already ran setup on this instance, so the
+            // per-instance idempotency guard (RML-03) would skip a second call.
+            // Reset it to observe a fresh hook from the unwrapped baseline.
+            manager.pageTransitionTrackingInstalled = false;
             manager.setupPageTransitionTracking();
 
             expect(window.history.pushState).not.toBe(originalPushState);
@@ -298,6 +303,101 @@ describe('SessionManager', () => {
             manager.handleNavigationChange();
 
             expect(manager.metadata.pageCount).toBe(initialCount + 1);
+        });
+
+        // RML-03: popstate/hashchange + history wrappers must be removable so
+        // re-init cycles don't accumulate listeners.
+        test('setupPageTransitionTracking is idempotent per instance', () => {
+            const addSpy = jest.spyOn(window, 'addEventListener');
+            const before = addSpy.mock.calls.length;
+
+            // Constructor already installed; a second call must be a no-op.
+            manager.setupPageTransitionTracking();
+
+            expect(addSpy.mock.calls.length).toBe(before);
+            addSpy.mockRestore();
+        });
+
+        test('teardown removes popstate/hashchange and restores history methods', () => {
+            const removed = [];
+            const removeSpy = jest.spyOn(window, 'removeEventListener')
+                .mockImplementation((type) => removed.push(type));
+
+            // Establish a pristine (unwrapped) baseline so the live wrapper is
+            // owned by THIS manager (the per-module sentinel otherwise leaves an
+            // earlier test's manager owning the wrapper, and teardown now only
+            // restores wrappers it owns — JS-4).
+            if (history.pushState._appLoggerOriginal) {
+                history.pushState = history.pushState._appLoggerOriginal;
+            }
+            if (history.replaceState._appLoggerOriginal) {
+                history.replaceState = history.replaceState._appLoggerOriginal;
+            }
+            manager.pageTransitionTrackingInstalled = false;
+            manager.setupPageTransitionTracking();
+
+            // This manager now owns the wrapper.
+            expect(history.pushState._appLoggerSessionWrapped).toBe(true);
+            expect(history.pushState._appLoggerSessionOwner).toBe(manager);
+            const originalPushState = history.pushState._appLoggerOriginal;
+            const originalReplaceState = history.replaceState._appLoggerOriginal;
+
+            manager.teardown();
+
+            expect(removed).toContain('popstate');
+            expect(removed).toContain('hashchange');
+            expect(history.pushState).toBe(originalPushState);
+            expect(history.replaceState).toBe(originalReplaceState);
+            expect(manager.pageTransitionTrackingInstalled).toBe(false);
+
+            removeSpy.mockRestore();
+        });
+
+        test('teardown never throws and is idempotent', () => {
+            expect(() => {
+                manager.teardown();
+                manager.teardown();
+            }).not.toThrow();
+        });
+
+        // JS-4: the live history wrapper is owned by the FIRST instance to wrap
+        // (the per-module sentinel makes later instances reuse it rather than
+        // stack). Tearing down a NON-owning instance must NOT restore the
+        // wrapper out from under the still-active owner. Only the owner may
+        // restore it.
+        describe('multi-instance teardown ownership (JS-4)', () => {
+            test('a non-owning instance teardown does NOT clobber the owner\'s live wrapper', () => {
+                // Start from a pristine (unwrapped) baseline.
+                if (history.pushState._appLoggerOriginal) {
+                    history.pushState = history.pushState._appLoggerOriginal;
+                }
+                if (history.replaceState._appLoggerOriginal) {
+                    history.replaceState = history.replaceState._appLoggerOriginal;
+                }
+                const pristinePushState = history.pushState;
+
+                // Instance A wraps history first and OWNS the wrapper.
+                const a = new SessionManager({ debug: false });
+                const wrapperA = history.pushState;
+                expect(wrapperA._appLoggerSessionWrapped).toBe(true);
+                expect(wrapperA._appLoggerSessionOwner).toBe(a);
+
+                // Instance B reuses A's wrapper (sentinel guard prevents stacking)
+                // and does NOT own it.
+                const b = new SessionManager({ debug: false });
+                expect(history.pushState).toBe(wrapperA);
+                expect(history.pushState._appLoggerSessionOwner).toBe(a);
+
+                // Tearing down B (non-owner) must leave A's wrapper in place —
+                // the old code would have restored it and broken A.
+                b.teardown();
+                expect(history.pushState).toBe(wrapperA);
+                expect(history.pushState._appLoggerSessionOwner).toBe(a);
+
+                // The owner (A) can still restore its own wrapper.
+                a.teardown();
+                expect(history.pushState).toBe(pristinePushState);
+            });
         });
     });
 

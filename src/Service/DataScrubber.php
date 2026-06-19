@@ -17,7 +17,8 @@ namespace ApplicationLogger\Bundle\Service;
  * innocuously named key (e.g. ['note' => 'my password is hunter2']) is NOT redacted.
  * The ONLY value-level redaction performed here is in {@see scrubUrl()} /
  * {@see scrubQueryString()}, which redact query-string PAIRS whose NAME matches a
- * scrub fragment (the URL/query path/scheme/host are left intact). Forced cookie-
+ * scrub fragment (the URL query path/scheme/host are left intact) PLUS any embedded
+ * userinfo credentials ("user:pass@host") in a URL's authority. Forced cookie-
  * header redaction lives in ContextCollector, not here. Do not rely on this class
  * to catch sensitive data hidden in free-form text or under arbitrary keys.
  *
@@ -145,11 +146,15 @@ final class DataScrubber
     }
 
     /**
-     * Redact sensitive VALUES from the query string of a URL.
+     * Redact sensitive VALUES from the query string of a URL, and ALWAYS redact
+     * any embedded userinfo (credentials) in the authority component.
      *
-     * Only the query component is inspected: scheme, host, port, path and fragment
-     * are left intact. The query is run through {@see scrubQueryString()}. URLs
-     * with no query are returned unchanged.
+     * The query component is inspected and run through {@see scrubQueryString()}.
+     * In addition, a "user:password@host" (or "user@host") authority — legal in
+     * fetch targets and occasionally seen in Referer/redirect chains — has its
+     * userinfo segment replaced with "[REDACTED]@" so credentials never leave the
+     * host application. Scheme, host, port, path and fragment are otherwise intact.
+     * URLs with neither a query nor userinfo are returned unchanged.
      *
      * Returns the input unchanged for null; "" for empty. Never throws.
      */
@@ -163,6 +168,10 @@ final class DataScrubber
         }
 
         try {
+            // Redact embedded credentials (userinfo) FIRST so the rest of the
+            // method operates on (and returns) a credential-free URL.
+            $url = $this->scrubUrlUserinfo($url);
+
             $query = parse_url($url, \PHP_URL_QUERY);
             if (!\is_string($query) || '' === $query) {
                 return $url;
@@ -188,6 +197,48 @@ final class DataScrubber
             // Fail safe: do not echo back a URL that may carry a sensitive value.
             return '[REDACTED]';
         }
+    }
+
+    /**
+     * Replace any "//user:pass@host" / "//user@host" userinfo in a URL's authority
+     * with "//[REDACTED]@host". The authority is the segment that follows either a
+     * "scheme://" prefix OR a leading protocol-relative "//" (e.g.
+     * "//user:pass@host/path"), so an "@" appearing later in the path/query/fragment
+     * is left untouched. Returns the URL unchanged when no userinfo is present.
+     */
+    private function scrubUrlUserinfo(string $url): string
+    {
+        // Locate the start of the authority. A scheme-qualified URL marks it with
+        // "://"; a protocol-relative URL (no scheme) starts the authority right
+        // after a leading "//". Without the protocol-relative branch, a
+        // "//user:pass@host" target would bypass redaction and leak credentials.
+        $schemePos = strpos($url, '://');
+        if (false !== $schemePos) {
+            $authorityStart = $schemePos + \strlen('://');
+        } elseif (str_starts_with($url, '//')) {
+            $authorityStart = \strlen('//');
+        } else {
+            return $url;
+        }
+
+        // The authority ends at the first '/', '?' or '#' after "scheme://".
+        $authorityEnd = \strlen($url);
+        foreach (['/', '?', '#'] as $delimiter) {
+            $pos = strpos($url, $delimiter, $authorityStart);
+            if (false !== $pos && $pos < $authorityEnd) {
+                $authorityEnd = $pos;
+            }
+        }
+
+        $authority = substr($url, $authorityStart, $authorityEnd - $authorityStart);
+        $atPos = strrpos($authority, '@');
+        if (false === $atPos) {
+            return $url;
+        }
+
+        $hostPart = substr($authority, $atPos + 1);
+
+        return substr($url, 0, $authorityStart).'[REDACTED]@'.$hostPart.substr($url, $authorityEnd);
     }
 
     /**

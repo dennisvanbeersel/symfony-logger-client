@@ -444,6 +444,15 @@ class ApplicationLogger {
                     // Re-initialize if not already initialized
                     if (!this.heatmap) {
                         this.initializeSessionReplay();
+
+                        // Re-point the client at the freshly created replay
+                        // components so captureException's replay path works after
+                        // a disable()/enable() cycle (RML-04).
+                        if (this.client) {
+                            this.client.errorDetector = this.errorDetector;
+                            this.client.sessionManager = this.sessionManager;
+                        }
+
                         if (this.initialized && this.heatmap) {
                             this.installReplayLifecycle();
                         }
@@ -472,7 +481,19 @@ class ApplicationLogger {
                     if (this.errorDetector) {
                         this.errorDetector.uninstall();
                     }
+                    if (this.sessionManager && typeof this.sessionManager.teardown === 'function') {
+                        this.sessionManager.teardown();
+                    }
                     this.saveBufferToStorage();
+
+                    // Null the components so a later enable() takes the `!this.heatmap`
+                    // re-init path and re-arms the lifecycle (interval + listeners +
+                    // click capture). Leaving them set made enable() a silent no-op
+                    // because heatmap.cleanup()/teardown already disarmed them (RML-04).
+                    this.heatmap = null;
+                    this.errorDetector = null;
+                    this.replayBuffer = null;
+                    this.sessionManager = null;
 
                     if (this.config.debug) {
                         console.warn('ApplicationLogger: Session replay disabled');

@@ -10,7 +10,42 @@ import { hashString } from './util/hash.js';
  * VALUES are scrubbed even though the key name itself is not sensitive.
  * @type {Set<string>}
  */
-const URL_VALUE_KEYS = new Set(['url', 'request_uri', 'requesturi', 'referrer', 'referer']);
+const URL_VALUE_KEYS = new Set(['url', 'request_uri', 'requesturi', 'referrer', 'referer', 'originalurl']);
+
+/**
+ * Heuristic: does a string look like a URL/URI carrying a query string?
+ *
+ * The scrubber is allowlist-by-key (URL_VALUE_KEYS), so every NEW URL-bearing
+ * field leaks its query secrets until someone remembers to add the key. This
+ * is the recurring root cause behind SEC-JS-01/02. To cover future fields by
+ * default, any string value whose shape is "<scheme>://...?..." or a rooted
+ * path "/...?..." (i.e. it has a query component) is value-scrubbed regardless
+ * of its key. scrubUrlQueryValues only redacts query pairs whose NAME is
+ * sensitive, so plain query strings (?page=2) pass through unchanged — making
+ * this safe to apply broadly.
+ *
+ * @param {string} value
+ * @returns {boolean}
+ */
+function looksLikeUrlWithQuery(value) {
+    if (typeof value !== 'string' || value.length === 0) {
+        return false;
+    }
+    const qIndex = value.indexOf('?');
+    if (qIndex < 0 || qIndex === value.length - 1) {
+        return false; // No query component (or nothing after the '?').
+    }
+    // Query-only reference (a stored location.search like "?token=abc"): qIndex
+    // is 0 and there is no scheme/path before it. Still route it to the
+    // query-value scrubber so a field holding location.search cannot leak a
+    // secret (the scrubber only redacts sensitive NAMES, so "?page=2" passes
+    // through unchanged). Leading "?" is the unambiguous signal.
+    if (qIndex === 0) {
+        return true;
+    }
+    // Absolute URL (scheme://) or rooted/relative path before the query.
+    return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith('/') || value.startsWith('./') || value.startsWith('../');
+}
 
 /**
  * Transport layer for sending errors to the platform
@@ -464,6 +499,9 @@ export class Transport {
         // can never drop the baseline protections.
         const scrubFields = this.config.scrubFields || [];
         const scrubPatterns = [...new Set([...scrubFields, ...DEFAULT_SCRUB_FIELDS])];
+        // Lowercase the pattern list ONCE up front instead of re-lowercasing every
+        // pattern for every key of every object during the recursion (JSPERF-05).
+        const loweredPatterns = scrubPatterns.map(pattern => pattern.toLowerCase());
 
         // Work on a circular-ref-safe deep copy; JSON round-trip is the fast
         // path, removeCircularReferences the fallback. Both produce a fresh
@@ -493,18 +531,27 @@ export class Transport {
                 }
 
                 const value = obj[key];
-                const shouldScrub = scrubPatterns.some(pattern =>
-                    key.toLowerCase().includes(pattern.toLowerCase()),
+                // Lowercase each key once (not once per pattern) before matching.
+                const loweredKey = key.toLowerCase();
+                const shouldScrub = loweredPatterns.some(pattern =>
+                    loweredKey.includes(pattern),
                 );
 
                 if (shouldScrub) {
                     result[key] = '[REDACTED]';
-                } else if (typeof value === 'string' && URL_VALUE_KEYS.has(key.toLowerCase())) {
+                } else if (typeof value === 'string'
+                    && (URL_VALUE_KEYS.has(loweredKey) || looksLikeUrlWithQuery(value))) {
                     // The JS SDK captures window.location.href into `url`, so a
                     // raw query like ?token=abc would otherwise ship verbatim
                     // (key-name scrubbing alone never inspects the value). Scrub
                     // sensitive query VALUES while leaving the path/host intact.
                     // Mirrors PHP DataScrubber::scrubUrl() for cross-side parity.
+                    //
+                    // ROOT CAUSE FIX: beyond the known URL_VALUE_KEYS allowlist,
+                    // ANY string value that looks like a URL with a query string is
+                    // value-scrubbed too — so future URL-bearing fields (consoleMessage,
+                    // originalUrl, …) are covered by default instead of leaking until
+                    // their key is manually added (SEC-JS-01/02 class).
                     result[key] = this.scrubUrlValue(value, scrubPatterns);
                 } else if (value && typeof value === 'object') {
                     result[key] = scrubObject(value);

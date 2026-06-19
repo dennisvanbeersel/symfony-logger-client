@@ -281,9 +281,21 @@ class ApiClient
 
     private function buildUrl(string $base, string $path): string
     {
-        $host = parse_url($base, \PHP_URL_HOST);
-        $scheme = parse_url($base, \PHP_URL_SCHEME);
-        $port = parse_url($base, \PHP_URL_PORT);
+        // Parse once and read the components from the assoc array, rather than
+        // calling parse_url() three times on the same string (IDIOM-01). Output
+        // is byte-identical to the previous component-specific calls.
+        //
+        // parse_url() returns false on a severely malformed URL; array access on a
+        // bool is a PHP 8.1+ deprecation. $base can be config-sourced (a misconfigured
+        // log_endpoint), so guard against false and fall back to returning the base
+        // with the path appended verbatim rather than emitting "://".
+        $parts = parse_url($base);
+        if (false === $parts) {
+            return $base.$path;
+        }
+        $host = $parts['host'] ?? null;
+        $scheme = $parts['scheme'] ?? null;
+        $port = $parts['port'] ?? null;
 
         $hostWithPort = $host;
         if (null !== $port) {

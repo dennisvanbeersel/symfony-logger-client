@@ -1,5 +1,18 @@
 import { ThrottledDOMSerializer } from './dom-serializer.js';
 
+// Sensitive-data heuristics, hoisted to module scope so the RegExp objects are
+// created once at load instead of reallocated on every selector segment
+// (JSPERF-08). Matching behavior is identical to the previous per-call array.
+const SENSITIVE_PATTERNS = [
+    /user[-_]?id/i,
+    /email/i,
+    /token/i,
+    /session/i,
+    /auth/i,
+    /key/i,
+    /\d{10,}/,  // Long numbers (could be IDs)
+];
+
 /**
  * Click Tracker - Captures user clicks and interactions for Session Replay
  *
@@ -269,17 +282,7 @@ export class ClickTracker {
      * Check if string contains potentially sensitive data
      */
     containsSensitiveData(str) {
-        const sensitivePatterns = [
-            /user[-_]?id/i,
-            /email/i,
-            /token/i,
-            /session/i,
-            /auth/i,
-            /key/i,
-            /\d{10,}/,  // Long numbers (could be IDs)
-        ];
-
-        return sensitivePatterns.some(pattern => pattern.test(str));
+        return SENSITIVE_PATTERNS.some(pattern => pattern.test(str));
     }
 
 

@@ -377,4 +377,52 @@ final class CircuitBreakerTest extends TestCase
         $b = new CircuitBreaker(true, 2, 60, 1, $cache);
         $this->assertTrue($b->isOpen(), 'breakers sharing a cache key must share state');
     }
+
+    /**
+     * conc-03 guard: isHalfOpen() must refresh-then-read like isOpen(), so a worker
+     * holding a stale in-memory snapshot does not report a HALF_OPEN that a sibling
+     * has since transitioned away from (here: a sibling persisted CLOSED).
+     *
+     * We boot a worker on a HALF_OPEN snapshot, age its in-memory snapshot past the
+     * staleness TTL, then have a sibling persist CLOSED. After the TTL, isHalfOpen()
+     * must observe CLOSED (false) rather than its stale HALF_OPEN view.
+     */
+    public function testIsHalfOpenRefreshesStaleWorkerToSiblingPersistedClosed(): void
+    {
+        $cache = new ArrayAdapter();
+
+        // Seed the shared cache as HALF_OPEN and boot worker B on that snapshot.
+        $item = $cache->getItem('application_logger.circuit_breaker');
+        $item->set([
+            'state' => 'half_open',
+            'failureCount' => 0,
+            'openedAt' => time(),
+            'halfOpenAttempts' => 0,
+        ]);
+        $cache->save($item);
+
+        $workerB = new CircuitBreaker(true, 5, 60, 2, $cache);
+        $this->assertTrue($workerB->isHalfOpen(), 'worker boots on the HALF_OPEN snapshot');
+
+        // Age worker B's in-memory snapshot beyond the staleness TTL (5s) so the next
+        // public read triggers refreshIfStale().
+        $loadedAt = new \ReflectionProperty(CircuitBreaker::class, 'loadedAt');
+        $loadedAt->setValue($workerB, time() - 10);
+
+        // A sibling persists CLOSED into the shared cache.
+        $closed = $cache->getItem('application_logger.circuit_breaker');
+        $closed->set([
+            'state' => 'closed',
+            'failureCount' => 0,
+            'openedAt' => null,
+            'halfOpenAttempts' => 0,
+        ]);
+        $cache->save($closed);
+
+        // Without the refresh-then-read fix, this would still report true (stale).
+        $this->assertFalse(
+            $workerB->isHalfOpen(),
+            'stale worker must refresh and observe the sibling-persisted CLOSED'
+        );
+    }
 }

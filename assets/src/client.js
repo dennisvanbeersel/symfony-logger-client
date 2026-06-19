@@ -3,6 +3,7 @@ import { parseStackTrace, parseStackLine } from './stack-parser.js';
 import { SessionManager } from './session-manager.js';
 import { hashHex64 } from './util/hash.js';
 import { countUserInteractions } from './util/interaction.js';
+import { scrubUrlQueryValues } from './scrub-fields.js';
 
 const NUCLEAR_KEY = '_appLogger_nuclear';
 const RESURRECTION_ATTEMPTS_KEY = '_appLogger_resurrection_attempts';
@@ -40,6 +41,7 @@ export class Client {
         this.extra = {};
         this.pendingBeaconErrors = [];
         this.cachedSessionHash = null; // Pre-computed SHA-256 hash (async init)
+        this.installed = false; // Guard against double-registration (RML-02).
 
         this.payloadBuilder = new PayloadBuilder(
             config,
@@ -48,11 +50,39 @@ export class Client {
             () => this.getSessionHash(),
         );
 
-        // Bound unload/visibility handlers, stored so they can be removed.
+        // Bound handlers, stored so EVERY listener registered in install() can be
+        // removed again in teardown() (RML-02). Anonymous handlers would be
+        // unremovable and leak on each re-init cycle.
         this.boundFlushBeacon = () => this.flushBeaconErrors();
         this.boundVisibilityFlush = () => {
             if (document.visibilityState === 'hidden') {
                 this.flushBeaconErrors();
+            }
+        };
+        this.boundErrorHandler = (event) => {
+            try {
+                this.captureException(event.error || new Error(event.message), {
+                    extra: {
+                        filename: event.filename,
+                        lineno: event.lineno,
+                        colno: event.colno,
+                    },
+                });
+            } catch (error) {
+                if (this.shouldLog()) {
+                    console.error('ApplicationLogger: Failed to capture error', error);
+                }
+            }
+        };
+        this.boundRejectionHandler = (event) => {
+            try {
+                this.captureException(event.reason, {
+                    extra: { type: 'unhandledrejection' },
+                });
+            } catch (error) {
+                if (this.shouldLog()) {
+                    console.error('ApplicationLogger: Failed to capture rejection', error);
+                }
             }
         };
     }
@@ -72,6 +102,12 @@ export class Client {
      * buffer, then install live handlers for future errors.
      */
     install() {
+        // Guard against double-registration: a re-init without teardown would
+        // otherwise stack a second set of error/rejection/unload listeners (RML-02).
+        if (this.installed) {
+            return;
+        }
+
         try {
             // Session hash is computed asynchronously; early errors may ship null.
             this.initSessionHash().catch(() => {
@@ -81,49 +117,43 @@ export class Client {
             this.processResurrectedErrors();
             this.processBufferedErrors();
 
-            window.addEventListener('error', (event) => {
-                try {
-                    this.captureException(event.error || new Error(event.message), {
-                        extra: {
-                            filename: event.filename,
-                            lineno: event.lineno,
-                            colno: event.colno,
-                        },
-                    });
-                } catch (error) {
-                    console.error('ApplicationLogger: Failed to capture error', error);
-                }
-            });
-
-            window.addEventListener('unhandledrejection', (event) => {
-                try {
-                    this.captureException(event.reason, {
-                        extra: { type: 'unhandledrejection' },
-                    });
-                } catch (error) {
-                    console.error('ApplicationLogger: Failed to capture rejection', error);
-                }
-            });
+            // All four listeners use bound references so teardown() can remove them.
+            window.addEventListener('error', this.boundErrorHandler);
+            window.addEventListener('unhandledrejection', this.boundRejectionHandler);
 
             // Beacon-flush critical errors as the page goes away (desktop + mobile).
             window.addEventListener('beforeunload', this.boundFlushBeacon);
             document.addEventListener('visibilitychange', this.boundVisibilityFlush);
 
             this.breadcrumbs.install();
+
+            this.installed = true;
         } catch (error) {
-            console.error('ApplicationLogger: Failed to install', error);
+            if (this.shouldLog()) {
+                console.error('ApplicationLogger: Failed to install', error);
+            }
         }
     }
 
     /**
-     * Remove the unload/visibility handlers registered by {@link install}.
+     * Remove ALL global handlers registered by {@link install}: the window
+     * 'error'/'unhandledrejection' pair plus the beforeunload/visibilitychange
+     * flush listeners, and the breadcrumb monkeypatches. Idempotent and never
+     * throws (RML-02).
      */
     teardown() {
         try {
+            window.removeEventListener('error', this.boundErrorHandler);
+            window.removeEventListener('unhandledrejection', this.boundRejectionHandler);
             window.removeEventListener('beforeunload', this.boundFlushBeacon);
             document.removeEventListener('visibilitychange', this.boundVisibilityFlush);
+            if (this.breadcrumbs && typeof this.breadcrumbs.uninstall === 'function') {
+                this.breadcrumbs.uninstall();
+            }
         } catch {
             // Never crash on teardown.
+        } finally {
+            this.installed = false;
         }
     }
 
@@ -201,7 +231,13 @@ export class Client {
                             filename: err.f || 'unknown',
                             lineno: err.l || 0,
                             colno: err.c || 0,
-                            originalUrl: err.u || 'unknown',
+                            // The nuclear trap persists the raw page URL (location.href)
+                            // on every captured error. A catastrophic error on e.g.
+                            // /reset?token=... would otherwise resurrect that secret
+                            // into extra.originalUrl, which transport's URL scrubbing
+                            // did not cover by key name. Scrub at the source so the
+                            // sensitive query VALUE never leaves this method (SEC-JS-02).
+                            originalUrl: err.u ? scrubUrlQueryValues(String(err.u)) : 'unknown',
                             sessionGap: true,
                         },
                     });

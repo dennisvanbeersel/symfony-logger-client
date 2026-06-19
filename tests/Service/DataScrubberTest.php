@@ -88,4 +88,56 @@ final class DataScrubberTest extends TestCase
 
         $this->assertSame('Token=[REDACTED]&API_KEY=[REDACTED]', $result);
     }
+
+    public function testScrubUrlRedactsUserinfoCredentials(): void
+    {
+        $result = $this->scrubber()->scrubUrl('https://admin:s3cret@internal.api/path');
+
+        $this->assertSame('https://[REDACTED]@internal.api/path', $result);
+    }
+
+    public function testScrubUrlRedactsUserinfoWithoutPassword(): void
+    {
+        $result = $this->scrubber()->scrubUrl('https://admin@internal.api/path');
+
+        $this->assertSame('https://[REDACTED]@internal.api/path', $result);
+    }
+
+    public function testScrubUrlRedactsUserinfoAndQueryTogether(): void
+    {
+        $result = $this->scrubber()->scrubUrl('https://user:pass@h:8443/p?token=abc&q=ok#frag');
+
+        $this->assertSame('https://[REDACTED]@h:8443/p?token=[REDACTED]&q=ok#frag', $result);
+    }
+
+    public function testScrubUrlDoesNotTreatAtInPathOrQueryAsUserinfo(): void
+    {
+        // An '@' in the path or query must not be mistaken for an authority delimiter.
+        $url = 'https://example.com/users/a@b.com?to=x@y.com';
+        $this->assertSame($url, $this->scrubber()->scrubUrl($url));
+    }
+
+    public function testScrubUrlRedactsUserinfoWithoutPathOrQuery(): void
+    {
+        $result = $this->scrubber()->scrubUrl('https://admin:s3cret@internal.api');
+
+        $this->assertSame('https://[REDACTED]@internal.api', $result);
+    }
+
+    public function testScrubUrlRedactsUserinfoInProtocolRelativeUrl(): void
+    {
+        // A scheme-less, protocol-relative URL ("//user:pass@host/path") must still
+        // have its embedded credentials redacted. Before the leading-"//" branch was
+        // added, this bypassed authority detection and leaked the password verbatim.
+        $result = $this->scrubber()->scrubUrl('//admin:s3cret@internal.api/path');
+
+        $this->assertSame('//[REDACTED]@internal.api/path', $result);
+    }
+
+    public function testScrubUrlRedactsUserinfoAndQueryInProtocolRelativeUrl(): void
+    {
+        $result = $this->scrubber()->scrubUrl('//user:pass@h:8443/p?token=abc&q=ok#frag');
+
+        $this->assertSame('//[REDACTED]@h:8443/p?token=[REDACTED]&q=ok#frag', $result);
+    }
 }

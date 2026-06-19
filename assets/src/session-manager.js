@@ -66,6 +66,11 @@ export class SessionManager {
             pages: [],
         };
 
+        // Bound navigation handlers, stored so teardown() can removeEventListener
+        // them (anonymous handlers would be unremovable and leak on re-init, RML-03).
+        this.boundNavigationChange = () => this.handleNavigationChange();
+        this.pageTransitionTrackingInstalled = false;
+
         // Initialize
         this.initialize();
 
@@ -266,6 +271,12 @@ export class SessionManager {
      */
     setupPageTransitionTracking() {
         try {
+            // Per-instance idempotency: re-running setup would register a second
+            // popstate/hashchange pair on the same instance (RML-03).
+            if (this.pageTransitionTrackingInstalled) {
+                return;
+            }
+
             // Track history API navigation (pushState, replaceState).
             // Guard against double-wrapping by THIS module on re-init / HMR (JS-2):
             // a per-module sentinel ensures we wrap at most once. A distinct
@@ -282,6 +293,11 @@ export class SessionManager {
                 };
                 wrappedPushState._appLoggerSessionWrapped = true;
                 wrappedPushState._appLoggerOriginal = originalPushState;
+                // Tag the wrapper with THIS instance so teardown only unwraps
+                // its own wrapper (two SDK instances must not unwrap each
+                // other's, JS-4).
+                wrappedPushState._appLoggerSessionOwner = this;
+                this._ownsPushStateWrapper = true;
                 history.pushState = wrappedPushState;
             }
 
@@ -295,21 +311,62 @@ export class SessionManager {
                 };
                 wrappedReplaceState._appLoggerSessionWrapped = true;
                 wrappedReplaceState._appLoggerOriginal = originalReplaceState;
+                wrappedReplaceState._appLoggerSessionOwner = this;
+                this._ownsReplaceStateWrapper = true;
                 history.replaceState = wrappedReplaceState;
             }
 
-            // Track popstate (back/forward buttons)
-            window.addEventListener('popstate', () => {
-                this.handleNavigationChange();
-            });
+            // Track popstate (back/forward buttons) and hash changes via stored
+            // bound refs so teardown() can remove them.
+            window.addEventListener('popstate', this.boundNavigationChange);
+            window.addEventListener('hashchange', this.boundNavigationChange);
 
-            // Track hash changes
-            window.addEventListener('hashchange', () => {
-                this.handleNavigationChange();
-            });
+            this.pageTransitionTrackingInstalled = true;
         } catch (error) {
             console.error('SessionManager: Failed to setup page transition tracking:', error);
         }
+    }
+
+    /**
+     * Remove the popstate/hashchange listeners and restore history.pushState/
+     * replaceState from the stamped _appLoggerOriginal refs. Idempotent and
+     * never throws, so repeated enable/disable cycles do not accumulate
+     * listeners or history wrappers (RML-03).
+     */
+    teardownPageTransitionTracking() {
+        try {
+            window.removeEventListener('popstate', this.boundNavigationChange);
+            window.removeEventListener('hashchange', this.boundNavigationChange);
+
+            // Restore history methods ONLY if the live wrapper belongs to THIS
+            // instance. With two SDK instances the second's wrapper layers over
+            // the first's; tearing down the first must NOT clobber the second's
+            // wrapper (which would break the still-active instance, JS-4).
+            if (history.pushState && history.pushState._appLoggerSessionWrapped
+                && history.pushState._appLoggerOriginal
+                && history.pushState._appLoggerSessionOwner === this) {
+                history.pushState = history.pushState._appLoggerOriginal;
+            }
+            this._ownsPushStateWrapper = false;
+            if (history.replaceState && history.replaceState._appLoggerSessionWrapped
+                && history.replaceState._appLoggerOriginal
+                && history.replaceState._appLoggerSessionOwner === this) {
+                history.replaceState = history.replaceState._appLoggerOriginal;
+            }
+            this._ownsReplaceStateWrapper = false;
+        } catch (error) {
+            console.error('SessionManager: Failed to teardown page transition tracking:', error);
+        } finally {
+            this.pageTransitionTrackingInstalled = false;
+        }
+    }
+
+    /**
+     * Public teardown alias — removes all listeners/wrappers installed by this
+     * SessionManager. Called from sessionReplay.disable()/SDK teardown.
+     */
+    teardown() {
+        this.teardownPageTransitionTracking();
     }
 
     /**

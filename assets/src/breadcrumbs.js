@@ -14,6 +14,44 @@ export class BreadcrumbCollector {
         this.maxBreadcrumbs = maxBreadcrumbs;
         this.installed = false; // Track installation state
         this.errorCaptureCallback = errorCaptureCallback; // Callback to capture errors automatically
+
+        // Bound capture-phase click handler, stored so uninstall() can
+        // removeEventListener it (matching the capture flag). An anonymous
+        // handler would be unremovable, so uninstall()->install() would stack a
+        // second document 'click' listener and pin the stale instance (JS-3).
+        this.boundClickHandler = (event) => this.handleClick(event);
+    }
+
+    /**
+   * Record a click breadcrumb (capture-phase document handler).
+   * @param {Event} event - DOM click event
+   */
+    handleClick(event) {
+        const target = event.target;
+        const tagName = target.tagName.toLowerCase();
+        let message = `Clicked ${tagName}`;
+
+        const className = this.getClassName(target);
+
+        if (target.id) {
+            message += `#${target.id}`;
+        } else if (className) {
+            const firstClass = className.split(' ')[0];
+            if (firstClass) {
+                message += `.${firstClass}`;
+            }
+        }
+
+        this.add({
+            type: 'ui',
+            category: 'click',
+            message,
+            data: {
+                tag: tagName,
+                id: target.id,
+                class: className,
+            },
+        });
     }
 
     /**
@@ -42,34 +80,9 @@ export class BreadcrumbCollector {
 
         this.installed = true;
 
-        // Track clicks
-        document.addEventListener('click', (event) => {
-            const target = event.target;
-            const tagName = target.tagName.toLowerCase();
-            let message = `Clicked ${tagName}`;
-
-            const className = this.getClassName(target);
-
-            if (target.id) {
-                message += `#${target.id}`;
-            } else if (className) {
-                const firstClass = className.split(' ')[0];
-                if (firstClass) {
-                    message += `.${firstClass}`;
-                }
-            }
-
-            this.add({
-                type: 'ui',
-                category: 'click',
-                message,
-                data: {
-                    tag: tagName,
-                    id: target.id,
-                    class: className,
-                },
-            });
-        }, true);
+        // Track clicks (capture phase). Uses the stored bound handler so
+        // uninstall() can remove it with the matching capture flag (JS-3).
+        document.addEventListener('click', this.boundClickHandler, true);
 
         // Track navigation. Guard against double-wrapping by THIS module: a
         // re-init / HMR cycle must not stack a second breadcrumb wrapper on top
@@ -174,8 +187,16 @@ export class BreadcrumbCollector {
                 return; // Skip this level if not a function
             }
 
-            // eslint-disable-next-line no-console
-            console[level] = (...args) => {
+            // Idempotency: a re-init / HMR / Turbo full-reinit cycle must not
+            // stack a second wrapper on top of ours. Without a global sentinel
+            // each new BreadcrumbCollector re-wraps console[level], capturing the
+            // PREVIOUS wrapper as "original" and pinning the old instance in
+            // memory forever (RML-01). Bail if already wrapped by this module.
+            if (original._appLoggerConsoleWrapped) {
+                return;
+            }
+
+            const wrapped = (...args) => {
                 // ZERO-CONFIG ERROR CAPTURE (BEFORE console output)
                 // Must happen BEFORE original.apply to avoid recursion issues
                 if (level === 'error' && this.errorCaptureCallback) {
@@ -188,8 +209,14 @@ export class BreadcrumbCollector {
                                 this.errorCaptureCallback(errorObj, {
                                     extra: {
                                         consoleError: true,
+                                        // Redact sensitive URL query VALUES (?token=...) from
+                                        // each non-Error arg before it lands in the error
+                                        // payload's extra.consoleMessage. transport.scrubObject
+                                        // only URL-scrubs known URL keys, and 'consoleMessage'
+                                        // isn't one — so an unscrubbed URL string here would
+                                        // ship verbatim (SEC-JS-01). Mirrors the breadcrumb fix.
                                         consoleMessage: args.filter(arg => !(arg instanceof Error))
-                                            .map(arg => String(arg))
+                                            .map(arg => scrubUrlQueryValues(String(arg)))
                                             .join(' '),
                                     },
                                 });
@@ -266,6 +293,13 @@ export class BreadcrumbCollector {
 
                 return result;
             };
+
+            // Stamp the wrapper with a global sentinel + the original ref so a
+            // future install() bails (idempotency) and teardown() can unwrap.
+            wrapped._appLoggerConsoleWrapped = true;
+            wrapped._appLoggerOriginal = original;
+            // eslint-disable-next-line no-console
+            console[level] = wrapped;
         });
     }
 
@@ -275,7 +309,14 @@ export class BreadcrumbCollector {
     wrapFetch() {
         const originalFetch = window.fetch;
 
-        window.fetch = async (...args) => {
+        // Idempotency: like console, an un-guarded re-wrap stacks wrappers and
+        // pins old SDK instances in memory (RML-01). A global sentinel ensures
+        // we wrap window.fetch at most once across re-init cycles.
+        if (typeof originalFetch !== 'function' || originalFetch._appLoggerFetchWrapped) {
+            return;
+        }
+
+        const wrappedFetch = async (...args) => {
             const rawUrl = typeof args[0] === 'string' ? args[0] : args[0].url;
             const method = args[1]?.method || 'GET';
             const startTime = Date.now();
@@ -323,5 +364,56 @@ export class BreadcrumbCollector {
                 throw error;
             }
         };
+
+        // Stamp the wrapper so a future install() bails and teardown() can unwrap.
+        wrappedFetch._appLoggerFetchWrapped = true;
+        wrappedFetch._appLoggerOriginal = originalFetch;
+        window.fetch = wrappedFetch;
+    }
+
+    /**
+   * Remove the breadcrumb monkeypatches and listeners installed by {@link install}.
+   *
+   * Restores window.fetch, each console method, and history.pushState/replaceState
+   * from the stamped _appLoggerOriginal refs, and clears the per-instance flag so
+   * a later install() re-arms cleanly. Idempotent and never throws (RML-01).
+   */
+    uninstall() {
+        try {
+            // Remove the capture-phase click listener (matching the capture
+            // flag used in install()). Without this, uninstall()->install()
+            // would stack a duplicate handler and retain the stale instance (JS-3).
+            document.removeEventListener('click', this.boundClickHandler, true);
+
+            // Restore console methods if WE wrapped them.
+            const levels = ['log', 'info', 'warn', 'error', 'debug'];
+            levels.forEach(level => {
+                // eslint-disable-next-line no-console
+                const current = console[level];
+                if (current && current._appLoggerConsoleWrapped && current._appLoggerOriginal) {
+                    // eslint-disable-next-line no-console
+                    console[level] = current._appLoggerOriginal;
+                }
+            });
+
+            // Restore fetch if WE wrapped it.
+            if (window.fetch && window.fetch._appLoggerFetchWrapped && window.fetch._appLoggerOriginal) {
+                window.fetch = window.fetch._appLoggerOriginal;
+            }
+
+            // Restore history methods if WE wrapped them.
+            if (history.pushState && history.pushState._appLoggerBreadcrumbWrapped
+                && history.pushState._appLoggerOriginal) {
+                history.pushState = history.pushState._appLoggerOriginal;
+            }
+            if (history.replaceState && history.replaceState._appLoggerBreadcrumbWrapped
+                && history.replaceState._appLoggerOriginal) {
+                history.replaceState = history.replaceState._appLoggerOriginal;
+            }
+        } catch {
+            // Never crash on teardown.
+        } finally {
+            this.installed = false;
+        }
     }
 }

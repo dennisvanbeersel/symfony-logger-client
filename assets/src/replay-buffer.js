@@ -35,6 +35,14 @@ export class ReplayBuffer {
 
         // Buffer state
         this.buffer = []; // Circular buffer of events
+        // Running approximate byte size of the buffer, maintained incrementally so
+        // addEvent() never has to JSON.stringify() the WHOLE buffer on every click
+        // (JSPERF-01). Per-event sizes are memoized in a WeakMap keyed by the event
+        // object, so heavy domSnapshots are serialized at most once each (not
+        // re-serialized for every subsequent click). estimateBufferSize() remains
+        // available for explicit debug/getStats callers.
+        this.approxBytes = 0;
+        this.eventSizes = new WeakMap();
         this.isRecordingAfterError = false;
         this.recordingStartedAt = null;
         this.errorOccurredAt = null;
@@ -75,8 +83,9 @@ export class ReplayBuffer {
             event.phase = this.isRecordingAfterError ? 'after_error' : 'before_error';
             event.capturedAt = Date.now();
 
-            // Add to buffer
+            // Add to buffer (and account for its approximate byte size once)
             this.buffer.push(event);
+            this.approxBytes += this.measureEvent(event);
             this.stats.totalEvents++;
 
             // If recording after error, track count
@@ -123,14 +132,16 @@ export class ReplayBuffer {
 
             // Add error marker event to buffer (manually, before setting isRecordingAfterError)
             // This ensures the error marker itself is not counted in postErrorEventCount
-            this.buffer.push({
+            const errorEvent = {
                 type: 'error',
                 phase: 'error',
                 timestamp: this.errorOccurredAt,
                 capturedAt: Date.now(),
                 url: window.location.href,
                 errorContext,
-            });
+            };
+            this.buffer.push(errorEvent);
+            this.approxBytes += this.measureEvent(errorEvent);
             this.stats.totalEvents++;
 
             // Now mark as recording after error (subsequent events will be counted)
@@ -213,23 +224,46 @@ export class ReplayBuffer {
         try {
             const now = Date.now();
             const cutoffTime = now - (this.config.bufferBeforeErrorSeconds * 1000);
+            const maxClicks = this.config.bufferBeforeErrorClicks;
 
-            // Filter events: keep events within time window
-            const timeFiltered = this.buffer.filter(event =>
-                event.capturedAt >= cutoffTime || event.phase === 'error',
-            );
+            // Single pass: apply the time/error-phase window and count the surviving
+            // clicks so we can trim to the last N. Events are appended in
+            // capturedAt order, so the kept list is already chronological - no
+            // re-sort and no extra filter passes are needed (JSPERF-02). The output
+            // is identical to the previous 3-filter + sort implementation.
+            const timeFiltered = [];
+            let clickCount = 0;
+            for (const event of this.buffer) {
+                if (event.capturedAt >= cutoffTime || event.phase === 'error') {
+                    timeFiltered.push(event);
+                    if (event.type === 'click') {
+                        clickCount++;
+                    }
+                }
+            }
 
-            // Also enforce click limit: keep last N clicks
-            const clickEvents = timeFiltered.filter(e => e.type === 'click');
-            const otherEvents = timeFiltered.filter(e => e.type !== 'click');
+            // Enforce the click limit: drop the oldest clicks beyond the last N,
+            // keeping all non-click events (page transitions, errors) in place.
+            let pruned;
+            if (clickCount > maxClicks) {
+                let clicksToDrop = clickCount - maxClicks;
+                pruned = [];
+                for (const event of timeFiltered) {
+                    if (event.type === 'click' && clicksToDrop > 0) {
+                        clicksToDrop--;
+                        continue;
+                    }
+                    pruned.push(event);
+                }
+            } else {
+                pruned = timeFiltered;
+            }
 
-            // Keep last N clicks + all other events (page transitions, errors)
-            const recentClicks = clickEvents.slice(-this.config.bufferBeforeErrorClicks);
+            this.buffer = pruned;
+            this.recomputeApproxBytes();
 
-            this.buffer = [...otherEvents, ...recentClicks]
-                .sort((a, b) => a.capturedAt - b.capturedAt);
-
-            // Update stats if buffer was pruned
+            // Update stats if buffer was pruned (relative to the time-filtered set,
+            // matching the original accounting).
             if (this.buffer.length < timeFiltered.length) {
                 const dropped = timeFiltered.length - this.buffer.length;
                 this.stats.eventsDropped += dropped;
@@ -264,6 +298,8 @@ export class ReplayBuffer {
     clear() {
         try {
             this.buffer = [];
+            this.approxBytes = 0;
+            this.eventSizes = new WeakMap();
             this.isRecordingAfterError = false;
             this.recordingStartedAt = null;
             this.errorOccurredAt = null;
@@ -305,8 +341,9 @@ export class ReplayBuffer {
      */
     updateStats() {
         try {
-            // Calculate approximate buffer size
-            const approximateSize = this.estimateBufferSize();
+            // Use the incrementally-maintained running estimate instead of
+            // re-stringifying the whole buffer on every event (JSPERF-01).
+            const approximateSize = this.approxBytes;
             this.stats.currentBufferSize = approximateSize;
 
             // Check if buffer is getting too large
@@ -315,6 +352,7 @@ export class ReplayBuffer {
                 this.stats.bufferFullCount++;
                 // Aggressive pruning
                 this.buffer = this.buffer.slice(-Math.floor(this.buffer.length / 2));
+                this.recomputeApproxBytes();
             }
         } catch (error) {
             console.error('ReplayBuffer: Failed to update stats:', error);
@@ -322,7 +360,52 @@ export class ReplayBuffer {
     }
 
     /**
-     * Estimate buffer size in bytes
+     * Measure and memoize the approximate byte size of a single event.
+     *
+     * The result is cached per event object (WeakMap) so a heavy domSnapshot is
+     * serialized at most once, even though the event survives many prune passes.
+     *
+     * @private
+     * @param {Object} event - Event to measure
+     * @returns {number} Approximate size in bytes
+     */
+    measureEvent(event) {
+        const cached = this.eventSizes.get(event);
+        if (cached !== undefined) {
+            return cached;
+        }
+        let size = 0;
+        try {
+            size = JSON.stringify(event).length;
+        } catch {
+            size = 0;
+        }
+        this.eventSizes.set(event, size);
+        return size;
+    }
+
+    /**
+     * Recompute the running byte estimate from the current buffer.
+     *
+     * Called after operations that rebuild/trim the buffer (prune, aggressive
+     * trim, deserialize). Per-event sizes are served from the WeakMap cache, so
+     * already-measured events are not re-serialized.
+     *
+     * @private
+     */
+    recomputeApproxBytes() {
+        let total = 0;
+        for (const event of this.buffer) {
+            total += this.measureEvent(event);
+        }
+        this.approxBytes = total;
+    }
+
+    /**
+     * Estimate buffer size in bytes (full serialization).
+     *
+     * Retained for explicit debug/diagnostic callers; the hot path uses the
+     * incremental this.approxBytes counter instead.
      *
      * @returns {number} Approximate size in bytes
      */
@@ -385,6 +468,11 @@ export class ReplayBuffer {
                 }
                 return event;
             });
+
+            // Rebuild the running byte estimate for the restored buffer (the .map
+            // above may have produced new event objects during migration).
+            this.eventSizes = new WeakMap();
+            this.recomputeApproxBytes();
 
             if (this.config.debug) {
                 const phaseBreakdown = this.buffer.reduce((acc, event) => {

@@ -133,7 +133,7 @@ describe('Client', () => {
             expect(() => client.install()).not.toThrow();
         });
 
-        test('teardown removes the unload/visibility handlers it installed', () => {
+        test('teardown removes ALL four handlers it installed (RML-02)', () => {
             const removed = [];
             const winSpy = jest.spyOn(window, 'removeEventListener')
                 .mockImplementation((type) => removed.push(type));
@@ -143,11 +143,44 @@ describe('Client', () => {
             client.install();
             client.teardown();
 
+            // All four long-lived listeners must be removed, not just the
+            // unload/visibility pair.
+            expect(removed).toContain('error');
+            expect(removed).toContain('unhandledrejection');
             expect(removed).toContain('beforeunload');
             expect(removed).toContain('visibilitychange');
 
             winSpy.mockRestore();
             docSpy.mockRestore();
+        });
+
+        test('install is idempotent — does not double-register listeners (RML-02)', () => {
+            const added = [];
+            const winSpy = jest.spyOn(window, 'addEventListener')
+                .mockImplementation((type) => added.push(type));
+            const docSpy = jest.spyOn(document, 'addEventListener')
+                .mockImplementation((type) => added.push(type));
+
+            client.install();
+            const afterFirst = added.length;
+            client.install(); // second install must be a no-op
+
+            expect(added.length).toBe(afterFirst);
+            expect(client.installed).toBe(true);
+
+            winSpy.mockRestore();
+            docSpy.mockRestore();
+        });
+
+        test('teardown calls breadcrumbs.uninstall when available (RML-02)', () => {
+            let uninstalled = false;
+            mockBreadcrumbs.uninstall = () => { uninstalled = true; };
+
+            client.install();
+            client.teardown();
+
+            expect(uninstalled).toBe(true);
+            expect(client.installed).toBe(false);
         });
 
         test('teardown never throws', () => {
@@ -790,6 +823,34 @@ handler@/path/to/handler.js:20:10`;
 
             expect(mockTransport.sentPayloads).toHaveLength(0);
             expect(localStorage.getItem('_appLogger_nuclear')).toBeNull();
+        });
+
+        // SEC-JS-02: the nuclear trap stores the raw page URL (location.href).
+        // A catastrophic error on a token-bearing URL must not resurrect that
+        // secret into extra.originalUrl — scrub at the source.
+        test('redacts sensitive query values in resurrected originalUrl', () => {
+            const now = Date.now();
+            localStorage.setItem('_appLogger_nuclear', JSON.stringify([
+                {
+                    m: 'Catastrophic failure',
+                    t: now,
+                    f: 'app.js',
+                    l: 10,
+                    c: 5,
+                    u: 'https://app.example.com/reset?token=topsecret&ref=email',
+                },
+            ]));
+
+            client.processResurrectedErrors();
+
+            expect(mockTransport.sentPayloads).toHaveLength(1);
+            const originalUrl = mockTransport.sentPayloads[0].payload.context.originalUrl;
+
+            expect(originalUrl).not.toContain('topsecret');
+            expect(originalUrl).toContain('token=[REDACTED]');
+            // Non-sensitive structure preserved.
+            expect(originalUrl).toContain('https://app.example.com/reset');
+            expect(originalUrl).toContain('ref=email');
         });
     });
 

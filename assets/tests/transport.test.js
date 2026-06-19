@@ -638,6 +638,150 @@ describe('Transport', () => {
             expect(scrubbed.referrer).toBe('https://app.example.com/login?password=[REDACTED]#top');
             expect(JSON.stringify(scrubbed)).not.toContain('hunter2');
         });
+
+        // ROOT-CAUSE FIX (SEC-JS-01/02 class): the scrubber was allowlist-by-key
+        // (URL_VALUE_KEYS) so every URL-bearing field leaked until added by name.
+        // Now ANY string value that looks like a URL with a query string is
+        // value-scrubbed, regardless of key — so future fields are covered by
+        // default.
+        test('scrubs originalUrl (newly-added URL_VALUE_KEY) query secrets', () => {
+            const payload = {
+                context: {
+                    originalUrl: 'https://app.example.com/sso?code=topsecret&state=ok',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            // 'code' is not a sensitive field name; 'state' isn't either, so the
+            // structure stays — but a sensitive name would be redacted. Use a
+            // sensitive param to prove value-scrubbing runs on this key.
+            expect(scrubbed.context.originalUrl).toContain('https://app.example.com/sso');
+            expect(scrubbed.context.originalUrl).toContain('state=ok');
+        });
+
+        test('scrubs originalUrl carrying a sensitive token param', () => {
+            const payload = {
+                context: {
+                    originalUrl: 'https://app.example.com/reset?token=topsecret&ref=mail',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.originalUrl).not.toContain('topsecret');
+            expect(scrubbed.context.originalUrl).toContain('token=[REDACTED]');
+            expect(scrubbed.context.originalUrl).toContain('ref=mail');
+        });
+
+        test('value-scrubs a NOVEL URL-bearing key not in URL_VALUE_KEYS', () => {
+            // These keys are NOT in URL_VALUE_KEYS. The look-like-a-URL heuristic
+            // must still redact their query secrets when the VALUE is a whole
+            // URL/path (the shape of originalUrl and most URL-bearing fields).
+            // (Strings that merely EMBED a URL mid-sentence — e.g. a console
+            // message — are scrubbed at the source, see breadcrumbs-*-scrub tests.)
+            const payload = {
+                context: {
+                    someBrandNewUrlField: 'https://api.example.com/x?api_key=leak2&size=10',
+                    relativePathField: '/internal/items?secret=leak3&limit=5',
+                    anotherNovelKey: 'https://app.example.com/cb?token=leak1&page=2',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            const blob = JSON.stringify(scrubbed);
+            expect(blob).not.toContain('leak1');
+            expect(blob).not.toContain('leak2');
+            expect(blob).not.toContain('leak3');
+
+            expect(scrubbed.context.anotherNovelKey).toContain('token=[REDACTED]');
+            expect(scrubbed.context.anotherNovelKey).toContain('page=2');
+            expect(scrubbed.context.someBrandNewUrlField).toContain('api_key=[REDACTED]');
+            expect(scrubbed.context.someBrandNewUrlField).toContain('size=10');
+            expect(scrubbed.context.relativePathField).toContain('secret=[REDACTED]');
+            expect(scrubbed.context.relativePathField).toContain('limit=5');
+        });
+
+        test('non-URL strings and plain query strings are left intact', () => {
+            const payload = {
+                context: {
+                    note: 'this is just a sentence with a ? mark and no url',
+                    plainQuery: 'https://app.example.com/list?page=2&size=10',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.note).toBe('this is just a sentence with a ? mark and no url');
+            // No sensitive param names → nothing redacted.
+            expect(scrubbed.context.plainQuery).toBe('https://app.example.com/list?page=2&size=10');
+        });
+
+        // SEC-JS-01/02 follow-up: a field holding location.search ("?token=...")
+        // is query-ONLY (qIndex 0). The old heuristic required a path/scheme
+        // before the '?' (qIndex > 0), so it was rejected and the secret leaked.
+        test('value-scrubs a query-only reference (a stored location.search)', () => {
+            const payload = {
+                context: {
+                    searchParams: '?token=leakqonly&page=2',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.searchParams).not.toContain('leakqonly');
+            expect(scrubbed.context.searchParams).toBe('?token=[REDACTED]&page=2');
+        });
+
+        test('query-only reference with only non-sensitive pairs is unchanged', () => {
+            const payload = {
+                context: {
+                    searchParams: '?page=2&size=10',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.searchParams).toBe('?page=2&size=10');
+        });
+
+        // USERINFO redaction (PHP DataScrubber::scrubUrl parity): credentials
+        // embedded in the authority ("user:pass@host") must be redacted BEFORE
+        // query-value scrubbing, regardless of query content.
+        test('redacts userinfo credentials in a URL authority', () => {
+            const payload = {
+                url: 'https://alice:hunter2@app.example.com/dashboard?page=2',
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.url).not.toContain('hunter2');
+            expect(scrubbed.url).not.toContain('alice');
+            expect(scrubbed.url).toBe('https://[REDACTED]@app.example.com/dashboard?page=2');
+        });
+
+        test('redacts userinfo AND sensitive query values together', () => {
+            const payload = {
+                url: 'https://alice:hunter2@app.example.com/cb?token=qsecret&page=2',
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.url).not.toContain('hunter2');
+            expect(scrubbed.url).not.toContain('qsecret');
+            expect(scrubbed.url).toBe('https://[REDACTED]@app.example.com/cb?token=[REDACTED]&page=2');
+        });
+
+        test('an "@" in the path (no userinfo) is left untouched', () => {
+            const payload = {
+                url: 'https://app.example.com/users/@alice/profile?page=2',
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.url).toBe('https://app.example.com/users/@alice/profile?page=2');
+        });
     });
 
     describe('Queue management', () => {

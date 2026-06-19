@@ -27,6 +27,47 @@
  *
  * This allows session replay visualization without exposing any user data.
  */
+
+// Constant tag-name lookups, hoisted to module scope so the Sets are created
+// once at load instead of reallocated on every element visit (JSPERF-04).
+// Set.has() is O(1) and matches the previous Array.includes() semantics exactly.
+const NON_VISUAL_TAGS = new Set([
+    'SCRIPT',
+    'STYLE',
+    'LINK',
+    'META',
+    'NOSCRIPT',
+    'TITLE',
+    'HEAD',
+    'BASE',
+]);
+
+const INTERACTIVE_TAGS = new Set([
+    'A',
+    'BUTTON',
+    'INPUT',
+    'SELECT',
+    'TEXTAREA',
+    'LABEL',
+]);
+
+const TEXT_TAGS = new Set([
+    'P',
+    'SPAN',
+    'H1',
+    'H2',
+    'H3',
+    'H4',
+    'H5',
+    'H6',
+    'LI',
+    'LABEL',
+    'TD',
+    'TH',
+    'CODE',
+    'PRE',
+]);
+
 export class DOMSerializer {
     constructor(options = {}) {
         this.maxDepth = options.maxDepth || 10; // Prevent deep recursion
@@ -120,14 +161,17 @@ export class DOMSerializer {
         // Get computed style (for visibility and color)
         const style = window.getComputedStyle(element);
 
+        // Get bounding rectangle ONCE and reuse it for the visibility check and
+        // the serialized bounds. getBoundingClientRect()/getComputedStyle() are
+        // the two most expensive DOM reads; computing each once per element
+        // instead of twice halves layout/style recalc on the hot path (JSPERF-03).
+        const rect = element.getBoundingClientRect();
+
         // Skip invisible elements
-        if (this.skipInvisible && this.isInvisible(element, style)) {
+        if (this.skipInvisible && this.isInvisible(element, style, rect)) {
             this.stats.skippedInvisible++;
             return null;
         }
-
-        // Get bounding rectangle
-        const rect = element.getBoundingClientRect();
 
         // Skip tiny elements (noise)
         if (rect.width < this.minSize || rect.height < this.minSize) {
@@ -154,8 +198,9 @@ export class DOMSerializer {
             bgColor: this.captureColors ? this.extractBackgroundColor(style) : null,
             layout: this.detectLayoutType(style),
 
-            // Meta information (for better rendering)
-            isInteractive: this.isInteractive(element),
+            // Meta information (for better rendering). Reuse the already-computed
+            // style instead of letting isInteractive() fetch it again (JSPERF-03).
+            isInteractive: this.isInteractive(element, style),
             isText: this.isTextContainer(element),
         };
 
@@ -185,18 +230,7 @@ export class DOMSerializer {
      * @returns {boolean}
      */
     isNonVisualElement(element) {
-        const nonVisualTags = [
-            'SCRIPT',
-            'STYLE',
-            'LINK',
-            'META',
-            'NOSCRIPT',
-            'TITLE',
-            'HEAD',
-            'BASE',
-        ];
-
-        return nonVisualTags.includes(element.tagName);
+        return NON_VISUAL_TAGS.has(element.tagName);
     }
 
     /**
@@ -205,9 +239,11 @@ export class DOMSerializer {
      * @private
      * @param {Element} element
      * @param {CSSStyleDeclaration} style - Computed style
+     * @param {DOMRect} [rect] - Pre-computed bounding rect (avoids a second
+     *   getBoundingClientRect() call; falls back to computing it when omitted).
      * @returns {boolean}
      */
-    isInvisible(element, style) {
+    isInvisible(element, style, rect = element.getBoundingClientRect()) {
         // Display none
         if (style.display === 'none') {
             return true;
@@ -224,7 +260,6 @@ export class DOMSerializer {
         }
 
         // Outside viewport (way off-screen)
-        const rect = element.getBoundingClientRect();
         if (
             rect.bottom < -1000 ||
             rect.top > window.innerHeight + 1000 ||
@@ -321,19 +356,12 @@ export class DOMSerializer {
      *
      * @private
      * @param {Element} element
+     * @param {CSSStyleDeclaration} [style] - Pre-computed style (avoids a second
+     *   getComputedStyle() call; falls back to computing it when omitted).
      * @returns {boolean}
      */
-    isInteractive(element) {
-        const interactiveTags = [
-            'A',
-            'BUTTON',
-            'INPUT',
-            'SELECT',
-            'TEXTAREA',
-            'LABEL',
-        ];
-
-        if (interactiveTags.includes(element.tagName)) {
+    isInteractive(element, style = window.getComputedStyle(element)) {
+        if (INTERACTIVE_TAGS.has(element.tagName)) {
             return true;
         }
 
@@ -343,7 +371,6 @@ export class DOMSerializer {
         }
 
         // Check for cursor pointer
-        const style = window.getComputedStyle(element);
         if (style.cursor === 'pointer') {
             return true;
         }
@@ -359,24 +386,7 @@ export class DOMSerializer {
      * @returns {boolean}
      */
     isTextContainer(element) {
-        const textTags = [
-            'P',
-            'SPAN',
-            'H1',
-            'H2',
-            'H3',
-            'H4',
-            'H5',
-            'H6',
-            'LI',
-            'LABEL',
-            'TD',
-            'TH',
-            'CODE',
-            'PRE',
-        ];
-
-        return textTags.includes(element.tagName);
+        return TEXT_TAGS.has(element.tagName);
     }
 
     /**

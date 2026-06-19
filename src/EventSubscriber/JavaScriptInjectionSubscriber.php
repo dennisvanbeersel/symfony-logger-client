@@ -21,6 +21,15 @@ use Symfony\Component\HttpKernel\KernelEvents;
  */
 final class JavaScriptInjectionSubscriber implements EventSubscriberInterface
 {
+    /**
+     * Maximum HTML body size (bytes) we are willing to scan + rebuild on the
+     * host's hot path (kernel.response, pre-send). Above this we skip injection
+     * entirely so large buffered responses (multi-MB tables/reports/exports) do
+     * not pay for an O(n) stripos scan plus full-body substr_replace copies. The
+     * SDK can still be wired up explicitly in such templates if needed.
+     */
+    private const MAX_INJECTION_BYTES = 1048576; // 1 MiB
+
     public function __construct(
         private readonly bool $autoInject,
         private readonly bool $enabled,
@@ -85,8 +94,24 @@ final class JavaScriptInjectionSubscriber implements EventSubscriberInterface
 
         $content = $response->getContent();
 
-        // Skip if no </body> tag found (case-insensitive)
-        if (false === $content || false === stripos($content, '</body>')) {
+        if (false === $content) {
+            return;
+        }
+
+        // Bound the work done on the host's hot path: skip injection for very large
+        // bodies rather than scanning + rebuilding (multiple full-body copies) a
+        // multi-MB response on kernel.response before it is sent to the client.
+        if (\strlen($content) > self::MAX_INJECTION_BYTES) {
+            $this->debug('Skipped JavaScript SDK injection: response body exceeds size cap');
+
+            return;
+        }
+
+        // Skip if no </body> tag found (case-insensitive). Capture the position so
+        // injectFragments() can reuse it instead of re-scanning the whole body a
+        // second time on the host's pre-send hot path (PHP-1).
+        $bodyEndPos = stripos($content, '</body>');
+        if (false === $bodyEndPos) {
             return;
         }
 
@@ -95,7 +120,7 @@ final class JavaScriptInjectionSubscriber implements EventSubscriberInterface
             // target DOM position. No re-parsing / magic-string sniffing required.
             $fragments = $this->twigExtension->renderFragments();
 
-            $injected = $this->injectFragments($content, $fragments);
+            $injected = $this->injectFragments($content, $fragments, $bodyEndPos);
 
             // Nothing rendered (SDK disabled / invalid config) - leave response untouched.
             if (null === $injected) {
@@ -125,14 +150,22 @@ final class JavaScriptInjectionSubscriber implements EventSubscriberInterface
      * 3. bodyEnd   - module scripts injected before </body> (deferred, full SDK)
      *
      * @param array{headStart: string, headEnd: string, bodyEnd: string} $fragments
+     * @param int $bodyEndPos Position of </body> in $content
+     *                        (already located by the caller's gate)
      *
      * @return string|null Modified content, or null when there is nothing to inject
      */
-    private function injectFragments(string $content, array $fragments): ?string
+    private function injectFragments(string $content, array $fragments, int $bodyEndPos): ?string
     {
         if ('' === $fragments['headStart'] && '' === $fragments['headEnd'] && '' === $fragments['bodyEnd']) {
             return null;
         }
+
+        // Track bytes inserted before </body> so we can reuse the caller's already
+        // known </body> position instead of re-scanning the whole body (PHP-1).
+        // <head>/</head> always precede </body> in the document, so any head
+        // insertions shift the body offset by exactly their length.
+        $bodyShift = 0;
 
         // 1. Nuclear trap RIGHT AFTER <head> (earliest execution, before any head scripts).
         if ('' !== $fragments['headStart']) {
@@ -140,7 +173,9 @@ final class JavaScriptInjectionSubscriber implements EventSubscriberInterface
 
             if (false !== $headOpenPos) {
                 $insertPos = $headOpenPos + \strlen('<head>');
-                $content = substr_replace($content, "\n".$fragments['headStart'], $insertPos, 0);
+                $insertion = "\n".$fragments['headStart'];
+                $content = substr_replace($content, $insertion, $insertPos, 0);
+                $bodyShift += \strlen($insertion);
                 $this->debug('Injected nuclear trap right after <head>');
             } else {
                 $this->debug('No <head> tag found for nuclear trap injection', 'warning');
@@ -153,22 +188,18 @@ final class JavaScriptInjectionSubscriber implements EventSubscriberInterface
 
             if (false !== $headClosePos) {
                 $content = substr_replace($content, $fragments['headEnd'], $headClosePos, 0);
+                $bodyShift += \strlen($fragments['headEnd']);
                 $this->debug('Injected buffer script before </head>');
             } else {
                 $this->debug('No </head> tag found for buffer script', 'warning');
             }
         }
 
-        // 3. Module scripts before </body> (deferred, full SDK).
+        // 3. Module scripts before </body> (deferred, full SDK). Reuse the caller's
+        // position, adjusted by whatever the head insertions shifted it.
         if ('' !== $fragments['bodyEnd']) {
-            $bodyPos = stripos($content, '</body>');
-
-            if (false !== $bodyPos) {
-                $content = substr_replace($content, $fragments['bodyEnd'], $bodyPos, 0);
-                $this->debug('Injected module script before </body>');
-            } else {
-                $this->logError('Could not find </body> tag for module script injection');
-            }
+            $content = substr_replace($content, $fragments['bodyEnd'], $bodyEndPos + $bodyShift, 0);
+            $this->debug('Injected module script before </body>');
         }
 
         return $content;

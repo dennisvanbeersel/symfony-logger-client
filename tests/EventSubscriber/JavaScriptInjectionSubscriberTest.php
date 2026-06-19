@@ -381,6 +381,82 @@ HTML;
         $this->assertLessThan($bodyPos, $scriptPos, 'Script should appear before </body>');
     }
 
+    public function testOnKernelResponseSkipsInjectionForOversizedBody(): void
+    {
+        // HSB-2: bodies above the size cap must be skipped so the host's hot path
+        // does not scan + rebuild a multi-MB response. renderFragments() must not
+        // even be invoked.
+        $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
+        $twigExtension->expects($this->never())->method('renderFragments');
+
+        $subscriber = new JavaScriptInjectionSubscriber(
+            autoInject: true,
+            enabled: true,
+            twigExtension: $twigExtension
+        );
+
+        // > 1 MiB body that DOES contain a </body> tag (so the only reason to skip
+        // is the size guard, not the missing-tag short-circuit).
+        $filler = str_repeat('x', 1048577);
+        $html = '<html><body>'.$filler.'</body></html>';
+        $event = $this->createResponseEvent($html);
+
+        $subscriber->onKernelResponse($event);
+
+        // Content must be returned untouched.
+        $this->assertSame($html, $event->getResponse()->getContent());
+    }
+
+    public function testOnKernelResponseInjectsForBodyAtOrBelowCap(): void
+    {
+        $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
+        $twigExtension->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '<script>test</script>']);
+
+        $subscriber = new JavaScriptInjectionSubscriber(
+            autoInject: true,
+            enabled: true,
+            twigExtension: $twigExtension
+        );
+
+        // A large-but-under-cap body still gets injected.
+        $filler = str_repeat('x', 500000);
+        $html = '<html><body>'.$filler.'</body></html>';
+        $event = $this->createResponseEvent($html);
+
+        $subscriber->onKernelResponse($event);
+
+        $this->assertStringContainsString('<script>test</script>', (string) $event->getResponse()->getContent());
+    }
+
+    public function testOnKernelResponseInjectsForBodyExactlyAtCap(): void
+    {
+        // HSB-2 boundary: the size guard skips only bodies STRICTLY greater than the
+        // cap (strlen > MAX). A body whose length is EXACTLY 1048576 bytes must still
+        // be injected, so renderFragments() IS invoked.
+        $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
+        $twigExtension->expects($this->once())
+            ->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '<script>test</script>']);
+
+        $subscriber = new JavaScriptInjectionSubscriber(
+            autoInject: true,
+            enabled: true,
+            twigExtension: $twigExtension
+        );
+
+        // Build an HTML body that is EXACTLY 1048576 bytes (== the cap).
+        $wrapper = '<html><body></body></html>'; // fixed structural bytes
+        $filler = str_repeat('x', 1048576 - \strlen($wrapper));
+        $html = '<html><body>'.$filler.'</body></html>';
+        $this->assertSame(1048576, \strlen($html), 'precondition: body must equal the cap exactly');
+
+        $event = $this->createResponseEvent($html);
+        $subscriber->onKernelResponse($event);
+
+        $this->assertStringContainsString('<script>test</script>', (string) $event->getResponse()->getContent());
+    }
+
     /**
      * Create a ResponseEvent for testing.
      */

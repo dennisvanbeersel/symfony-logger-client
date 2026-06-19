@@ -155,6 +155,48 @@ describe('ApplicationLogger (index.js)', () => {
         });
     });
 
+    describe('disable() then enable() re-arms session replay (RML-04)', () => {
+        test('disable nulls replay components', () => {
+            const logger = new ApplicationLogger({ ...VALID_CONFIG, sessionReplayEnabled: true });
+            logger.init();
+
+            logger.sessionReplay.disable();
+
+            // Components must be nulled so the `!this.heatmap` re-init path runs
+            // on a later enable().
+            expect(logger.heatmap).toBeNull();
+            expect(logger.errorDetector).toBeNull();
+            expect(logger.replayBuffer).toBeNull();
+            expect(logger.sessionManager).toBeNull();
+            expect(logger.config.sessionReplayEnabled).toBe(false);
+        });
+
+        test('a later enable() re-installs the lifecycle (interval + components)', () => {
+            const logger = new ApplicationLogger({ ...VALID_CONFIG, sessionReplayEnabled: true });
+            logger.init();
+
+            logger.sessionReplay.disable();
+            expect(logger.bufferSaveInterval).toBeNull();
+            expect(logger.heatmap).toBeNull();
+
+            logger.sessionReplay.enable();
+
+            // Re-armed: components recreated and the periodic-save interval back.
+            expect(logger.config.sessionReplayEnabled).toBe(true);
+            expect(logger.heatmap).not.toBeNull();
+            expect(logger.errorDetector).not.toBeNull();
+            expect(logger.sessionManager).not.toBeNull();
+            expect(logger.bufferSaveInterval).toBeTruthy();
+
+            // The client must point at the fresh replay components.
+            expect(logger.client.errorDetector).toBe(logger.errorDetector);
+            expect(logger.client.sessionManager).toBe(logger.sessionManager);
+
+            // Clean up the timer.
+            logger.sessionReplay.disable();
+        });
+    });
+
     describe('init()', () => {
         test('installs components and sets initialized flag', () => {
             const logger = new ApplicationLogger({ ...VALID_CONFIG, sessionReplayEnabled: true });

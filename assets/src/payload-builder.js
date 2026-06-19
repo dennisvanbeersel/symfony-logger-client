@@ -20,6 +20,10 @@ export class PayloadBuilder {
         this.breadcrumbs = breadcrumbs;
         this.sessionManager = sessionManager;
         this.sessionHashProvider = sessionHashProvider;
+        // userAgent is immutable for the page lifetime; cache the derived browser
+        // name lazily so build() doesn't re-scan the UA string on every error
+        // (JSPERF-06).
+        this._browserInfo = null;
     }
 
     /**
@@ -149,6 +153,21 @@ export class PayloadBuilder {
      * @returns {string}
      */
     getBrowserInfo() {
+        if (this._browserInfo !== null) {
+            return this._browserInfo;
+        }
+
+        this._browserInfo = this.detectBrowserInfo();
+        return this._browserInfo;
+    }
+
+    /**
+     * Derive a coarse browser name from the user agent (uncached).
+     *
+     * @private
+     * @returns {string}
+     */
+    detectBrowserInfo() {
         const ua = navigator.userAgent;
 
         if (ua.includes('Chrome') && !ua.includes('Edge')) {

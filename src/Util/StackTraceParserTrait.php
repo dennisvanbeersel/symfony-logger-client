@@ -12,6 +12,17 @@ namespace ApplicationLogger\Bundle\Util;
 trait StackTraceParserTrait
 {
     /**
+     * Maximum number of stack frames captured per exception.
+     *
+     * Bounds the array built here (and the payload later JSON-encoded by the
+     * dispatcher) so a pathological deep-recursion / stack-overflow trace cannot
+     * produce an arbitrarily large payload or encode cost. The cap is applied to
+     * the innermost frames (closest to the throw site), which carry the most
+     * diagnostic value.
+     */
+    private const MAX_STACK_FRAMES = 100;
+
+    /**
      * Parse exception stack trace.
      *
      * Returns flat array of frames matching API format:
@@ -24,24 +35,47 @@ trait StackTraceParserTrait
         try {
             $frames = [];
 
-            foreach ($exception->getTrace() as $trace) {
-                $file = $trace['file'] ?? 'unknown';
+            // Cap the number of frames captured to bound CPU/memory for pathological
+            // (e.g. deep-recursion) traces. getTrace() is ordered innermost-first, so
+            // slicing the first MAX_STACK_FRAMES keeps the most relevant frames.
+            $trace = $exception->getTrace();
+            $truncated = \count($trace) > self::MAX_STACK_FRAMES;
+            if ($truncated) {
+                $trace = \array_slice($trace, 0, self::MAX_STACK_FRAMES);
+            }
 
-                $frame = [
+            foreach ($trace as $frame) {
+                $file = $frame['file'] ?? 'unknown';
+
+                $frames[] = [
                     'file' => $file,
                     // Default to 1 if line is missing (semantically more correct than 0)
-                    'line' => $trace['line'] ?? 1,
-                    'function' => $trace['function'] ?? 'unknown',
-                    'class' => $trace['class'] ?? null,
-                    'type' => $trace['type'] ?? null,
+                    'line' => $frame['line'] ?? 1,
+                    'function' => $frame['function'] ?? 'unknown',
+                    'class' => $frame['class'] ?? null,
+                    'type' => $frame['type'] ?? null,
                     'in_app' => !str_contains($file, '/vendor/'),
                 ];
-
-                $frames[] = $frame;
             }
 
             // Return frames reversed to show root cause first
-            return array_reverse($frames);
+            $frames = array_reverse($frames);
+
+            if ($truncated) {
+                // Mark truncation at the (now-leading) deepest captured frame so the
+                // consumer can tell the trace was cut. array_reverse() preserves no
+                // list keys here, so a sentinel frame is the simplest signal.
+                array_unshift($frames, [
+                    'file' => 'unknown',
+                    'line' => 1,
+                    'function' => \sprintf('[truncated: stack trace exceeded %d frames]', self::MAX_STACK_FRAMES),
+                    'class' => null,
+                    'type' => null,
+                    'in_app' => false,
+                ]);
+            }
+
+            return $frames;
         } catch (\Throwable) {
             return [];
         }

@@ -168,7 +168,13 @@ class CircuitBreaker
      */
     public function isHalfOpen(): bool
     {
-        return $this->enabled && self::STATE_HALF_OPEN === $this->state;
+        if (!$this->enabled) {
+            return false;
+        }
+
+        $this->refreshIfStale();
+
+        return self::STATE_HALF_OPEN === $this->state;
     }
 
     /**

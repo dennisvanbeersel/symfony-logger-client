@@ -67,6 +67,63 @@ final class ApiClientTest extends TestCase
         $this->assertInstanceOf(ApiClient::class, $client);
     }
 
+    public function testBuiltUrlPreservesExplicitPort(): void
+    {
+        // Guards IDIOM-01: buildUrl() now parses the base once instead of three
+        // separate parse_url() calls. An explicit DSN port must still round-trip
+        // into the outbound errors endpoint URL.
+        $capturedUrl = null;
+        $httpClient = new MockHttpClient(function (string $method, string $url) use (&$capturedUrl): MockResponse {
+            $capturedUrl = $url;
+
+            return new MockResponse('', ['http_code' => 202]);
+        });
+
+        $client = new ApiClient(
+            'https://localhost:8111/project-id',
+            'test-api-key',
+            2.0,
+            0,
+            false, // sync so the request fires immediately
+            $this->circuitBreaker,
+            $this->logger,
+            false,
+            $httpClient
+        );
+
+        $client->sendError(['message' => 'port round-trip']);
+
+        $this->assertSame('https://localhost:8111/api/v1/errors', $capturedUrl);
+    }
+
+    public function testBuiltUrlOmitsPortWhenAbsent(): void
+    {
+        // Companion to the port test: a DSN without an explicit port must not
+        // gain one (null-port handling preserved).
+        $capturedUrl = null;
+        $httpClient = new MockHttpClient(function (string $method, string $url) use (&$capturedUrl): MockResponse {
+            $capturedUrl = $url;
+
+            return new MockResponse('', ['http_code' => 202]);
+        });
+
+        $client = new ApiClient(
+            'https://example.com/project-id',
+            'test-api-key',
+            2.0,
+            0,
+            false,
+            $this->circuitBreaker,
+            $this->logger,
+            false,
+            $httpClient
+        );
+
+        $client->sendError(['message' => 'no port']);
+
+        $this->assertSame('https://example.com/api/v1/errors', $capturedUrl);
+    }
+
     public function testEmptyDsnDoesNotThrow(): void
     {
         // A clean install whose Flex recipe was skipped leaves the DSN empty.

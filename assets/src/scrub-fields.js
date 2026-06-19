@@ -36,14 +36,58 @@ export const DEFAULT_SCRUB_FIELDS = Object.freeze([
 ]);
 
 /**
- * Scrub sensitive query-string VALUES from a URL/URI string.
+ * Redact any "//user:pass@host" / "//user@host" userinfo (credentials) in a
+ * URL's authority with "//[REDACTED]@host". Only the authority that follows
+ * "scheme://" is considered, so an "@" appearing later in the path/query/
+ * fragment is left untouched. Returns the URL unchanged when no userinfo is
+ * present. Mirrors PHP DataScrubber::scrubUrlUserinfo().
  *
- * Only the query component is touched: scheme/host/path/fragment are left
- * intact. A query pair is redacted when its NAME matches a scrub pattern
+ * @param {string} url - URL string
+ * @returns {string} URL with embedded credentials redacted
+ */
+export function scrubUrlUserinfo(url) {
+    if (typeof url !== 'string') {
+        return url;
+    }
+
+    const schemePos = url.indexOf('://');
+    if (schemePos === -1) {
+        return url;
+    }
+
+    const authorityStart = schemePos + '://'.length;
+
+    // The authority ends at the first '/', '?' or '#' after "scheme://".
+    let authorityEnd = url.length;
+    for (const delimiter of ['/', '?', '#']) {
+        const pos = url.indexOf(delimiter, authorityStart);
+        if (pos !== -1 && pos < authorityEnd) {
+            authorityEnd = pos;
+        }
+    }
+
+    const authority = url.slice(authorityStart, authorityEnd);
+    const atPos = authority.lastIndexOf('@');
+    if (atPos === -1) {
+        return url;
+    }
+
+    const hostPart = authority.slice(atPos + 1);
+
+    return `${url.slice(0, authorityStart)}[REDACTED]@${hostPart}${url.slice(authorityEnd)}`;
+}
+
+/**
+ * Scrub sensitive query-string VALUES from a URL/URI string, and ALWAYS redact
+ * any embedded userinfo (credentials) in the authority component.
+ *
+ * Userinfo ("user:pass@host") is redacted FIRST, then sensitive query VALUES.
+ * Otherwise only the query component is touched: scheme/host/path/fragment are
+ * left intact. A query pair is redacted when its NAME matches a scrub pattern
  * (case-insensitive substring). Mirrors PHP DataScrubber::scrubUrl().
- * Never throws; returns the input unchanged when there is no query component,
- * and returns '[REDACTED]' if parsing fails (fail safe — never echo back a URL
- * that may carry a sensitive value).
+ * Never throws; returns the input (userinfo-stripped) when there is no query
+ * component, and returns '[REDACTED]' if parsing fails (fail safe — never echo
+ * back a URL that may carry a sensitive value).
  *
  * Single source of truth shared by transport.js (payload scrubbing) and
  * breadcrumbs.js (fetch/console breadcrumb composition) so the two can never
@@ -51,7 +95,7 @@ export const DEFAULT_SCRUB_FIELDS = Object.freeze([
  *
  * @param {string} value - URL or path+query string
  * @param {string[]} [scrubPatterns=DEFAULT_SCRUB_FIELDS] - Field-name fragments to redact
- * @returns {string} URL with sensitive query values redacted
+ * @returns {string} URL with embedded credentials and sensitive query values redacted
  */
 export function scrubUrlQueryValues(value, scrubPatterns = DEFAULT_SCRUB_FIELDS) {
     if (typeof value !== 'string') {
@@ -59,6 +103,11 @@ export function scrubUrlQueryValues(value, scrubPatterns = DEFAULT_SCRUB_FIELDS)
     }
 
     try {
+        // Redact embedded credentials (userinfo) FIRST so the rest of the
+        // function operates on (and returns) a credential-free URL. Mirrors
+        // PHP DataScrubber::scrubUrl() ordering.
+        value = scrubUrlUserinfo(value);
+
         const hashIndex = value.indexOf('#');
         const fragment = hashIndex !== -1 ? value.slice(hashIndex) : '';
         const beforeFragment = hashIndex !== -1 ? value.slice(0, hashIndex) : value;
