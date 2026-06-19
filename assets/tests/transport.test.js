@@ -741,7 +741,7 @@ describe('Transport', () => {
             expect(transport.storageQueue.size()).toBe(0);
         });
 
-        test('beacon sends the most recent error as a flat payload with body apiKey', (done) => {
+        test('beacon sends queued errors as flat payloads with body apiKey (JS-4: bounded, no loss)', (done) => {
             const beaconCalls = [];
             global.navigator.sendBeacon = (url, data) => {
                 beaconCalls.push({ url, data });
@@ -755,21 +755,24 @@ describe('Transport', () => {
 
             transport.flushWithBeacon();
 
-            expect(beaconCalls.length).toBe(1);
+            // One beacon PER queued error (endpoint rejects arrays), bounded to
+            // 10 per unload so the rest are retried next session - never dropped.
+            expect(beaconCalls.length).toBe(10);
+            expect(transport.queue.length).toBe(5);
 
             // Verify payload was sent (Blob exists)
             const blob = beaconCalls[0].data;
             expect(blob).toBeInstanceOf(Blob);
 
             // sendBeacon cannot set headers, so auth must be in the body (mirrors
-            // sendRecoverySession) and the shape must be a single flat error the
+            // sendRecoverySession) and each beacon must be a single flat error the
             // ingest endpoint accepts (NOT a {dsn, errors:[]} envelope).
             const reader = new FileReader();
             reader.onload = () => {
                 const payload = JSON.parse(reader.result);
                 expect(payload.errors).toBeUndefined();
                 expect(payload.apiKey).toBe('test-api-key');
-                expect(payload.message).toBe('Error 14'); // most recent
+                expect(payload.message).toBe('Error 0'); // oldest-first transmission
                 done();
             };
             reader.onerror = () => {

@@ -13,6 +13,9 @@ use Symfony\Component\HttpFoundation\RequestStack;
  * All methods are wrapped in try-catch to ensure context collection never crashes.
  *
  * RESILIENCE: Returns empty arrays/null on any errors - never throws exceptions.
+ *
+ * Not declared `final`: it is a mockable collaborator stubbed by the subscriber,
+ * Monolog handler and payload-factory unit tests.
  */
 class ContextCollector
 {

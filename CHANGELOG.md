@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-19
+
 ### Changed
 - **Reliable post-response async delivery.** In fire-and-forget mode (`async: true`,
   the default) the outbound HTTP send is now **driven to completion after the
@@ -53,14 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - IP address anonymization (masks last octet for IPv4, last 80 bits for IPv6)
-- Sensitive data scrubbing (password, token, api_key, secret, authorization)
+- Sensitive data scrubbing (password, token, api_key, secret, authorization, credit_card, creditcard, card_number, cvv, ssn, iban)
 - Session hashing using SHA-256 for privacy-preserving session tracking
 - Circuit breaker prevents cascade failures
 
-## [1.0.0] - TBD
-
-### Added
-- First stable release
-
-[Unreleased]: https://github.com/dennisvanbeersel/application-logger-bundle/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/dennisvanbeersel/application-logger-bundle/releases/tag/v1.0.0
+[Unreleased]: https://github.com/dennisvanbeersel/application-logger-bundle/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dennisvanbeersel/application-logger-bundle/releases/tag/v0.3.0

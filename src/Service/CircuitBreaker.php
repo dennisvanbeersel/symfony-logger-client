@@ -15,6 +15,24 @@ use Psr\Cache\CacheItemPoolInterface;
  * - HALF_OPEN: Testing if service has recovered
  *
  * This is CRITICAL for resilience - prevents cascade failures and resource exhaustion.
+ *
+ * Worker-mode / concurrency semantics (FrankenPHP worker mode, multiple long-lived
+ * workers sharing one cache pool):
+ *
+ * State is shared via {@see CacheItemPoolInterface}, but the cache offers no
+ * compare-and-swap, and symfony/lock is intentionally NOT a dependency (the bundle
+ * must stay dependency-light and never block the host app). We therefore do NOT
+ * provide strict linearizability — concurrent writers can still race on the
+ * read-modify-write of the shared entry. What we DO guarantee:
+ *  - Mutators refresh from the shared cache before deciding (refresh-then-mutate),
+ *    so a worker acts on reasonably current state rather than a boot-time snapshot.
+ *  - A stale CLOSED worker recording a success can never DOWNGRADE a sibling's
+ *    more-recently-persisted OPEN circuit back to CLOSED. Tripping OPEN always wins
+ *    over an optimistic close, which is the safe direction for a resilience guard.
+ *  - HALF_OPEN probe admission is capped at {@see $maxHalfOpenAttempts}; under a
+ *    race a small over-admission of probes is possible, but admission stops once the
+ *    persisted attempt count reaches the cap.
+ * These are best-effort, fail-safe guarantees, not distributed-lock correctness.
  */
 class CircuitBreaker
 {
@@ -47,6 +65,11 @@ class CircuitBreaker
         private readonly int $timeout,
         private readonly int $maxHalfOpenAttempts,
         private readonly CacheItemPoolInterface $cache,
+        // Per-endpoint isolation: distinct cache keys give the error/session path and
+        // the log-aggregation path INDEPENDENT breaker state. A failing log collector
+        // must be able to trip its own breaker without a healthy platform's successes
+        // resetting it (and vice versa). Defaults to the original shared key for BC.
+        private readonly string $cacheKey = self::CACHE_KEY,
     ) {
         // Validate parameters
         if ($failureThreshold < 1) {
@@ -62,6 +85,15 @@ class CircuitBreaker
         }
 
         $this->loadState();
+
+        // Persist the first-boot CLOSED seed so the shared cache entry exists from
+        // construction onward. Without this, a subsequent loadState() (the new
+        // refresh-then-mutate guard in recordSuccess()/recordFailure()) would see an
+        // empty cache, mistake the never-persisted seed for an eviction, and fail
+        // safe to OPEN — tripping the breaker on the very first recorded success.
+        if ($this->enabled && self::STATE_CLOSED === $this->state) {
+            $this->saveState();
+        }
     }
 
     /**
@@ -69,6 +101,13 @@ class CircuitBreaker
      * this is the command). Drives the OPEN->HALF_OPEN transition when the timeout
      * has elapsed and consumes a HALF_OPEN probe slot (incrementing attempts and
      * persisting). Callers gate every outbound request on this.
+     *
+     * CLOSED is the hot path and stays read-only here (no synchronous cache write):
+     * a CLOSED circuit just reads (possibly a stale snapshot) and admits. Only
+     * HALF_OPEN — a rare, bounded recovery window — performs a write to claim a
+     * probe slot, and only while attempts remain below {@see $maxHalfOpenAttempts}.
+     * Under concurrency a small over-admission of probes is possible (no CAS), but
+     * admission is capped rather than unbounded.
      *
      * @return bool true if the request is allowed (circuit not OPEN); false to skip
      */
@@ -88,10 +127,20 @@ class CircuitBreaker
             $this->halfOpen();
         }
 
-        // In half-open state, track test attempts
+        // In half-open state, admit a bounded number of probes. Stop admitting once
+        // the cap is reached so concurrent callers cannot flood the recovering API:
+        // the circuit waits for the in-flight probes' recordSuccess()/recordFailure()
+        // to resolve it. CLOSED falls through with no write (read-only hot path).
         if (self::STATE_HALF_OPEN === $this->state) {
+            if ($this->halfOpenAttempts >= $this->maxHalfOpenAttempts) {
+                // Cap reached: do not admit (and do not write) until a probe resolves.
+                return false;
+            }
+
             ++$this->halfOpenAttempts;
             $this->saveState();
+
+            return true;
         }
 
         return self::STATE_OPEN !== $this->state;
@@ -124,6 +173,12 @@ class CircuitBreaker
 
     /**
      * Record a successful request.
+     *
+     * Refreshes from the shared cache before deciding so a long-lived worker acts
+     * on current state rather than its boot-time snapshot. Crucially, a CLOSED
+     * success-reset must NOT clobber a sibling worker's more-recently-persisted
+     * OPEN: if a refresh reveals the circuit is now OPEN, we leave it OPEN (tripping
+     * always wins over an optimistic close).
      */
     public function recordSuccess(): void
     {
@@ -131,22 +186,43 @@ class CircuitBreaker
             return;
         }
 
+        // Refresh-then-mutate: observe sibling workers' persisted state first.
+        $this->loadState();
+
         if (self::STATE_HALF_OPEN === $this->state) {
             // Success in half-open state = circuit closes (service recovered)
             $this->close();
         } elseif (self::STATE_CLOSED === $this->state) {
-            // Reset failure count on success
-            $this->failureCount = 0;
-            $this->saveState();
+            // Reset failure count on success. We only reach here when the freshly
+            // loaded state is CLOSED, so we can never downgrade a persisted OPEN.
+            if (0 !== $this->failureCount) {
+                $this->failureCount = 0;
+                $this->saveState();
+            }
         }
+        // If the refresh showed OPEN, do nothing: a success on a stale-CLOSED worker
+        // must not reopen the door against a circuit a sibling just tripped.
     }
 
     /**
      * Record a failed request.
+     *
+     * Refreshes from the shared cache before deciding so the failure is counted
+     * against current state (e.g. a sibling worker may already have opened the
+     * circuit, in which case we simply leave it OPEN rather than counting against
+     * a stale CLOSED snapshot).
      */
     public function recordFailure(): void
     {
         if (!$this->enabled) {
+            return;
+        }
+
+        // Refresh-then-mutate: observe sibling workers' persisted state first.
+        $this->loadState();
+
+        if (self::STATE_OPEN === $this->state) {
+            // Already open (possibly by a sibling); a further failure changes nothing.
             return;
         }
 
@@ -265,7 +341,7 @@ class CircuitBreaker
         $this->loadedAt = time();
 
         try {
-            $item = $this->cache->getItem(self::CACHE_KEY);
+            $item = $this->cache->getItem($this->cacheKey);
 
             if ($item->isHit()) {
                 $state = $item->get();
@@ -308,7 +384,7 @@ class CircuitBreaker
         $this->loadedAt = time();
 
         try {
-            $item = $this->cache->getItem(self::CACHE_KEY);
+            $item = $this->cache->getItem($this->cacheKey);
             $item->set([
                 'state' => $this->state,
                 'failureCount' => $this->failureCount,

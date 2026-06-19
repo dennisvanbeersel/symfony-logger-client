@@ -11,6 +11,9 @@ namespace ApplicationLogger\Bundle\Service;
  * Provides context for debugging by showing the user's journey.
  *
  * RESILIENCE: All methods wrapped in try-catch, never throws exceptions.
+ *
+ * Not declared `final`: it is a mockable collaborator stubbed by the subscriber,
+ * Monolog handler and payload-factory unit tests.
  */
 class BreadcrumbCollector
 {

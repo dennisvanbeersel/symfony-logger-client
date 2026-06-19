@@ -372,6 +372,14 @@ APP_VERSION=1.0.0  # Optional but recommended
 <details>
 <summary><strong>Click to see all available options</strong></summary>
 
+> **Source of truth:** the canonical, installed configuration is the Symfony Flex
+> recipe at `recipe/config/packages/application_logger.yaml` (and its versioned
+> copy under `recipe/contrib/.../config/`). The snippet below and
+> `config/packages/application_logger.yaml.example` are illustrative mirrors —
+> defaults (e.g. `scrub_fields`) are authoritatively defined in
+> `src/DependencyInjection/Configuration.php`. If they ever disagree, the recipe
+> and `Configuration.php` win.
+
 ```yaml
 # config/packages/application_logger.yaml
 application_logger:
@@ -416,7 +424,7 @@ application_logger:
     # Breadcrumbs
     max_breadcrumbs: 50       # Maximum breadcrumbs to keep (10-100)
 
-    # Security: Sensitive Data Scrubbing
+    # Security: Sensitive Data Scrubbing (these are the built-in defaults)
     scrub_fields:
         - password
         - token
@@ -424,7 +432,11 @@ application_logger:
         - secret
         - authorization
         - credit_card
+        - creditcard
+        - card_number
+        - cvv
         - ssn
+        - iban
 
     # Session Tracking (Required for session replay)
     session_tracking:
@@ -793,10 +805,8 @@ Prevents sending the same error repeatedly:
 Sensitive data automatically removed from error reports:
 
 **Default scrubbed fields:**
-- password, passwd, pwd
-- token, api_key, secret
-- authorization, auth
-- credit_card, ssn, private_key
+- password, token, api_key, secret, authorization
+- credit_card, creditcard, card_number, cvv, ssn, iban
 
 **How it works:**
 - Recursive key check (case-insensitive substring matching)

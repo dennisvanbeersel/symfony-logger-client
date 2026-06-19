@@ -100,14 +100,7 @@ export class PayloadBuilder {
      * @returns {string}
      */
     detectHttpMethod() {
-        try {
-            const navigation = performance.getEntriesByType('navigation')[0];
-            if (navigation && navigation.type) {
-                return 'GET'; // Page loads are always GET
-            }
-        } catch {
-            // Performance API unavailable - fall through to default.
-        }
+        // Page loads / SPA navigations are always GET from the browser's POV.
         return 'GET';
     }
 

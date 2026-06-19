@@ -34,3 +34,70 @@ export const DEFAULT_SCRUB_FIELDS = Object.freeze([
     'ssn',
     'iban',
 ]);
+
+/**
+ * Scrub sensitive query-string VALUES from a URL/URI string.
+ *
+ * Only the query component is touched: scheme/host/path/fragment are left
+ * intact. A query pair is redacted when its NAME matches a scrub pattern
+ * (case-insensitive substring). Mirrors PHP DataScrubber::scrubUrl().
+ * Never throws; returns the input unchanged when there is no query component,
+ * and returns '[REDACTED]' if parsing fails (fail safe — never echo back a URL
+ * that may carry a sensitive value).
+ *
+ * Single source of truth shared by transport.js (payload scrubbing) and
+ * breadcrumbs.js (fetch/console breadcrumb composition) so the two can never
+ * drift.
+ *
+ * @param {string} value - URL or path+query string
+ * @param {string[]} [scrubPatterns=DEFAULT_SCRUB_FIELDS] - Field-name fragments to redact
+ * @returns {string} URL with sensitive query values redacted
+ */
+export function scrubUrlQueryValues(value, scrubPatterns = DEFAULT_SCRUB_FIELDS) {
+    if (typeof value !== 'string') {
+        return value;
+    }
+
+    try {
+        const hashIndex = value.indexOf('#');
+        const fragment = hashIndex !== -1 ? value.slice(hashIndex) : '';
+        const beforeFragment = hashIndex !== -1 ? value.slice(0, hashIndex) : value;
+
+        const qIndex = beforeFragment.indexOf('?');
+        if (qIndex === -1) {
+            return value; // No query component; nothing to scrub.
+        }
+
+        const base = beforeFragment.slice(0, qIndex + 1);
+        const query = beforeFragment.slice(qIndex + 1);
+        if (query === '') {
+            return value;
+        }
+
+        const isSensitive = (name) =>
+            scrubPatterns.some(pattern => name.toLowerCase().includes(pattern.toLowerCase()));
+
+        const scrubbedPairs = query.split('&').map((pair) => {
+            if (pair === '') {
+                return pair;
+            }
+            const eqIndex = pair.indexOf('=');
+            let rawName;
+            try {
+                rawName = decodeURIComponent(eqIndex === -1 ? pair : pair.slice(0, eqIndex));
+            } catch {
+                rawName = eqIndex === -1 ? pair : pair.slice(0, eqIndex);
+            }
+            if (!isSensitive(rawName)) {
+                return pair;
+            }
+            const namePart = eqIndex === -1 ? pair : pair.slice(0, eqIndex);
+            return `${namePart}=[REDACTED]`;
+        });
+
+        return `${base}${scrubbedPairs.join('&')}${fragment}`;
+    } catch {
+        // Fail safe: never echo back a URL that may carry a sensitive value.
+        return '[REDACTED]';
+    }
+}

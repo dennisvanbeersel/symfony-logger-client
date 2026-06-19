@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\Tests\Twig;
 
 use ApplicationLogger\Bundle\Twig\ApplicationLoggerExtension;
+use ApplicationLogger\Bundle\Twig\CspNonceProvider;
+use ApplicationLogger\Bundle\Twig\ScriptRenderer;
 use PHPUnit\Framework\TestCase;
 use Symfony\Bundle\SecurityBundle\Security;
 use Symfony\Component\Security\Core\User\UserInterface;
@@ -24,7 +26,7 @@ class ApplicationLoggerExtensionTest extends TestCase
     public function testGetFunctionsReturnsApplicationLoggerInit(): void
     {
         $config = $this->getDefaultConfig();
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
 
         $functions = $extension->getFunctions();
 
@@ -37,7 +39,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         $config['enabled'] = false;
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         $this->assertSame('', $output);
@@ -46,7 +48,7 @@ class ApplicationLoggerExtensionTest extends TestCase
     public function testRenderInitGeneratesInitializationScript(): void
     {
         $config = $this->getDefaultConfig();
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
 
         $output = $extension->renderInit();
 
@@ -77,7 +79,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         $config['scrub_fields'] = ['password', 'token', 'custom_field'];
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         $this->assertStringContainsString('"scrubFields":["password","token","custom_field"]', $output);
@@ -88,7 +90,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         $config['release'] = null;
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         // Should not contain release property
@@ -98,7 +100,7 @@ class ApplicationLoggerExtensionTest extends TestCase
     public function testRenderInitMergesCustomOptions(): void
     {
         $config = $this->getDefaultConfig();
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
 
         $customOptions = [
             'release' => 'v2.0.0',
@@ -119,7 +121,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         $config['debug'] = true;
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         $this->assertStringContainsString('"debug":true', $output);
@@ -128,7 +130,7 @@ class ApplicationLoggerExtensionTest extends TestCase
     public function testRenderInitWithoutUserWhenSecurityIsNull(): void
     {
         $config = $this->getDefaultConfig();
-        $extension = new ApplicationLoggerExtension($config, null);
+        $extension = $this->makeExtension($config, null);
 
         $output = $extension->renderInit();
 
@@ -143,7 +145,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $security = $this->createMock(Security::class);
         $security->method('getUser')->willReturn(null);
 
-        $extension = new ApplicationLoggerExtension($config, $security);
+        $extension = $this->makeExtension($config, $security);
         $output = $extension->renderInit();
 
         // Should only have initialization script, no user context script
@@ -161,7 +163,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $security = $this->createMock(Security::class);
         $security->method('getUser')->willReturn($user);
 
-        $extension = new ApplicationLoggerExtension($config, $security);
+        $extension = $this->makeExtension($config, $security);
         $output = $extension->renderInit();
 
         // Should have both initialization and user context scripts
@@ -203,7 +205,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $security = $this->createMock(Security::class);
         $security->method('getUser')->willReturn($user);
 
-        $extension = new ApplicationLoggerExtension($config, $security);
+        $extension = $this->makeExtension($config, $security);
         $output = $extension->renderInit();
 
         // Should contain email
@@ -238,7 +240,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $security = $this->createMock(Security::class);
         $security->method('getUser')->willReturn($user);
 
-        $extension = new ApplicationLoggerExtension($config, $security);
+        $extension = $this->makeExtension($config, $security);
         $output = $extension->renderInit();
 
         // Should contain username
@@ -273,7 +275,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $security = $this->createMock(Security::class);
         $security->method('getUser')->willReturn($user);
 
-        $extension = new ApplicationLoggerExtension($config, $security);
+        $extension = $this->makeExtension($config, $security);
         $output = $extension->renderInit();
 
         // Should NOT contain username field (only id)
@@ -308,7 +310,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $security = $this->createMock(Security::class);
         $security->method('getUser')->willReturn($user);
 
-        $extension = new ApplicationLoggerExtension($config, $security);
+        $extension = $this->makeExtension($config, $security);
         $output = $extension->renderInit();
 
         // Should NOT contain email field
@@ -322,7 +324,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         $config['environment'] = '<script>alert("xss")</script>';
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         // JSON_HEX_TAG should escape < and > in the environment value
@@ -342,7 +344,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         $config['dsn'] = 'https://host.com/test?foo=1&bar=2';
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         // JSON_HEX_AMP should escape &
@@ -354,7 +356,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         unset($config['dsn']); // Remove DSN
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         $this->assertSame('', $output);
@@ -365,7 +367,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         unset($config['api_key']); // Remove API key
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         $this->assertSame('', $output);
@@ -376,7 +378,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         $config['dsn'] = 'not-a-valid-url'; // Invalid DSN format
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         $this->assertSame('', $output);
@@ -387,7 +389,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         $config['dsn'] = ''; // Empty DSN
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         $this->assertSame('', $output);
@@ -410,7 +412,7 @@ class ApplicationLoggerExtensionTest extends TestCase
             'expose_api' => true,
         ];
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         // Each configured knob must reach the SDK config under the exact camelCase key
@@ -440,7 +442,7 @@ class ApplicationLoggerExtensionTest extends TestCase
             'expose_api' => false,
         ];
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         // Legitimate `false` booleans must survive the null-only array_filter so the SDK
@@ -454,13 +456,28 @@ class ApplicationLoggerExtensionTest extends TestCase
         $config = $this->getDefaultConfig();
         // No 'session_replay' key at all.
 
-        $extension = new ApplicationLoggerExtension($config);
+        $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         // Without injected config the SDK keeps its own hardcoded defaults: emit nothing.
         $this->assertStringNotContainsString('sessionReplayEnabled', $output);
         $this->assertStringNotContainsString('bufferBeforeErrorSeconds', $output);
         $this->assertStringNotContainsString('exposeApi', $output);
+    }
+
+    /**
+     * Build the extension with a ScriptRenderer wired to the given (optional) security.
+     *
+     * No AssetMapper is injected, so the SDK module resolves to the bare
+     * "@application-logger/logger" specifier the assertions expect.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function makeExtension(array $config, ?Security $security = null): ApplicationLoggerExtension
+    {
+        $renderer = new ScriptRenderer(new CspNonceProvider(), $security);
+
+        return new ApplicationLoggerExtension($config, $renderer);
     }
 
     /**

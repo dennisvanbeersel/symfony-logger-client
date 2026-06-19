@@ -122,8 +122,19 @@ class Configuration implements ConfigurationInterface
                 ->end()
 
                 // Capture Settings
+                // BND-08 (won't-fix, deliberate): NOT an enumNode and NO ->validate()
+                // closure. Both reject %env()% placeholders at container-compile time
+                // (the placeholder string is validated before env resolution), but
+                // capture_level is intentionally env-driven (APPLICATION_LOGGER_CAPTURE_LEVEL)
+                // and the bundle's example configs use %env()% for it. A constrained node
+                // would break that. An invalid LITERAL is handled safely at runtime:
+                // ApplicationLoggerHandler::__construct falls back to Level::Error on an
+                // unknown level (never throws into the host). Keeping it a plain scalar
+                // preserves env compatibility, which outweighs compile-time validation
+                // of a value that already degrades safely.
                 ->scalarNode('capture_level')
                     ->defaultValue('error')
+                    ->cannotBeEmpty()
                     ->info('Minimum Monolog level to capture (debug, info, notice, warning, error, critical, alert, emergency)')
                 ->end()
                 ->arrayNode('scrub_fields')

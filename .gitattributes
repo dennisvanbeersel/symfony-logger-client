@@ -4,7 +4,6 @@
 * text=auto
 
 # Exclude development files from export (composer archive/github releases)
-/.git attributes export-ignore
 /.github export-ignore
 /tests export-ignore
 /.php-cs-fixer.dist.php export-ignore
@@ -21,6 +20,9 @@
 
 # Include assets/src for AssetMapper
 /assets/src/** -export-ignore
+
+# Exclude JS source maps from the Composer archive (kept in-repo, ~527KB)
+/assets/dist/*.map export-ignore
 
 # Ensure line endings
 *.php text eol=lf

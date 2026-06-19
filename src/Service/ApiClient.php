@@ -40,6 +40,14 @@ class ApiClient
     private readonly string $errorPath;
     private readonly string $publicKey;
     private readonly ResilientHttpDispatcher $dispatcher;
+    /**
+     * Dedicated transport for the LOG-aggregation path so it carries its OWN circuit
+     * breaker, independent of the error/session path. Without this, a healthy platform
+     * (error/session 2xx) keeps resetting a shared breaker and masks a failing log
+     * collector, so log sends never shed load. Falls back to the main dispatcher when
+     * no separate log breaker is wired (BC).
+     */
+    private readonly ResilientHttpDispatcher $logDispatcher;
     private readonly float $timeout;
 
     public function __construct(
@@ -57,6 +65,7 @@ class ApiClient
         private readonly ?string $logToken = null,
         private readonly string $logPath = '/v1/logs',
         bool $enabled = true,
+        ?CircuitBreaker $logCircuitBreaker = null,
     ) {
         // Validate timeout
         if ($timeout < 0.5 || $timeout > 5.0) {
@@ -82,6 +91,23 @@ class ApiClient
             httpClient: $httpClient,
             enabled: $enabled,
         );
+
+        // The log-aggregation path gets its OWN dispatcher+breaker when a separate log
+        // breaker is wired, so a failing collector trips an INDEPENDENT breaker instead
+        // of being masked by healthy error/session traffic on a shared one. When not
+        // wired (older config / host decorator), logs reuse the main dispatcher (BC).
+        $this->logDispatcher = (null !== $logCircuitBreaker)
+            ? new ResilientHttpDispatcher(
+                timeout: $timeout,
+                retryAttempts: $retryAttempts,
+                async: $async,
+                circuitBreaker: $logCircuitBreaker,
+                logger: $logger,
+                debug: $debug,
+                httpClient: $httpClient,
+                enabled: $enabled,
+            )
+            : $this->dispatcher;
     }
 
     /**
@@ -133,7 +159,10 @@ class ApiClient
      */
     public function sendLogs(array $logEntries): bool
     {
-        if (null === $this->logEndpoint || null === $this->logToken) {
+        // Treat null AND empty-string as "unconfigured": env placeholders resolve to ''
+        // (not null) when the var is unset, so guard on both to cleanly no-op rather than
+        // build a malformed URL and penalise the log circuit breaker.
+        if (\in_array($this->logEndpoint, [null, ''], true) || \in_array($this->logToken, [null, ''], true)) {
             // Log aggregation not configured - nothing to do (never an error).
             return false;
         }
@@ -149,8 +178,9 @@ class ApiClient
         ];
 
         // A single entry uses the single endpoint; multiple entries use /batch.
+        // Routed through the dedicated log dispatcher (independent circuit breaker).
         if (1 === \count($logEntries)) {
-            return $this->dispatcher->post(
+            return $this->logDispatcher->post(
                 $this->buildUrl($this->logEndpoint, $this->logPath),
                 reset($logEntries),
                 $headers,
@@ -160,7 +190,7 @@ class ApiClient
         $batchUrl = $this->buildUrl($this->logEndpoint, $this->logPath.'/batch');
         $dispatched = false;
         foreach (array_chunk($logEntries, self::MAX_LOG_BATCH_SIZE) as $chunk) {
-            $this->dispatcher->post($batchUrl, ['logs' => array_values($chunk)], $headers);
+            $this->logDispatcher->post($batchUrl, ['logs' => array_values($chunk)], $headers);
             $dispatched = true;
         }
 
@@ -222,7 +252,13 @@ class ApiClient
     public function flush(): void
     {
         // Cap at 2 s: the post-response flush must not stall FPM worker recycling.
-        $this->dispatcher->flushAndComplete(min($this->timeout, 2.0));
+        $cap = min($this->timeout, 2.0);
+        $this->dispatcher->flushAndComplete($cap);
+        // Drain the dedicated log dispatcher too (no-op if it is the same instance or
+        // has no pending handles).
+        if ($this->logDispatcher !== $this->dispatcher) {
+            $this->logDispatcher->flushAndComplete($cap);
+        }
     }
 
     /**
@@ -275,10 +311,9 @@ class ApiClient
      * Parse the DSN into the platform endpoint base URL.
      *
      * NOTE: This is the CLIENT-INTERNAL parser, deliberately distinct from the
-     * host-facing {@see DsnGenerator} (which the platform's project-provisioning
-     * commands/fixtures use to GENERATE DSNs). They serve opposite directions of
-     * the same format; the generator is not a bundle service here, and reusing it
-     * would require changing this class's constructor contract, so the two coexist.
+     * host-facing DSN generation the platform's project-provisioning
+     * commands/fixtures perform. They serve opposite directions of the same
+     * format and live on opposite sides of the wire (platform vs. client bundle).
      *
      * DSN format: {protocol}://{host}/{projectId}. We validate that a project-id
      * path segment is present (it guards malformed DSNs) but do not otherwise use

@@ -1,7 +1,7 @@
 import { CircuitBreaker } from './circuit-breaker.js';
 import { StorageQueue } from './storage-queue.js';
 import { RateLimiter } from './rate-limiter.js';
-import { DEFAULT_SCRUB_FIELDS } from './scrub-fields.js';
+import { DEFAULT_SCRUB_FIELDS, scrubUrlQueryValues } from './scrub-fields.js';
 import { hashString } from './util/hash.js';
 
 /**
@@ -532,48 +532,7 @@ export class Transport {
      * @returns {string} URL with sensitive query values redacted
      */
     scrubUrlValue(value, scrubPatterns) {
-        try {
-            const hashIndex = value.indexOf('#');
-            const fragment = hashIndex !== -1 ? value.slice(hashIndex) : '';
-            const beforeFragment = hashIndex !== -1 ? value.slice(0, hashIndex) : value;
-
-            const qIndex = beforeFragment.indexOf('?');
-            if (qIndex === -1) {
-                return value; // No query component; nothing to scrub.
-            }
-
-            const base = beforeFragment.slice(0, qIndex + 1);
-            const query = beforeFragment.slice(qIndex + 1);
-            if (query === '') {
-                return value;
-            }
-
-            const isSensitive = (name) =>
-                scrubPatterns.some(pattern => name.toLowerCase().includes(pattern.toLowerCase()));
-
-            const scrubbedPairs = query.split('&').map((pair) => {
-                if (pair === '') {
-                    return pair;
-                }
-                const eqIndex = pair.indexOf('=');
-                let rawName;
-                try {
-                    rawName = decodeURIComponent(eqIndex === -1 ? pair : pair.slice(0, eqIndex));
-                } catch {
-                    rawName = eqIndex === -1 ? pair : pair.slice(0, eqIndex);
-                }
-                if (!isSensitive(rawName)) {
-                    return pair;
-                }
-                const namePart = eqIndex === -1 ? pair : pair.slice(0, eqIndex);
-                return `${namePart}=[REDACTED]`;
-            });
-
-            return `${base}${scrubbedPairs.join('&')}${fragment}`;
-        } catch {
-            // Fail safe: never echo back a URL that may carry a sensitive value.
-            return '[REDACTED]';
-        }
+        return scrubUrlQueryValues(value, scrubPatterns);
     }
 
     /**
@@ -714,35 +673,62 @@ export class Transport {
      *
      * sendBeacon cannot set request headers, so (like sendRecoverySession) the
      * API key is carried in the request BODY. The ingestion endpoint accepts a
-     * single flat error payload - NOT a `{dsn, errors:[]}` envelope - so we post
-     * the most recent error as a flat payload with `apiKey` added. Remaining
-     * queued errors are left for the next session's retry flush.
+     * single flat error payload - NOT a `{dsn, errors:[]}` envelope - so we issue
+     * ONE beacon per queued error (each a flat payload with `apiKey` added),
+     * bounded to a small batch so unload stays fast and we don't exceed the
+     * browser's sendBeacon size budget. Only payloads the browser accepts are
+     * removed from the queues; anything not transmitted (beacon refused or batch
+     * cap reached) is LEFT for the next session's retry flush, so no error is
+     * silently dropped (JS-4).
      */
     flushWithBeacon() {
         try {
-            const allErrors = [...this.queue, ...this.storageQueue.getAll()];
+            const inMemory = [...this.queue];
+            const stored = this.storageQueue.getAll();
+            const allErrors = [...inMemory, ...stored];
             if (allErrors.length === 0) {
                 return;
             }
 
-            // Beacon fires once and best-effort: send the most recent error in
-            // the shape the ingest endpoint validates, with body-based auth.
-            const mostRecent = allErrors[allErrors.length - 1];
-            const beaconPayload = { ...mostRecent, apiKey: this.apiKey };
+            // Bound the unload work: send at most this many beacons. Remaining
+            // errors stay queued and are retried next session.
+            const maxBeacons = Math.min(allErrors.length, 10);
 
-            const blob = new Blob([JSON.stringify(beaconPayload)], {
-                type: 'application/json',
-            });
+            let sentCount = 0;
+            for (let i = 0; i < maxBeacons; i++) {
+                const payload = allErrors[i];
+                const beaconPayload = { ...payload, apiKey: this.apiKey };
 
-            const sent = navigator.sendBeacon(this.dsn.endpoint, blob);
+                const blob = new Blob([JSON.stringify(beaconPayload)], {
+                    type: 'application/json',
+                });
 
-            if (sent) {
-                this.storageQueue.clear();
-                this.queue = [];
-
-                if (this.config.debug) {
-                    console.warn('ApplicationLogger: Flushed 1 error via Beacon API');
+                const sent = navigator.sendBeacon(this.dsn.endpoint, blob);
+                if (!sent) {
+                    // Browser refused (queue full / too large). Stop here and
+                    // leave this and all remaining errors queued for retry.
+                    break;
                 }
+                sentCount++;
+            }
+
+            if (sentCount === 0) {
+                return; // Nothing accepted; leave queues untouched.
+            }
+
+            // Remove ONLY the transmitted items. In-memory queue entries come
+            // first in allErrors, so consume them before the stored ones.
+            const fromMemory = Math.min(sentCount, this.queue.length);
+            this.queue = this.queue.slice(fromMemory);
+
+            let fromStorage = sentCount - fromMemory;
+            while (fromStorage > 0) {
+                this.storageQueue.dequeue();
+                fromStorage--;
+            }
+
+            if (this.config.debug) {
+                console.warn(`ApplicationLogger: Flushed ${sentCount} error(s) via Beacon API`);
             }
         } catch (error) {
             // Errors remain queued for next session on failure.

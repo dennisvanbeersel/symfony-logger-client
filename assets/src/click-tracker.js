@@ -27,6 +27,9 @@ export class ClickTracker {
         this.sessionManager = sessionManager;
         this.config = config;
         this.isInstalled = false;
+        // Retained bound click handler so cleanup() can removeEventListener the
+        // exact same reference it registered (anonymous handlers can't be removed).
+        this.boundClickHandler = null;
 
         // Initialize DOM serializer with configurable throttling
         const throttleMs = Math.max(config.snapshotThrottleMs || 1000, 500); // Min 500ms
@@ -66,10 +69,12 @@ export class ClickTracker {
         }
 
         try {
-            // Track clicks
-            document.addEventListener('click', (event) => {
+            // Track clicks. Keep the bound reference so cleanup() can remove it
+            // (capture-phase listener; must match the same fn + capture flag).
+            this.boundClickHandler = (event) => {
                 this.captureClick(event);
-            }, true);
+            };
+            document.addEventListener('click', this.boundClickHandler, true);
 
             this.isInstalled = true;
 
@@ -310,10 +315,20 @@ export class ClickTracker {
      */
     cleanup() {
         try {
+            // Remove the capture-phase click listener (same fn + capture flag as
+            // install) so re-init / teardown doesn't leak a stacked listener.
+            if (this.boundClickHandler) {
+                document.removeEventListener('click', this.boundClickHandler, true);
+                this.boundClickHandler = null;
+            }
+
             // Clear DOM serializer throttle timer
             if (this.domSerializer && this.domSerializer.clearThrottle) {
                 this.domSerializer.clearThrottle();
             }
+
+            // Allow a subsequent install() to re-register cleanly.
+            this.isInstalled = false;
 
             if (this.config.debug) {
                 console.warn('ClickTracker: Cleanup complete');

@@ -255,4 +255,126 @@ final class CircuitBreakerTest extends TestCase
         $this->assertEquals('closed', $state['state']);
         $this->assertEquals(0, $state['failureCount']);
     }
+
+    /**
+     * ASYNC-1 guard: a stale-CLOSED worker recording a success must NOT downgrade a
+     * sibling worker's more-recently-persisted OPEN circuit back to CLOSED.
+     *
+     * Two breakers share one cache (two FrankenPHP workers). Worker A trips the
+     * circuit OPEN. Worker B still holds a boot-time CLOSED snapshot in memory and
+     * then records a success — it must refresh-then-mutate and leave the persisted
+     * circuit OPEN rather than clobbering it.
+     */
+    public function testSuccessOnStaleClosedWorkerDoesNotDowngradePersistedOpen(): void
+    {
+        // Worker B boots first and caches a CLOSED snapshot in memory.
+        $workerB = $this->createCircuitBreaker(failureThreshold: 1, timeout: 60);
+        $this->assertFalse($workerB->isOpen());
+
+        // Worker A trips the circuit OPEN and persists it to the shared cache.
+        $workerA = $this->createCircuitBreaker(failureThreshold: 1, timeout: 60);
+        $workerA->recordFailure();
+        $this->assertTrue($workerA->isOpen());
+
+        // Worker B, still believing it is CLOSED in memory, records a success.
+        // It must observe the sibling's OPEN and refuse to downgrade it.
+        $workerB->recordSuccess();
+
+        // Both the local view and the shared cache must remain OPEN.
+        $this->assertTrue($workerB->isOpen());
+
+        $observer = $this->createCircuitBreaker(failureThreshold: 1, timeout: 60);
+        $this->assertTrue($observer->isOpen());
+        $this->assertEquals('open', $observer->getState()['state']);
+    }
+
+    /**
+     * ASYNC-1 guard: a failure recorded by a stale-CLOSED worker against a circuit a
+     * sibling already opened is a no-op (must not reset openedAt / counters).
+     */
+    public function testFailureOnStaleClosedWorkerLeavesPersistedOpenIntact(): void
+    {
+        $workerB = $this->createCircuitBreaker(failureThreshold: 1, timeout: 60);
+        $this->assertFalse($workerB->isOpen());
+
+        $workerA = $this->createCircuitBreaker(failureThreshold: 1, timeout: 60);
+        $workerA->recordFailure();
+        $openedAt = $workerA->getState()['openedAt'];
+        $this->assertNotNull($openedAt);
+
+        // Worker B records a failure while holding a stale CLOSED snapshot.
+        $workerB->recordFailure();
+
+        // Circuit stays OPEN with the original openedAt preserved.
+        $observer = $this->createCircuitBreaker(failureThreshold: 1, timeout: 60);
+        $this->assertTrue($observer->isOpen());
+        $this->assertEquals($openedAt, $observer->getState()['openedAt']);
+    }
+
+    /**
+     * ASYNC-2 guard: HALF_OPEN admission stops at maxHalfOpenAttempts so concurrent
+     * callers cannot over-admit probes against a recovering API.
+     */
+    public function testHalfOpenAdmissionIsCappedAtMaxAttempts(): void
+    {
+        // Open the circuit, then force a HALF_OPEN transition via reset()->halfOpen
+        // semantics: we use a short timeout and manipulate the shared state directly.
+        $cache = new ArrayAdapter();
+        $item = $cache->getItem('application_logger.circuit_breaker');
+        $item->set([
+            'state' => 'half_open',
+            'failureCount' => 0,
+            'openedAt' => time(),
+            'halfOpenAttempts' => 0,
+        ]);
+        $cache->save($item);
+
+        $breaker = new CircuitBreaker(true, 5, 60, 2, $cache);
+
+        // First two probes are admitted (cap = 2).
+        $this->assertTrue($breaker->allowRequest());
+        $this->assertTrue($breaker->allowRequest());
+
+        // Third probe is refused: cap reached, no further admission.
+        $this->assertFalse($breaker->allowRequest());
+        $this->assertFalse($breaker->allowRequest());
+
+        $this->assertEquals(2, $breaker->getState()['halfOpenAttempts']);
+    }
+
+    // -------------------------------------------------------------------------
+    // ASYNC-4: per-endpoint isolation via distinct cache keys
+    // -------------------------------------------------------------------------
+
+    public function testDistinctCacheKeysIsolateBreakerState(): void
+    {
+        // Two breakers over ONE shared cache pool but with DIFFERENT cache keys (the
+        // error/session vs log-aggregation split) must have INDEPENDENT state: tripping
+        // the log breaker must not open the error breaker.
+        $cache = new ArrayAdapter();
+
+        $logBreaker = new CircuitBreaker(true, 2, 60, 1, $cache, 'application_logger.circuit_breaker.log');
+        $logBreaker->recordFailure();
+        $logBreaker->recordFailure();
+        $this->assertTrue($logBreaker->isOpen(), 'log breaker must trip on its own failures');
+
+        // Constructed AFTER the failures so it loads its own (untouched) key, not a stale snapshot.
+        $errorBreaker = new CircuitBreaker(true, 2, 60, 1, $cache, 'application_logger.circuit_breaker');
+        $this->assertFalse($errorBreaker->isOpen(), 'error breaker (distinct key) must stay closed');
+    }
+
+    public function testSameCacheKeySharesState(): void
+    {
+        // BC: two breakers with the DEFAULT (same) cache key share state.
+        $cache = new ArrayAdapter();
+
+        $a = new CircuitBreaker(true, 2, 60, 1, $cache);
+        $a->recordFailure();
+        $a->recordFailure();
+        $this->assertTrue($a->isOpen());
+
+        // Fresh instance loads the shared OPEN state at construction.
+        $b = new CircuitBreaker(true, 2, 60, 1, $cache);
+        $this->assertTrue($b->isOpen(), 'breakers sharing a cache key must share state');
+    }
 }

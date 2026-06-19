@@ -9,7 +9,7 @@ services:
         arguments:
             $scrubFields: '%application_logger.scrub_fields%'
 
-    # Circuit Breaker - prevents repeated calls to failing service
+    # Circuit Breaker - prevents repeated calls to a failing service (error/session path)
     ApplicationLogger\Bundle\Service\CircuitBreaker:
         arguments:
             $enabled: '%application_logger.circuit_breaker.enabled%'
@@ -17,6 +17,20 @@ services:
             $timeout: '%application_logger.circuit_breaker.timeout%'
             $maxHalfOpenAttempts: '%application_logger.circuit_breaker.half_open_attempts%'
             $cache: '@cache.app'
+
+    # Dedicated Circuit Breaker for the LOG-aggregation path. A distinct cache key gives
+    # it state INDEPENDENT of the error/session breaker, so a failing/slow log collector
+    # trips its own breaker (shedding load) instead of being masked by healthy platform
+    # traffic resetting a shared breaker.
+    application_logger.circuit_breaker.log:
+        class: ApplicationLogger\Bundle\Service\CircuitBreaker
+        arguments:
+            $enabled: '%application_logger.circuit_breaker.enabled%'
+            $failureThreshold: '%application_logger.circuit_breaker.failure_threshold%'
+            $timeout: '%application_logger.circuit_breaker.timeout%'
+            $maxHalfOpenAttempts: '%application_logger.circuit_breaker.half_open_attempts%'
+            $cache: '@cache.app'
+            $cacheKey: 'application_logger.circuit_breaker.log'
 
     # API Client - sends errors AND logs to platform with resilience features
     ApplicationLogger\Bundle\Service\ApiClient:
@@ -38,6 +52,8 @@ services:
             # Runtime kill-switch: no outbound telemetry when disabled (handles env-gated
             # enabled that can't be resolved at container compile time).
             $enabled: '%application_logger.enabled%'
+            # Independent breaker for the log path (see service above).
+            $logCircuitBreaker: '@application_logger.circuit_breaker.log'
 
     # Context Collector - gathers request/user/server context
     ApplicationLogger\Bundle\Service\ContextCollector:
@@ -97,6 +113,22 @@ services:
             $batchSize: '%application_logger.log_batch_size%'
             $maxBuffer: '%application_logger.max_log_buffer%'
 
+    # CSP Nonce Provider - resolves + escapes the CSP nonce for injected <script> tags
+    ApplicationLogger\Bundle\Twig\CspNonceProvider:
+        arguments:
+            $requestStack: '@request_stack'
+
+    # Script Renderer - owns the JS SDK <script> generation (SRP, extracted from the
+    # Twig extension). Emits byte-identical output via the CSP nonce provider.
+    ApplicationLogger\Bundle\Twig\ScriptRenderer:
+        arguments:
+            $nonceProvider: '@ApplicationLogger\Bundle\Twig\CspNonceProvider'
+            $security: '@?security.helper'
+            $logger: '@?logger'
+            # Optional: when AssetMapper is present, the SDK module is imported from its
+            # resolved public URL so no host importmap entry is required (works on install).
+            $assetMapper: '@?asset_mapper'
+
     # Twig Extension - provides application_logger_init() function
     ApplicationLogger\Bundle\Twig\ApplicationLoggerExtension:
         arguments:
@@ -122,12 +154,9 @@ services:
                     session_timeout_minutes: '%application_logger.session_replay.session_timeout_minutes%'
                     max_buffer_size_mb: '%application_logger.session_replay.max_buffer_size_mb%'
                     expose_api: '%application_logger.session_replay.expose_api%'
-            $security: '@?security.helper'
+            $scriptRenderer: '@ApplicationLogger\Bundle\Twig\ScriptRenderer'
             $logger: '@?logger'
             $requestStack: '@request_stack'
-            # Optional: when AssetMapper is present, the SDK module is imported from its
-            # resolved public URL so no host importmap entry is required (works on install).
-            $assetMapper: '@?asset_mapper'
         tags:
             - { name: twig.extension }
 
@@ -138,6 +167,10 @@ services:
     ApplicationLogger\Bundle\EventSubscriber\FlushTelemetrySubscriber:
         arguments:
             $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
+            # Flush the buffered log-aggregation records at kernel.terminate (post-response),
+            # so the log path is breaker-gated and drained at a controlled point rather than
+            # at PHP shutdown where the cache pool may already be gone.
+            $logHandler: '@?ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler'
         tags:
             - { name: kernel.event_subscriber }
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ApplicationLogger\Bundle\EventSubscriber;
 
+use ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler;
 use ApplicationLogger\Bundle\Service\ApiClient;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpKernel\Event\TerminateEvent;
@@ -45,8 +46,10 @@ use Symfony\Component\HttpKernel\KernelEvents;
  */
 final readonly class FlushTelemetrySubscriber implements EventSubscriberInterface
 {
-    public function __construct(private readonly ApiClient $apiClient)
-    {
+    public function __construct(
+        private ApiClient $apiClient,
+        private ?ApplicationLoggerHandler $logHandler = null,
+    ) {
     }
 
     public static function getSubscribedEvents(): array
@@ -63,6 +66,18 @@ final readonly class FlushTelemetrySubscriber implements EventSubscriberInterfac
     public function onKernelTerminate(TerminateEvent $_event): void
     {
         try {
+            // Flush buffered log-aggregation records FIRST, at this controlled
+            // post-response point, so the log path gets the same deferred,
+            // circuit-breaker-gated, bounded-timeout delivery as the error path.
+            //
+            // Previously the handler only flushed its buffer in __destruct (PHP
+            // shutdown). That ran AFTER kernel.terminate, when the cache pool may
+            // already be torn down — so circuit-breaker failures recorded for a
+            // slow/unreachable collector did NOT persist, the breaker never opened,
+            // and every request that shipped logs kept paying the full per-flush
+            // timeout. Draining here (cache still live) lets the breaker shed load,
+            // and on real FPM/FrankenPHP this runs after the response is flushed.
+            $this->logHandler?->flushLogs();
             $this->apiClient->flush();
         } catch (\Throwable) {
             // CRITICAL: Never let telemetry flush errors affect the host application.

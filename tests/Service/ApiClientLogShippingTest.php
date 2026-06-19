@@ -124,6 +124,23 @@ final class ApiClientLogShippingTest extends TestCase
         $this->assertFalse($client->sendLog(['message' => 'x']));
     }
 
+    public function testEmptyStringLogEndpointOrTokenNoOps(): void
+    {
+        // Regression (CFG-01): env placeholders resolve to '' (not null) when unset, so an
+        // empty endpoint/token must no-op exactly like null — NOT build a malformed URL and
+        // penalise the breaker. The base config wires these to %env()% with '' defaults.
+        $http = new MockHttpClient(function (): void {
+            $this->fail('No HTTP request may be made when log aggregation is empty/unconfigured');
+        });
+
+        $emptyEndpoint = $this->client($http, $this->breaker(), logEndpoint: '', logToken: 'sk_log_abc123');
+        $this->assertFalse($emptyEndpoint->sendLog(['message' => 'x', 'severity' => 'error']));
+        $this->assertFalse($emptyEndpoint->sendLogs([['message' => 'a'], ['message' => 'b']]));
+
+        $emptyToken = $this->client($http, $this->breaker(), logEndpoint: 'https://acme.logs.applogger.eu', logToken: '');
+        $this->assertFalse($emptyToken->sendLog(['message' => 'y', 'severity' => 'error']));
+    }
+
     public function testErrorsTargetVersionedApiV1ErrorsEndpoint(): void
     {
         $captured = [];
@@ -176,6 +193,53 @@ final class ApiClientLogShippingTest extends TestCase
         $state = $breaker->getState();
         $this->assertSame('closed', $state['state']);
         $this->assertSame(0, $state['failureCount']);
+    }
+
+    public function testLogPathUsesAnIndependentCircuitBreakerFromErrors(): void
+    {
+        // Regression (ASYNC-4): a failing log collector must trip its OWN breaker and
+        // shed load, WITHOUT a healthy error/session endpoint resetting a shared breaker
+        // (which previously masked the outage and kept paying the per-flush timeout).
+        $errorBreaker = $this->breaker(enabled: true); // platform path
+        $logBreaker = $this->breaker(enabled: true);   // collector path (threshold 3)
+
+        // Errors succeed (202); log sends fail at the transport layer.
+        $http = new MockHttpClient(static function (string $method, string $url): MockResponse {
+            if (str_contains($url, '/v1/logs')) {
+                return new MockResponse('', ['error' => 'Connection refused']);
+            }
+
+            return new MockResponse('', ['http_code' => 202]);
+        });
+
+        $client = new ApiClient(
+            'https://api.applogger.eu/b6d8ed85-c0af-4c02-b6bb-bfb0f3609b37',
+            'pk_error_key',
+            2.0,
+            0,
+            true,
+            $errorBreaker,
+            null,
+            false,
+            $http,
+            '/api/v1/errors',
+            'https://acme.logs.applogger.eu',
+            'sk_log_abc123',
+            '/v1/logs',
+            true,
+            $logBreaker,
+        );
+
+        // Interleave healthy errors with failing logs. The error successes must NOT
+        // keep the log breaker closed.
+        for ($i = 0; $i < 3; ++$i) {
+            $client->sendError(['message' => 'ok', 'type' => 'E', 'file' => 'f', 'line' => 1, 'stack_trace' => []]);
+            $client->sendLog(['message' => 'fail', 'severity' => 'error']);
+        }
+
+        $this->assertTrue($logBreaker->isOpen(), 'Log breaker must trip on a failing collector');
+        $this->assertFalse($errorBreaker->isOpen(), 'Error breaker must stay closed while the platform is healthy');
+        $this->assertSame(0, $errorBreaker->getState()['failureCount'], 'Healthy error path must not accrue failures from the failing log path');
     }
 
     public function testAsyncModeDoesNotBlockWithRetriesConfigured(): void

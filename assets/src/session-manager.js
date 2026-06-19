@@ -266,19 +266,37 @@ export class SessionManager {
      */
     setupPageTransitionTracking() {
         try {
-            // Track history API navigation (pushState, replaceState)
-            const originalPushState = history.pushState;
-            const originalReplaceState = history.replaceState;
+            // Track history API navigation (pushState, replaceState).
+            // Guard against double-wrapping by THIS module on re-init / HMR (JS-2):
+            // a per-module sentinel ensures we wrap at most once. A distinct
+            // sentinel from BreadcrumbCollector's is used so both modules' wrappers
+            // can coexist (one may layer over the other) without losing behavior.
+            // The sentinel carries the original ref for teardown.
+            if (!history.pushState._appLoggerSessionWrapped) {
+                const originalPushState = history.pushState;
+                this._originalPushState = originalPushState;
 
-            history.pushState = (...args) => {
-                originalPushState.apply(history, args);
-                this.handleNavigationChange();
-            };
+                const wrappedPushState = (...args) => {
+                    originalPushState.apply(history, args);
+                    this.handleNavigationChange();
+                };
+                wrappedPushState._appLoggerSessionWrapped = true;
+                wrappedPushState._appLoggerOriginal = originalPushState;
+                history.pushState = wrappedPushState;
+            }
 
-            history.replaceState = (...args) => {
-                originalReplaceState.apply(history, args);
-                this.handleNavigationChange();
-            };
+            if (!history.replaceState._appLoggerSessionWrapped) {
+                const originalReplaceState = history.replaceState;
+                this._originalReplaceState = originalReplaceState;
+
+                const wrappedReplaceState = (...args) => {
+                    originalReplaceState.apply(history, args);
+                    this.handleNavigationChange();
+                };
+                wrappedReplaceState._appLoggerSessionWrapped = true;
+                wrappedReplaceState._appLoggerOriginal = originalReplaceState;
+                history.replaceState = wrappedReplaceState;
+            }
 
             // Track popstate (back/forward buttons)
             window.addEventListener('popstate', () => {

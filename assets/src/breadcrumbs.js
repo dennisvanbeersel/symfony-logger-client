@@ -6,6 +6,8 @@
  * captures it and sends to API. This provides zero-config tracking for
  * the common pattern: .catch(err => console.error('Failed:', err))
  */
+import { scrubUrlQueryValues } from './scrub-fields.js';
+
 export class BreadcrumbCollector {
     constructor(maxBreadcrumbs = 50, errorCaptureCallback = null) {
         this.breadcrumbs = [];
@@ -69,29 +71,47 @@ export class BreadcrumbCollector {
             });
         }, true);
 
-        // Track navigation
-        const originalPushState = history.pushState;
-        const originalReplaceState = history.replaceState;
+        // Track navigation. Guard against double-wrapping by THIS module: a
+        // re-init / HMR cycle must not stack a second breadcrumb wrapper on top
+        // of our own (JS-2). A per-module sentinel is used (not a shared one) so
+        // SessionManager's distinct navigation wrapper can still layer over ours
+        // without either module losing its behavior. The sentinel also carries
+        // the original ref so it can be unwrapped on teardown.
+        if (!history.pushState._appLoggerBreadcrumbWrapped) {
+            const originalPushState = history.pushState;
+            this._originalPushState = originalPushState;
 
-        history.pushState = (...args) => {
-            this.add({
-                type: 'navigation',
-                category: 'navigation',
-                message: `Navigated to ${args[2]}`,
-                data: { to: args[2] },
-            });
-            return originalPushState.apply(history, args);
-        };
+            const wrappedPushState = (...args) => {
+                this.add({
+                    type: 'navigation',
+                    category: 'navigation',
+                    message: `Navigated to ${args[2]}`,
+                    data: { to: args[2] },
+                });
+                return originalPushState.apply(history, args);
+            };
+            wrappedPushState._appLoggerBreadcrumbWrapped = true;
+            wrappedPushState._appLoggerOriginal = originalPushState;
+            history.pushState = wrappedPushState;
+        }
 
-        history.replaceState = (...args) => {
-            this.add({
-                type: 'navigation',
-                category: 'navigation',
-                message: `Replaced state ${args[2]}`,
-                data: { to: args[2] },
-            });
-            return originalReplaceState.apply(history, args);
-        };
+        if (!history.replaceState._appLoggerBreadcrumbWrapped) {
+            const originalReplaceState = history.replaceState;
+            this._originalReplaceState = originalReplaceState;
+
+            const wrappedReplaceState = (...args) => {
+                this.add({
+                    type: 'navigation',
+                    category: 'navigation',
+                    message: `Replaced state ${args[2]}`,
+                    data: { to: args[2] },
+                });
+                return originalReplaceState.apply(history, args);
+            };
+            wrappedReplaceState._appLoggerBreadcrumbWrapped = true;
+            wrappedReplaceState._appLoggerOriginal = originalReplaceState;
+            history.replaceState = wrappedReplaceState;
+        }
 
         // Track console messages
         this.wrapConsole();
@@ -216,15 +236,19 @@ export class BreadcrumbCollector {
                         // Handle objects (try JSON serialization, fallback to string)
                         if (typeof arg === 'object') {
                             try {
-                                return JSON.stringify(arg);
+                                // Redact sensitive URL query VALUES embedded in the
+                                // serialized object (e.g. {url: '/api?token=abc'}).
+                                return scrubUrlQueryValues(JSON.stringify(arg));
                             } catch {
                                 // Circular reference or non-serializable
                                 return Object.prototype.toString.call(arg);
                             }
                         }
 
-                        // Primitives
-                        return String(arg);
+                        // Primitives: a string arg may itself be a URL carrying a
+                        // secret query value (?token=...), so scrub it too. Mirrors
+                        // the fetch breadcrumb fix (SEC-01/JS-10).
+                        return scrubUrlQueryValues(String(arg));
                     });
 
                     this.add({
@@ -252,9 +276,15 @@ export class BreadcrumbCollector {
         const originalFetch = window.fetch;
 
         window.fetch = async (...args) => {
-            const url = typeof args[0] === 'string' ? args[0] : args[0].url;
+            const rawUrl = typeof args[0] === 'string' ? args[0] : args[0].url;
             const method = args[1]?.method || 'GET';
             const startTime = Date.now();
+
+            // Redact sensitive query VALUES (e.g. ?token=...) before they land in
+            // the breadcrumb message/data. transport.scrubObject only URL-scrubs
+            // payload keys in URL_VALUE_KEYS, so an unscrubbed URL here would ship
+            // verbatim inside the breadcrumb trail (SEC-01/JS-10).
+            const url = scrubUrlQueryValues(rawUrl);
 
             try {
                 const response = await originalFetch.apply(window, args);

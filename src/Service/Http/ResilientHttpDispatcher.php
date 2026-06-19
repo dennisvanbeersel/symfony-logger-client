@@ -254,19 +254,25 @@ final class ResilientHttpDispatcher
             return false;
         }
 
-        if (!$this->circuitBreaker->allowRequest()) {
-            if ($this->shouldLog()) {
-                $this->logger?->debug('ApplicationLogger: Circuit breaker is open, skipping send');
-            }
+        // Encode BEFORE consuming a circuit-breaker slot. An unencodable payload must
+        // neither penalise the breaker NOR consume a HALF_OPEN probe slot: allowRequest()
+        // increments+persists halfOpenAttempts, and a slot consumed here without a later
+        // recordSuccess()/recordFailure() (because we bail on JsonException) would, now
+        // that HALF_OPEN admission is capped, leave the breaker wedged in HALF_OPEN until
+        // the cache entry expires. Encoding first sidesteps that entirely.
+        try {
+            $jsonBody = json_encode($payload, \JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            // Unencodable payload - drop it, do not penalise or perturb the circuit breaker.
+            $this->logFailure('Failed to JSON encode payload', $e);
 
             return false;
         }
 
-        try {
-            $jsonBody = json_encode($payload, \JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            // Unencodable payload - drop it, do not penalise the circuit breaker.
-            $this->logFailure('Failed to JSON encode payload', $e);
+        if (!$this->circuitBreaker->allowRequest()) {
+            if ($this->shouldLog()) {
+                $this->logger?->debug('ApplicationLogger: Circuit breaker is open, skipping send');
+            }
 
             return false;
         }

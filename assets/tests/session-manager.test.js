@@ -269,6 +269,16 @@ describe('SessionManager', () => {
 
     describe('Page transition tracking', () => {
         test('setupPageTransitionTracking hooks history API', () => {
+            // Restore any wrappers a prior manager (constructed in beforeEach)
+            // installed so we observe a fresh hook from a clean baseline. The
+            // double-wrap guard (JS-2) otherwise correctly skips re-wrapping.
+            if (window.history.pushState._appLoggerOriginal) {
+                window.history.pushState = window.history.pushState._appLoggerOriginal;
+            }
+            if (window.history.replaceState._appLoggerOriginal) {
+                window.history.replaceState = window.history.replaceState._appLoggerOriginal;
+            }
+
             const originalPushState = window.history.pushState;
             const originalReplaceState = window.history.replaceState;
 
@@ -276,6 +286,8 @@ describe('SessionManager', () => {
 
             expect(window.history.pushState).not.toBe(originalPushState);
             expect(window.history.replaceState).not.toBe(originalReplaceState);
+            expect(window.history.pushState._appLoggerSessionWrapped).toBe(true);
+            expect(window.history.replaceState._appLoggerSessionWrapped).toBe(true);
         });
 
         test('handleNavigationChange tracks page transitions', () => {

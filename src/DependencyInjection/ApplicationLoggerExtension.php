@@ -67,6 +67,14 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
             return;
         }
 
+        // symfony/asset-mapper is require-dev only. When it is absent, prepending
+        // framework.asset_mapper.paths makes FrameworkExtension throw a LogicException
+        // at compile time, breaking the host container. Guard on the component's
+        // availability (mirrors the hasExtension('monolog') guard in prependMonolog).
+        if (!interface_exists(\Symfony\Component\AssetMapper\AssetMapperInterface::class)) {
+            return;
+        }
+
         // Get the bundle directory (two levels up from this file)
         $bundleDir = \dirname(__DIR__, 2);
 
@@ -122,8 +130,12 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
 
         // Error/log endpoint routing parameters
         $container->setParameter('application_logger.endpoint_path', $config['endpoint_path']);
-        $container->setParameter('application_logger.log_endpoint', $config['log_endpoint']);
-        $container->setParameter('application_logger.log_token', $config['log_token']);
+        // Normalize empty-string -> null so log aggregation cleanly no-ops when wired to an
+        // unset %env()% (env placeholders resolve to '' not null, and a present-but-empty
+        // config key does NOT pick up defaultNull()). Without this, sendLogs() would build a
+        // malformed URL from '' and penalise the log circuit breaker instead of no-opping.
+        $container->setParameter('application_logger.log_endpoint', ('' !== (string) $config['log_endpoint']) ? $config['log_endpoint'] : null);
+        $container->setParameter('application_logger.log_token', ('' !== (string) $config['log_token']) ? $config['log_token'] : null);
         $container->setParameter('application_logger.log_path', $config['log_path']);
         $container->setParameter('application_logger.log_batch_size', $config['log_batch_size']);
         $container->setParameter('application_logger.max_log_buffer', $config['max_log_buffer']);
