@@ -379,9 +379,20 @@ final class ResilientHttpDispatcher
                 'buffer' => false,
             ]);
 
-            $this->recordOutcome($response);
+            // Pass rethrowTransportError: true so a transport-read failure
+            // (connection/DNS/timeout surfacing only when getStatusCode() actually
+            // reads the response) propagates here and the bounded retry below can
+            // re-attempt. Without this, recordOutcome() swallowed the read-exception
+            // and recorded a single failure, so the sync bounded retry was DEAD for
+            // the most common failure class — lazy transport errors. recordOutcome()
+            // does NOT record a breaker outcome when it rethrows; the retry loop owns
+            // the final recordFailure() so each logical send maps to exactly one
+            // breaker outcome (no double-counting).
+            $this->recordOutcome($response, rethrowTransportError: true);
         } catch (ExceptionInterface $e) {
-            // Bounded retry ONLY in sync mode (async never blocks the host app).
+            // Bounded retry ONLY in sync mode (async never blocks the host app). This
+            // now genuinely retries transport-read failures (see rethrow note above),
+            // not just eagerly-thrown request() errors.
             if ($attempt < $this->retryAttempts) {
                 $delay = min(self::MAX_BACKOFF_SECONDS, 2 ** $attempt);
                 usleep((int) ($delay * self::MICROSECONDS_PER_SECOND));
@@ -390,6 +401,8 @@ final class ResilientHttpDispatcher
                 return;
             }
 
+            // Final failure after the retry bound: record ONCE and degrade silently.
+            // NEVER rethrow into the host application (resilience contract).
             $this->circuitBreaker->recordFailure();
             $this->logFailure('Transport error after retries', $e);
         }
@@ -398,8 +411,17 @@ final class ResilientHttpDispatcher
     /**
      * Inspect a (completed or completing) response and drive the circuit breaker.
      * Reads only the status code, never buffers the body.
+     *
+     * @param bool $rethrowTransportError When true, a transport-read failure
+     *                                    (connection/DNS/timeout surfacing at getStatusCode() read time) is
+     *                                    re-thrown to the caller INSTEAD of being recorded+swallowed here. This lets
+     *                                    {@see dispatchSync()} distinguish a transport failure from a server status
+     *                                    code and run its bounded retry — async callers leave this false so they
+     *                                    never throw. When rethrowing, NO breaker outcome is recorded here; the
+     *                                    sync retry loop owns the single final recordFailure() so each logical send
+     *                                    maps to exactly one breaker outcome.
      */
-    private function recordOutcome(ResponseInterface $response): void
+    private function recordOutcome(ResponseInterface $response, bool $rethrowTransportError = false): void
     {
         try {
             // getStatusCode() behaviour depends on the caller:
@@ -423,6 +445,14 @@ final class ResilientHttpDispatcher
                 }
             }
         } catch (ExceptionInterface $e) {
+            // Sync path: let dispatchSync() see the transport failure so its bounded
+            // retry can re-attempt (and own the final recordFailure()). We must NOT
+            // record a breaker outcome here in that case, or a retried-then-failed
+            // send would be counted twice.
+            if ($rethrowTransportError) {
+                throw $e;
+            }
+
             $this->circuitBreaker->recordFailure();
             $this->logFailure('Transport error reading response', $e);
         }

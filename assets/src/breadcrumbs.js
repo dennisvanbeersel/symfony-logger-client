@@ -95,11 +95,16 @@ export class BreadcrumbCollector {
             this._originalPushState = originalPushState;
 
             const wrappedPushState = (...args) => {
+                // GDPR: the destination URL (args[2]) can carry secrets/tokens in its
+                // query string (?token=...). Scrub VALUES before they land in the
+                // breadcrumb message/data — an unscrubbed URL here ships verbatim in
+                // the breadcrumb trail (mirrors the fetch/console fixes, SEC-JS-01).
+                const to = scrubUrlQueryValues(String(args[2] ?? ''));
                 this.add({
                     type: 'navigation',
                     category: 'navigation',
-                    message: `Navigated to ${args[2]}`,
-                    data: { to: args[2] },
+                    message: `Navigated to ${to}`,
+                    data: { to },
                 });
                 return originalPushState.apply(history, args);
             };
@@ -113,11 +118,14 @@ export class BreadcrumbCollector {
             this._originalReplaceState = originalReplaceState;
 
             const wrappedReplaceState = (...args) => {
+                // GDPR: scrub sensitive query VALUES from the destination URL before
+                // it enters the breadcrumb trail (see pushState note, SEC-JS-01).
+                const to = scrubUrlQueryValues(String(args[2] ?? ''));
                 this.add({
                     type: 'navigation',
                     category: 'navigation',
-                    message: `Replaced state ${args[2]}`,
-                    data: { to: args[2] },
+                    message: `Replaced state ${to}`,
+                    data: { to },
                 });
                 return originalReplaceState.apply(history, args);
             };

@@ -8,6 +8,7 @@ use ApplicationLogger\Bundle\Service\CircuitBreaker;
 use ApplicationLogger\Bundle\Service\Http\ResilientHttpDispatcher;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Cache\Adapter\ArrayAdapter;
+use Symfony\Component\HttpClient\Exception\TransportException;
 use Symfony\Contracts\HttpClient\ChunkInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
@@ -130,6 +131,205 @@ final class ResilientHttpDispatcherTest extends TestCase
         $dispatcher->__destruct();
 
         $this->assertTrue($breaker->isOpen(), 'confirmed 5xx at drain must trip the breaker');
+    }
+
+    private function syncDispatcher(
+        CircuitBreaker $breaker,
+        HttpClientInterface $http,
+        int $retryAttempts,
+    ): ResilientHttpDispatcher {
+        return new ResilientHttpDispatcher(
+            timeout: 2.0,
+            retryAttempts: $retryAttempts,
+            async: false,
+            circuitBreaker: $breaker,
+            logger: null,
+            debug: false,
+            httpClient: $http,
+            enabled: true,
+        );
+    }
+
+    /**
+     * SYNC-RETRY: a transient transport-read failure (the lazy connection/DNS/timeout
+     * error that only surfaces when getStatusCode() reads the response) followed by a
+     * success must be RETRIED and end in success. Previously recordOutcome() swallowed
+     * the read-exception, so dispatchSync() could not tell a transport failure from a
+     * server status and never retried — the bounded sync retry was dead for this most
+     * common failure class.
+     */
+    public function testSyncTransientTransportFailureThenSuccessIsRetried(): void
+    {
+        $breaker = $this->breaker();
+        // First read throws a TransportException; second read returns 202.
+        $http = new SequencedHttpClient([
+            new ReadFailureResponse(),       // attempt 0 -> transport-read failure
+            new StatusResponse(202),         // attempt 1 -> success
+        ]);
+
+        $dispatcher = $this->syncDispatcher($breaker, $http, retryAttempts: 2);
+
+        $result = $dispatcher->post('https://x/y', ['event' => 'test'], []);
+
+        $this->assertTrue($result, 'post() reports a request was dispatched');
+        $this->assertSame(2, $http->requestCount, 'the failed attempt must be retried exactly once');
+
+        $state = $breaker->getState();
+        $this->assertSame('closed', $state['state'], 'a retried-then-succeeded send must leave the breaker closed');
+        $this->assertSame(0, $state['failureCount'], 'success after retry records no net failure');
+    }
+
+    /**
+     * SYNC-RETRY: a PERSISTENT transport-read failure must be retried up to the bound
+     * and then degrade SILENTLY (never throw into the host), recording exactly ONE
+     * breaker failure for the whole logical send (no double-counting across retries).
+     */
+    public function testSyncPersistentTransportFailureIsBoundedThenSilent(): void
+    {
+        $breaker = $this->breaker();
+        // Every read throws -> all attempts fail.
+        $http = new SequencedHttpClient([
+            new ReadFailureResponse(),
+            new ReadFailureResponse(),
+            new ReadFailureResponse(),
+            new ReadFailureResponse(),
+        ]);
+
+        $dispatcher = $this->syncDispatcher($breaker, $http, retryAttempts: 2);
+
+        // Must NOT throw into the host application.
+        $result = $dispatcher->post('https://x/y', ['event' => 'test'], []);
+
+        $this->assertTrue($result, 'post() never throws and reports dispatch even on persistent failure');
+        // attempt 0 + 2 retries = 3 total attempts.
+        $this->assertSame(3, $http->requestCount, 'attempts must be bounded to 1 + retryAttempts');
+
+        $state = $breaker->getState();
+        $this->assertSame(1, $state['failureCount'], 'one logical send records exactly one breaker failure');
+    }
+}
+
+/**
+ * HttpClient that returns a pre-seeded SEQUENCE of responses (one per request()).
+ * Lets a test simulate "fail then succeed" across the sync bounded-retry loop.
+ */
+final class SequencedHttpClient implements HttpClientInterface
+{
+    public int $requestCount = 0;
+
+    /** @param list<ResponseInterface> $responses */
+    public function __construct(private array $responses)
+    {
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    public function request(string $method, string $url, array $options = []): ResponseInterface
+    {
+        $response = $this->responses[$this->requestCount] ?? end($this->responses);
+        ++$this->requestCount;
+
+        return $response;
+    }
+
+    public function stream(ResponseInterface|iterable $responses, ?float $timeout = null): ResponseStreamInterface
+    {
+        throw new \LogicException('stream() is not used on the sync dispatch path');
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    public function withOptions(array $options): static
+    {
+        return $this;
+    }
+}
+
+/**
+ * Response whose getStatusCode() throws a TransportException — simulating a lazy
+ * connection/DNS/timeout error that only surfaces when the status is read (the case
+ * the sync bounded retry previously could not see).
+ */
+final class ReadFailureResponse implements ResponseInterface
+{
+    public function getStatusCode(): int
+    {
+        throw new TransportException('Connection refused');
+    }
+
+    public function getHeaders(bool $throw = true): array
+    {
+        return [];
+    }
+
+    public function getContent(bool $throw = true): string
+    {
+        return '';
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function toArray(bool $throw = true): array
+    {
+        return [];
+    }
+
+    public function cancel(): void
+    {
+    }
+
+    public function getInfo(?string $type = null): mixed
+    {
+        return null;
+    }
+}
+
+/**
+ * Response that returns a fixed HTTP status code from getStatusCode() (no stream()).
+ */
+final class StatusResponse implements ResponseInterface
+{
+    public function __construct(private readonly int $statusCode)
+    {
+    }
+
+    public function getStatusCode(): int
+    {
+        return $this->statusCode;
+    }
+
+    public function getHeaders(bool $throw = true): array
+    {
+        return [];
+    }
+
+    public function getContent(bool $throw = true): string
+    {
+        return '';
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function toArray(bool $throw = true): array
+    {
+        return [];
+    }
+
+    public function cancel(): void
+    {
+    }
+
+    public function getInfo(?string $type = null): mixed
+    {
+        if ('http_code' === $type) {
+            return $this->statusCode;
+        }
+
+        return null;
     }
 }
 

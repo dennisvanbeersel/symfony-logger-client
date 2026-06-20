@@ -112,6 +112,39 @@ describe('BreadcrumbCollector URL credential scrubbing (SEC-01/JS-10)', () => {
         expect(crumb.message).toContain('size=10');
     });
 
+    test('pushState navigation breadcrumb redacts ?token=secret in message and data.to', () => {
+        const breadcrumbs = new BreadcrumbCollector(50);
+        breadcrumbs.install();
+
+        history.pushState({}, '', '/dashboard?token=secret&tab=overview');
+
+        const navCrumb = breadcrumbs.get().find(c => c.category === 'navigation');
+        expect(navCrumb).toBeDefined();
+        expect(navCrumb.message).not.toContain('secret');
+        expect(navCrumb.data.to).not.toContain('secret');
+        expect(navCrumb.message).toContain('token=[REDACTED]');
+        expect(navCrumb.data.to).toContain('token=[REDACTED]');
+        // Non-sensitive structure preserved.
+        expect(navCrumb.message).toContain('/dashboard');
+        expect(navCrumb.message).toContain('tab=overview');
+    });
+
+    test('replaceState navigation breadcrumb redacts ?api_key=secret in message and data.to', () => {
+        const breadcrumbs = new BreadcrumbCollector(50);
+        breadcrumbs.install();
+
+        history.replaceState({}, '', '/profile?api_key=topsecret&view=edit');
+
+        const navCrumb = breadcrumbs.get().find(c => c.category === 'navigation');
+        expect(navCrumb).toBeDefined();
+        expect(navCrumb.message).not.toContain('topsecret');
+        expect(navCrumb.data.to).not.toContain('topsecret');
+        expect(navCrumb.message).toContain('api_key=[REDACTED]');
+        expect(navCrumb.data.to).toContain('api_key=[REDACTED]');
+        expect(navCrumb.message).toContain('/profile');
+        expect(navCrumb.message).toContain('view=edit');
+    });
+
     test('non-URL console strings pass through unchanged', () => {
         const breadcrumbs = new BreadcrumbCollector(50);
         breadcrumbs.install();
