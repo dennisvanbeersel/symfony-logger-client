@@ -313,6 +313,12 @@ export class Transport {
      * @param {boolean} [useBeacon=false] - Use sendBeacon API for reliable unload transmission
      */
     async sendRecoverySession(recoveryPayload, useBeacon = false) {
+        // Hoisted so the abort timer is always cleared in `finally`, even when
+        // the fetch rejects (mirrors sendToApi). The timer is only armed on the
+        // fetch fallback path below; the beacon path leaves these untouched.
+        let timeoutId;
+        const controller = new AbortController();
+
         try {
             // Use dedicated recovery session endpoint
             const endpoint = `${this.dsn.protocol}://${this.dsn.host}/api/v1/errors/recovery-session`;
@@ -352,9 +358,8 @@ export class Transport {
             }
 
             // Fallback to fetch (normal case)
-            // Create AbortController for timeout
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5-second timeout (longer for recovery)
+            // Arm the abort timer (cleared in `finally`)
+            timeoutId = setTimeout(() => controller.abort(), 5000); // 5-second timeout (longer for recovery)
 
             const response = await fetch(endpoint, {
                 method: 'POST',
@@ -366,8 +371,6 @@ export class Transport {
                 body: JSON.stringify(scrubbedPayload),
                 signal: controller.signal,
             });
-
-            clearTimeout(timeoutId);
 
             if (!response.ok) {
                 throw new Error(`Recovery session send failed: ${response.status}`);
@@ -392,6 +395,10 @@ export class Transport {
             }
 
             throw error;
+        } finally {
+            // Always clear the abort timer so a failed fetch can't leak it.
+            // No-op on the beacon path (timeoutId stays undefined).
+            clearTimeout(timeoutId);
         }
     }
 

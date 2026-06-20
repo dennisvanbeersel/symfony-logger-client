@@ -1261,6 +1261,63 @@ describe('Transport', () => {
             expect(transport.storageQueue.size()).toBe(1);
         });
 
+        test('clears the abort timer on a FAILED fetch (no leaked timer)', async () => {
+            if (global.navigator) delete global.navigator.sendBeacon; // no beacon -> fetch
+            mockFetch.mockRejectedValue(new Error('Network down'));
+
+            // Track armed vs cleared timers so a leak is observable.
+            const armed = new Set();
+            const realSetTimeout = global.setTimeout;
+            const realClearTimeout = global.clearTimeout;
+            global.setTimeout = (fn, ms, ...rest) => {
+                const id = realSetTimeout(fn, ms, ...rest);
+                armed.add(id);
+                return id;
+            };
+            global.clearTimeout = (id) => {
+                armed.delete(id);
+                return realClearTimeout(id);
+            };
+
+            try {
+                await expect(
+                    transport.sendRecoverySession({ sessionId: 'sess-leak', events: [] }),
+                ).rejects.toThrow('Network down');
+
+                // The 5s abort timer must have been cleared despite the rejection.
+                expect(armed.size).toBe(0);
+            } finally {
+                global.setTimeout = realSetTimeout;
+                global.clearTimeout = realClearTimeout;
+            }
+        });
+
+        test('clears the abort timer on a successful fetch (no leaked timer)', async () => {
+            if (global.navigator) delete global.navigator.sendBeacon;
+            mockFetch.mockResolvedValue({ ok: true, json: async () => ({ success: true }) });
+
+            const armed = new Set();
+            const realSetTimeout = global.setTimeout;
+            const realClearTimeout = global.clearTimeout;
+            global.setTimeout = (fn, ms, ...rest) => {
+                const id = realSetTimeout(fn, ms, ...rest);
+                armed.add(id);
+                return id;
+            };
+            global.clearTimeout = (id) => {
+                armed.delete(id);
+                return realClearTimeout(id);
+            };
+
+            try {
+                await transport.sendRecoverySession({ sessionId: 'sess-ok', events: [] });
+                expect(armed.size).toBe(0);
+            } finally {
+                global.setTimeout = realSetTimeout;
+                global.clearTimeout = realClearTimeout;
+            }
+        });
+
         test('scrubs sensitive query values in url and nested event.url (fetch branch)', async () => {
             if (global.navigator) delete global.navigator.sendBeacon;
             mockFetch.mockResolvedValue({ ok: true, json: async () => ({ success: true }) });
