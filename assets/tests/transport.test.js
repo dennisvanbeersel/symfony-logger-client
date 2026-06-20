@@ -746,6 +746,68 @@ describe('Transport', () => {
             expect(scrubbed.context.searchParams).toBe('?page=2&size=10');
         });
 
+        // SEC-JS-01/02 follow-up: a BARE RELATIVE URL ("callback?token=abc") has
+        // no scheme and no rooted/dot path prefix, so the old prefix-based
+        // heuristic rejected it (qIndex > 0 but startsWith('/') etc. all false)
+        // and its query secret leaked verbatim under a non-allowlisted key.
+        test('value-scrubs a bare relative URL with a query secret', () => {
+            const payload = {
+                context: {
+                    bareRelative: 'callback?token=leakbare&page=2',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.bareRelative).not.toContain('leakbare');
+            expect(scrubbed.context.bareRelative).toBe('callback?token=[REDACTED]&page=2');
+        });
+
+        test('value-scrubs a multi-segment bare relative path with a query secret', () => {
+            const payload = {
+                context: {
+                    nextUrl: 'v1/users?api_key=leakseg&page=2',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.nextUrl).not.toContain('leakseg');
+            expect(scrubbed.context.nextUrl).toBe('v1/users?api_key=[REDACTED]&page=2');
+        });
+
+        test('a rooted relative path with a query secret is value-scrubbed', () => {
+            // Pre-existing behaviour, kept as a regression guard alongside the
+            // bare-relative additions.
+            const payload = {
+                context: {
+                    rooted: '/path?token=leakroot&page=2',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.rooted).not.toContain('leakroot');
+            expect(scrubbed.context.rooted).toBe('/path?token=[REDACTED]&page=2');
+        });
+
+        test('a non-URL string that merely contains a "?" is left intact', () => {
+            // Must NOT be routed through the query scrubber: the part before the
+            // '?' has whitespace (it is prose, not a path) and there is no
+            // "key=value" pair after it. It is returned byte-for-byte unchanged.
+            const payload = {
+                context: {
+                    note: 'really? I did not know that',
+                    rhetorical: 'what now? nothing=happens here either',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.note).toBe('really? I did not know that');
+            expect(scrubbed.context.rhetorical).toBe('what now? nothing=happens here either');
+        });
+
         // USERINFO redaction (PHP DataScrubber::scrubUrl parity): credentials
         // embedded in the authority ("user:pass@host") must be redacted BEFORE
         // query-value scrubbing, regardless of query content.
@@ -781,6 +843,62 @@ describe('Transport', () => {
             const scrubbed = transport.scrubSensitiveData(payload);
 
             expect(scrubbed.url).toBe('https://app.example.com/users/@alice/profile?page=2');
+        });
+
+        // JS-SCRUB-01: a CREDENTIAL-ONLY URL (userinfo, NO query string) under a
+        // key that is NOT in URL_VALUE_KEYS. The old heuristic only matched
+        // strings with a query component, so this credential leaked verbatim.
+        // The value heuristic now also catches a userinfo authority.
+        test('value-scrubs userinfo in a credential-only URL under a novel key', () => {
+            const payload = {
+                context: {
+                    upstreamUrl: 'https://user:pass@host.example.com/path',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.upstreamUrl).not.toContain('pass');
+            expect(scrubbed.context.upstreamUrl).not.toContain('user:');
+            expect(scrubbed.context.upstreamUrl).toBe('https://[REDACTED]@host.example.com/path');
+        });
+
+        test('value-scrubs userinfo in a scheme-relative credential URL (no query)', () => {
+            const payload = {
+                context: {
+                    proxyTarget: '//svc:topsecret@internal.example/health',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.proxyTarget).not.toContain('topsecret');
+            expect(scrubbed.context.proxyTarget).toBe('//[REDACTED]@internal.example/health');
+        });
+
+        test('credential-only URL with no path still has userinfo redacted under a novel key', () => {
+            const payload = {
+                context: {
+                    backendUri: 'https://user:pass@host.example.com',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.backendUri).not.toContain('pass');
+            expect(scrubbed.context.backendUri).toBe('https://[REDACTED]@host.example.com');
+        });
+
+        test('an "@" in the path under a novel key (no userinfo) is still left intact', () => {
+            const payload = {
+                context: {
+                    mention: 'https://app.example.com/users/@alice/profile',
+                },
+            };
+
+            const scrubbed = transport.scrubSensitiveData(payload);
+
+            expect(scrubbed.context.mention).toBe('https://app.example.com/users/@alice/profile');
         });
     });
 

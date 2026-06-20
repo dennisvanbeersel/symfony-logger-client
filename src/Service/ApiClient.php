@@ -297,6 +297,15 @@ class ApiClient
         $scheme = $parts['scheme'] ?? null;
         $port = $parts['port'] ?? null;
 
+        // A scheme-less or host-less $base (e.g. a misconfigured log_endpoint like
+        // "host/path" — parse_url() treats that as a path, not a host — or "//host"
+        // with no scheme) would otherwise sprintf into a broken "://host" /
+        // "https://". Fall back to appending the path verbatim, mirroring the
+        // parse_url()===false guard above (no-op, never emits a malformed URL).
+        if (null === $scheme || null === $host) {
+            return $base.$path;
+        }
+
         $hostWithPort = $host;
         if (null !== $port) {
             $hostWithPort .= ':'.$port;

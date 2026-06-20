@@ -296,8 +296,13 @@ export class BreadcrumbCollector {
 
             // Stamp the wrapper with a global sentinel + the original ref so a
             // future install() bails (idempotency) and teardown() can unwrap.
+            // JS-MULTI-01: also tag the wrapper with THIS instance as owner so a
+            // second SDK's uninstall() cannot restore the original and silently
+            // leave the still-active first instance without console capture
+            // (mirrors the session-manager history-wrapper owner fix, JS-4).
             wrapped._appLoggerConsoleWrapped = true;
             wrapped._appLoggerOriginal = original;
+            wrapped._appLoggerConsoleOwner = this;
             // eslint-disable-next-line no-console
             console[level] = wrapped;
         });
@@ -366,8 +371,12 @@ export class BreadcrumbCollector {
         };
 
         // Stamp the wrapper so a future install() bails and teardown() can unwrap.
+        // JS-MULTI-01: tag the wrapper with THIS instance as owner so a second
+        // SDK's uninstall() cannot restore the original and leave the still-active
+        // first instance without fetch capture (mirrors the history owner fix).
         wrappedFetch._appLoggerFetchWrapped = true;
         wrappedFetch._appLoggerOriginal = originalFetch;
+        wrappedFetch._appLoggerFetchOwner = this;
         window.fetch = wrappedFetch;
     }
 
@@ -385,19 +394,27 @@ export class BreadcrumbCollector {
             // would stack a duplicate handler and retain the stale instance (JS-3).
             document.removeEventListener('click', this.boundClickHandler, true);
 
-            // Restore console methods if WE wrapped them.
+            // Restore console methods ONLY if the live wrapper belongs to THIS
+            // instance. With two SDK instances the second's wrapper layers over
+            // the first's; tearing down the first must NOT clobber the second's
+            // wrapper (which would break the still-active instance, JS-MULTI-01).
+            // Legacy wrappers (no owner stamp, e.g. an older built dist still in
+            // memory) are treated as owned for BC so teardown stays functional.
             const levels = ['log', 'info', 'warn', 'error', 'debug'];
             levels.forEach(level => {
                 // eslint-disable-next-line no-console
                 const current = console[level];
-                if (current && current._appLoggerConsoleWrapped && current._appLoggerOriginal) {
+                if (current && current._appLoggerConsoleWrapped && current._appLoggerOriginal
+                    && (current._appLoggerConsoleOwner === this || current._appLoggerConsoleOwner === undefined)) {
                     // eslint-disable-next-line no-console
                     console[level] = current._appLoggerOriginal;
                 }
             });
 
-            // Restore fetch if WE wrapped it.
-            if (window.fetch && window.fetch._appLoggerFetchWrapped && window.fetch._appLoggerOriginal) {
+            // Restore fetch ONLY if the live wrapper belongs to THIS instance
+            // (see console note above; legacy un-owned wrappers treated as owned).
+            if (window.fetch && window.fetch._appLoggerFetchWrapped && window.fetch._appLoggerOriginal
+                && (window.fetch._appLoggerFetchOwner === this || window.fetch._appLoggerFetchOwner === undefined)) {
                 window.fetch = window.fetch._appLoggerOriginal;
             }
 

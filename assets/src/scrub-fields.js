@@ -36,11 +36,15 @@ export const DEFAULT_SCRUB_FIELDS = Object.freeze([
 ]);
 
 /**
- * Redact any "//user:pass@host" / "//user@host" userinfo (credentials) in a
- * URL's authority with "//[REDACTED]@host". Only the authority that follows
- * "scheme://" is considered, so an "@" appearing later in the path/query/
- * fragment is left untouched. Returns the URL unchanged when no userinfo is
- * present. Mirrors PHP DataScrubber::scrubUrlUserinfo().
+ * Redact any "user:pass@host" / "user@host" userinfo (credentials) in a URL's
+ * authority with "[REDACTED]@host". The authority that follows "scheme://" OR a
+ * scheme-relative leading "//" is considered, so an "@" appearing later in the
+ * path/query/fragment is left untouched. Returns the URL unchanged when no
+ * userinfo is present. Mirrors PHP DataScrubber::scrubUrlUserinfo().
+ *
+ * JS-SCRUB-01: scheme-relative URLs ("//user:pass@host/path") are now handled
+ * too — the value heuristic in transport.js routes them here, so the redactor
+ * must understand them or the credential would pass through unchanged.
  *
  * @param {string} url - URL string
  * @returns {string} URL with embedded credentials redacted
@@ -50,12 +54,16 @@ export function scrubUrlUserinfo(url) {
         return url;
     }
 
+    let authorityStart;
     const schemePos = url.indexOf('://');
-    if (schemePos === -1) {
+    if (schemePos !== -1) {
+        authorityStart = schemePos + '://'.length;
+    } else if (url.startsWith('//')) {
+        // Scheme-relative URL: the authority follows the leading "//".
+        authorityStart = '//'.length;
+    } else {
         return url;
     }
-
-    const authorityStart = schemePos + '://'.length;
 
     // The authority ends at the first '/', '?' or '#' after "scheme://".
     let authorityEnd = url.length;

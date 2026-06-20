@@ -6,6 +6,7 @@ namespace ApplicationLogger\Bundle\Tests\Service;
 
 use ApplicationLogger\Bundle\Service\ApiClient;
 use ApplicationLogger\Bundle\Service\CircuitBreaker;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -122,6 +123,45 @@ final class ApiClientTest extends TestCase
         $client->sendError(['message' => 'no port']);
 
         $this->assertSame('https://example.com/api/v1/errors', $capturedUrl);
+    }
+
+    /**
+     * @return array<string, array{string, string, string}> [base, path, expected]
+     */
+    public static function schemeLessBaseProvider(): array
+    {
+        return [
+            // PHP-1: scheme-less base parses as a path (no scheme/host). Old code
+            // sprintf'd a broken "://myhost.example.com/v1/logs"; now it appends
+            // the path verbatim.
+            'scheme-less host (parsed as path)' => ['myhost.example.com', '/v1/logs', 'myhost.example.com/v1/logs'],
+            // Scheme-relative base: host present, scheme missing. Old code emitted
+            // "://logs.example.com/v1/logs".
+            'scheme-relative (host, no scheme)' => ['//logs.example.com', '/v1/logs', '//logs.example.com/v1/logs'],
+            // Bare host, no scheme.
+            'bare host no scheme' => ['localhost:9000', '/v1/logs/batch', 'localhost:9000/v1/logs/batch'],
+            // Well-formed base still round-trips through the normal sprintf branch.
+            'well-formed base unchanged' => ['https://logs.example.com', '/v1/logs', 'https://logs.example.com/v1/logs'],
+            'well-formed base with port' => ['http://logs.example.com:8080', '/v1/logs', 'http://logs.example.com:8080/v1/logs'],
+        ];
+    }
+
+    /**
+     * PHP-1: buildUrl() must never emit a malformed "://host" URL when the
+     * configured log_endpoint lacks a scheme and/or host. It now falls back to
+     * appending the path verbatim (a safe no-op) instead.
+     */
+    #[DataProvider('schemeLessBaseProvider')]
+    public function testBuildUrlNeverEmitsBareSchemeSeparator(string $base, string $path, string $expected): void
+    {
+        $client = $this->createClient();
+
+        $method = new \ReflectionMethod(ApiClient::class, 'buildUrl');
+        $built = $method->invoke($client, $base, $path);
+
+        self::assertSame($expected, $built);
+        self::assertStringStartsNotWith('://', $built, 'buildUrl must not produce a scheme-less "://" URL');
+        self::assertStringNotContainsString('://'.$path, $built, 'buildUrl must not drop the host into "://path"');
     }
 
     public function testEmptyDsnDoesNotThrow(): void

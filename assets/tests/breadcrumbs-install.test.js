@@ -260,6 +260,37 @@ describe('BreadcrumbCollector.install() (real jsdom)', () => {
                 breadcrumbs.uninstall();
             }).not.toThrow();
         });
+
+        // JS-MULTI-01: the console/fetch wrappers now carry an OWNER stamp. When
+        // two SDK instances coexist, the FIRST owns the live wrapper (the second
+        // install() bails). The non-owner's uninstall() must NOT restore the
+        // original — otherwise it strips capture from the still-active owner.
+        test('a non-owner uninstall does not unwrap fetch/console owned by another instance', () => {
+            window.fetch = async () => ({ ok: true, status: 200 });
+
+            const first = new BreadcrumbCollector(50);
+            first.install();
+            const ownedFetch = window.fetch;
+            const ownedConsoleError = console.error;
+            expect(ownedFetch._appLoggerFetchOwner).toBe(first);
+            expect(ownedConsoleError._appLoggerConsoleOwner).toBe(first);
+
+            // Second instance installs (bails: wrappers already present) then
+            // tears itself down. It does not own the wrappers, so they must stay.
+            const second = new BreadcrumbCollector(50);
+            second.install();
+            second.uninstall();
+
+            expect(window.fetch).toBe(ownedFetch);
+            expect(console.error).toBe(ownedConsoleError);
+            expect(window.fetch._appLoggerFetchWrapped).toBe(true);
+            expect(console.error._appLoggerConsoleWrapped).toBe(true);
+
+            // The owner can still tear down cleanly.
+            first.uninstall();
+            expect(window.fetch._appLoggerFetchWrapped).toBeUndefined();
+            expect(console.error._appLoggerConsoleWrapped).toBeUndefined();
+        });
     });
 
     // JS-3: uninstall() restored the monkeypatches but never removed the

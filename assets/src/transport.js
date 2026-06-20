@@ -13,16 +13,24 @@ import { hashString } from './util/hash.js';
 const URL_VALUE_KEYS = new Set(['url', 'request_uri', 'requesturi', 'referrer', 'referer', 'originalurl']);
 
 /**
- * Heuristic: does a string look like a URL/URI carrying a query string?
+ * Heuristic: does a string look like a URL/URI that the value-scrubber should
+ * inspect (it carries a query string AND/OR embedded userinfo credentials)?
  *
  * The scrubber is allowlist-by-key (URL_VALUE_KEYS), so every NEW URL-bearing
- * field leaks its query secrets until someone remembers to add the key. This
- * is the recurring root cause behind SEC-JS-01/02. To cover future fields by
- * default, any string value whose shape is "<scheme>://...?..." or a rooted
- * path "/...?..." (i.e. it has a query component) is value-scrubbed regardless
- * of its key. scrubUrlQueryValues only redacts query pairs whose NAME is
- * sensitive, so plain query strings (?page=2) pass through unchanged — making
- * this safe to apply broadly.
+ * field leaks its secrets until someone remembers to add the key. This is the
+ * recurring root cause behind SEC-JS-01/02. To cover future fields by default,
+ * any string value whose shape is "<scheme>://...?..." or a rooted path
+ * "/...?..." (i.e. it has a query component) is value-scrubbed regardless of
+ * its key. scrubUrlValue → scrubUrlQueryValues only redacts query pairs whose
+ * NAME is sensitive, so plain query strings (?page=2) pass through unchanged —
+ * making this safe to apply broadly.
+ *
+ * JS-SCRUB-01: a CREDENTIAL-ONLY URL ("https://user:pass@host/path") has no
+ * query string, so the query-only test above missed it and the embedded
+ * userinfo shipped verbatim under any non-allowlisted key. We now ALSO match a
+ * userinfo authority ("scheme://user:pass@" or a scheme-less "//user:pass@")
+ * even without a '?'; scrubUrlQueryValues always redacts userinfo first, so
+ * routing these strings through it strips the credentials.
  *
  * @param {string} value
  * @returns {boolean}
@@ -32,19 +40,110 @@ function looksLikeUrlWithQuery(value) {
         return false;
     }
     const qIndex = value.indexOf('?');
-    if (qIndex < 0 || qIndex === value.length - 1) {
-        return false; // No query component (or nothing after the '?').
-    }
-    // Query-only reference (a stored location.search like "?token=abc"): qIndex
-    // is 0 and there is no scheme/path before it. Still route it to the
-    // query-value scrubber so a field holding location.search cannot leak a
-    // secret (the scrubber only redacts sensitive NAMES, so "?page=2" passes
-    // through unchanged). Leading "?" is the unambiguous signal.
     if (qIndex === 0) {
+        // Query-only reference (a stored location.search like "?token=abc"):
+        // qIndex is 0 and there is no scheme/path before it. Still route it to
+        // the query-value scrubber so a field holding location.search cannot
+        // leak a secret (the scrubber only redacts sensitive NAMES, so "?page=2"
+        // passes through unchanged). Leading "?" is the unambiguous signal.
         return true;
     }
-    // Absolute URL (scheme://) or rooted/relative path before the query.
-    return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith('/') || value.startsWith('./') || value.startsWith('../');
+    if (qIndex > 0 && qIndex !== value.length - 1) {
+        // Has a non-empty query component: absolute URL (scheme://) or a
+        // rooted/relative path before the query.
+        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith('/') || value.startsWith('./') || value.startsWith('../')) {
+            return true;
+        }
+        // SEC-JS-01/02 follow-up: a BARE RELATIVE URL such as
+        // "callback?token=abc" has neither a scheme nor a rooted/dot path, so the
+        // prefix tests above miss it and its query secret leaked under any
+        // non-allowlisted key. Treat the value as URL-bearing when (a) the part
+        // BEFORE the '?' is a single relative-path token (no whitespace) and (b)
+        // the part AFTER it parses as a real query string (at least one
+        // "name=value" pair). This deliberately does NOT match an innocuous
+        // sentence that merely contains a '?' ("a ? mark and no url"): such text
+        // has spaces before the '?' and no "key=value" pair after it, so it
+        // passes through untouched. scrubUrlQueryValues only redacts sensitive
+        // NAMES, so even when matched a "?page=2"-style query is unchanged.
+        if (looksLikeRelativePathQuery(value, qIndex)) {
+            return true;
+        }
+    }
+    // JS-SCRUB-01: credential-only URL with NO query string. Detect a userinfo
+    // authority — "scheme://user[:pass]@host" or a scheme-relative
+    // "//user[:pass]@host" — by checking the '@' appears INSIDE the authority
+    // (before the first '/', '?' or '#' that follows the "://" or leading "//").
+    return hasUserinfoAuthority(value);
+}
+
+/**
+ * Decide whether a string that is NOT an absolute/rooted/scheme-relative URL is
+ * nonetheless a BARE RELATIVE URL of the form "<path>?<query>" (e.g.
+ * "callback?token=abc", "v1/users?api_key=x&page=2").
+ *
+ * Two narrow conditions, both required, keep this from matching prose that
+ * merely contains a '?':
+ *   1. The part BEFORE the '?' is a single relative-path token — non-empty and
+ *      containing no whitespace (a real path never has spaces; "a ? mark" does).
+ *   2. The part AFTER the '?' parses as a real query string: at least one
+ *      "name=value" pair (name non-empty, no whitespace in the pair).
+ *
+ * @param {string} value
+ * @param {number} qIndex - index of the first '?' in value
+ * @returns {boolean}
+ */
+function looksLikeRelativePathQuery(value, qIndex) {
+    const path = value.slice(0, qIndex);
+    if (path.length === 0 || /\s/.test(path)) {
+        return false;
+    }
+
+    // Drop a fragment so "p?a=b#frag with spaces" still inspects only the query.
+    let query = value.slice(qIndex + 1);
+    const hashIndex = query.indexOf('#');
+    if (hashIndex !== -1) {
+        query = query.slice(0, hashIndex);
+    }
+
+    return query.split('&').some((pair) => {
+        const eqIndex = pair.indexOf('=');
+        if (eqIndex <= 0) {
+            return false; // No '=' or empty name → not a real query pair.
+        }
+        return !/\s/.test(pair);
+    });
+}
+
+/**
+ * True when the string's authority component carries userinfo (an '@' before
+ * the first path/query/fragment delimiter). Matches "scheme://user:pass@host"
+ * and scheme-relative "//user:pass@host". An '@' that only appears later in the
+ * path/query/fragment (e.g. "/u/name@example") is NOT userinfo and returns
+ * false, so this stays narrow.
+ *
+ * @param {string} value
+ * @returns {boolean}
+ */
+function hasUserinfoAuthority(value) {
+    let authorityStart = -1;
+    const schemePos = value.indexOf('://');
+    if (schemePos !== -1) {
+        authorityStart = schemePos + 3;
+    } else if (value.startsWith('//')) {
+        authorityStart = 2;
+    } else {
+        return false;
+    }
+
+    let authorityEnd = value.length;
+    for (const delimiter of ['/', '?', '#']) {
+        const pos = value.indexOf(delimiter, authorityStart);
+        if (pos !== -1 && pos < authorityEnd) {
+            authorityEnd = pos;
+        }
+    }
+
+    return value.slice(authorityStart, authorityEnd).includes('@');
 }
 
 /**
