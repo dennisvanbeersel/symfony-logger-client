@@ -7,7 +7,7 @@ namespace ApplicationLogger\Bundle\Tests\Monolog\Handler;
 use ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler;
 use ApplicationLogger\Bundle\Service\ApiClient;
 use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
-use ApplicationLogger\Bundle\Service\ContextCollector;
+use ApplicationLogger\Bundle\Service\ContextCollectorInterface;
 use ApplicationLogger\Bundle\Service\DataScrubber;
 use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
 use Monolog\Level;
@@ -19,14 +19,14 @@ use PHPUnit\Framework\TestCase;
 final class ApplicationLoggerHandlerTest extends TestCase
 {
     private MockObject&ApiClient $apiClient;
-    private MockObject&ContextCollector $contextCollector;
+    private MockObject&ContextCollectorInterface $contextCollector;
     private MockObject&BreadcrumbCollector $breadcrumbCollector;
     private ApplicationLoggerHandler $handler;
 
     protected function setUp(): void
     {
         $this->apiClient = $this->createMock(ApiClient::class);
-        $this->contextCollector = $this->createMock(ContextCollector::class);
+        $this->contextCollector = $this->createMock(ContextCollectorInterface::class);
         $this->breadcrumbCollector = $this->createMock(BreadcrumbCollector::class);
 
         $this->contextCollector->method('collectContext')->willReturn([

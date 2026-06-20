@@ -152,6 +152,82 @@ final class FlushAndCompleteTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+    // BUNDLE-1: the isTimeout() branch must CANCEL the still-in-flight handle.
+    // -------------------------------------------------------------------------
+
+    /**
+     * BUNDLE-1 — A handle that times out during flushAndComplete() must be CANCELLED
+     * (not merely recorded as a failure and left dangling).
+     *
+     * Why this matters: on a CLI/worker context there is no kernel.terminate, so the
+     * ONLY drain is __destruct() → flushAndComplete(min(timeout, 1.0)). Against a
+     * slow/unreachable backend the flush stream() times out. Before this fix the
+     * isTimeout() branch recorded the failure and `continue`d WITHOUT cancelling, so
+     * the real CurlResponse was left uncancelled and its __destruct() would initialise
+     * the unconsumed response and throw an UNCATCHABLE TransportException at host
+     * shutdown (a Fatal error). Cancelling here tears the response down so its own
+     * destructor becomes a no-op.
+     */
+    public function testFlushAndCompleteCancelsHandleOnTimeout(): void
+    {
+        $breaker = $this->breaker();
+
+        // First poll parks the handle; the flush poll also times out (hung endpoint).
+        $response = new TwoPhaseResponse(firstPollTimesOut: true, finalStatusCode: 0, secondPollAlsoTimesOut: true);
+        $http = new TwoPhaseHttpClient($response);
+
+        $dispatcher = $this->dispatcher($breaker, $http);
+        $dispatcher->post('https://example.com/api', ['event' => 'test'], []);
+
+        $dispatcher->flushAndComplete(0.001);
+
+        $this->assertTrue(
+            $response->wasCancelled(),
+            'a handle that times out during flush MUST be cancelled (BUNDLE-1), '
+            .'otherwise CurlResponse::__destruct() can throw an uncatchable '
+            .'TransportException at host shutdown',
+        );
+    }
+
+    /**
+     * BUNDLE-1 — End-to-end reproduction of the CLI/__destruct-against-blackhole path:
+     * a worker with NO kernel.terminate parks an async POST to an unreachable backend,
+     * then the dispatcher is destructed (mirroring PHP shutdown). The whole sequence
+     * must complete with NO fatal/exception escaping and the in-flight handle cancelled.
+     */
+    public function testDestructAgainstBlackholeDoesNotLeakOrFatal(): void
+    {
+        $breaker = $this->breaker();
+
+        // A "blackhole" backend: parks at the poll, never completes at flush.
+        $response = new TwoPhaseResponse(firstPollTimesOut: true, finalStatusCode: 0, secondPollAlsoTimesOut: true);
+        $http = new TwoPhaseHttpClient($response);
+
+        $dispatcher = $this->dispatcher($breaker, $http);
+        $dispatcher->post('https://example.com/api', ['event' => 'cli-worker'], []);
+
+        // Simulate end-of-CLI-process: __destruct() drives flushAndComplete() with a
+        // bounded timeout. This MUST NOT throw anything into the host shutdown.
+        try {
+            $dispatcher->__destruct();
+        } catch (\Throwable $e) {
+            $this->fail('__destruct against a blackhole must never throw: '.$e->getMessage());
+        }
+
+        $this->assertTrue(
+            $response->wasCancelled(),
+            'the parked handle must be cancelled by the __destruct flush so its own '
+            .'destructor cannot later throw at shutdown',
+        );
+
+        // A pessimistic failure was recorded for the unconfirmed handle.
+        $this->assertGreaterThan(0, $breaker->getState()['failureCount']);
+
+        // A second drain (the dispatcher is now empty) must be a clean no-op.
+        $dispatcher->flushAndComplete();
+    }
+
+    // -------------------------------------------------------------------------
     // T01: stream() itself throws during flush.
     // -------------------------------------------------------------------------
 

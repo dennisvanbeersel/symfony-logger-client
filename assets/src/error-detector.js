@@ -13,6 +13,7 @@
  * - Configurable error filtering
  */
 import { hasUserInteraction } from './util/interaction.js';
+import { createLogger } from './util/logger.js';
 
 export class ErrorDetector {
     /**
@@ -33,6 +34,8 @@ export class ErrorDetector {
             debug: config.debug || false,
             ignoreErrors: config.ignoreErrors || [],
         };
+        // Debug-gated internal logger (no-op in production) - JSSDK-03/04.
+        this.logger = createLogger(this.config);
 
         // State
         this.isInstalled = false;
@@ -52,7 +55,7 @@ export class ErrorDetector {
         };
 
         if (this.config.debug) {
-            console.warn('ErrorDetector initialized');
+            this.logger.warn('ErrorDetector initialized');
         }
     }
 
@@ -61,7 +64,7 @@ export class ErrorDetector {
      */
     install() {
         if (this.isInstalled) {
-            console.warn('ErrorDetector: Already installed');
+            this.logger.warn('ErrorDetector: Already installed');
             return;
         }
 
@@ -83,10 +86,10 @@ export class ErrorDetector {
             this.isInstalled = true;
 
             if (this.config.debug) {
-                console.warn('ErrorDetector: Installed');
+                this.logger.warn('ErrorDetector: Installed');
             }
         } catch (error) {
-            console.error('ErrorDetector: Failed to install:', error);
+            this.logger.error('ErrorDetector: Failed to install:', error);
         }
     }
 
@@ -103,10 +106,10 @@ export class ErrorDetector {
             this.isInstalled = false;
 
             if (this.config.debug) {
-                console.warn('ErrorDetector: Uninstalled');
+                this.logger.warn('ErrorDetector: Uninstalled');
             }
         } catch (error) {
-            console.error('ErrorDetector: Failed to uninstall:', error);
+            this.logger.error('ErrorDetector: Failed to uninstall:', error);
         }
     }
 
@@ -127,7 +130,7 @@ export class ErrorDetector {
             if (this.shouldIgnoreError(error)) {
                 this.stats.errorsIgnored++;
                 if (this.config.debug) {
-                    console.warn('ErrorDetector: Error ignored:', error.message);
+                    this.logger.warn('ErrorDetector: Error ignored:', error.message);
                 }
                 return null;
             }
@@ -139,7 +142,7 @@ export class ErrorDetector {
             if (this.recentErrors.has(errorFingerprint)) {
                 this.stats.duplicatesPrevented++;
                 if (this.config.debug) {
-                    console.warn('ErrorDetector: Duplicate error prevented');
+                    this.logger.warn('ErrorDetector: Duplicate error prevented');
                 }
                 return null;
             }
@@ -164,7 +167,7 @@ export class ErrorDetector {
             const events = this.replayBuffer.getEvents();
 
             if (this.config.debug) {
-                console.warn('ErrorDetector: Replay captured', {
+                this.logger.warn('ErrorDetector: Replay captured', {
                     errorMessage: errorContext.message,
                     eventCount: events.length,
                     beforeError: this.replayBuffer.getEventsByPhase('before_error').length,
@@ -186,7 +189,7 @@ export class ErrorDetector {
                 stats: this.replayBuffer.getStats(),
             };
         } catch (handlingError) {
-            console.error('ErrorDetector: Failed to handle error:', handlingError);
+            this.logger.error('ErrorDetector: Failed to handle error:', handlingError);
             return null;
         }
     }
@@ -270,7 +273,7 @@ export class ErrorDetector {
             // A new error supersedes any in-flight recovery recording.
             if (this.isRecordingRecovery) {
                 if (this.config.debug) {
-                    console.warn('ErrorDetector: Already recording recovery, cleaning up previous recording');
+                    this.logger.warn('ErrorDetector: Already recording recovery, cleaning up previous recording');
                 }
 
                 if (this.recoveryRecordingCleanup) {
@@ -281,12 +284,12 @@ export class ErrorDetector {
             }
 
             if (!this.replayBuffer || !this.sessionManager) {
-                console.error('ErrorDetector: Cannot start recovery recording - missing dependencies');
+                this.logger.error('ErrorDetector: Cannot start recovery recording - missing dependencies');
                 return;
             }
 
             if (!error || typeof error !== 'object') {
-                console.error('ErrorDetector: Invalid error object for recovery recording');
+                this.logger.error('ErrorDetector: Invalid error object for recovery recording');
                 return;
             }
 
@@ -294,7 +297,7 @@ export class ErrorDetector {
             this.stats.recoveryRecordingsStarted++;
 
             if (this.config.debug) {
-                console.warn('ErrorDetector: Starting recovery recording (phase 2)');
+                this.logger.warn('ErrorDetector: Starting recovery recording (phase 2)');
             }
 
             const errorContext = {
@@ -308,7 +311,7 @@ export class ErrorDetector {
             if (typeof this.replayBuffer.startRecordingAfterError === 'function') {
                 this.replayBuffer.startRecordingAfterError(errorContext);
             } else {
-                console.error('ErrorDetector: Buffer missing startRecordingAfterError method');
+                this.logger.error('ErrorDetector: Buffer missing startRecordingAfterError method');
                 this.isRecordingRecovery = false;
                 return;
             }
@@ -353,7 +356,7 @@ export class ErrorDetector {
 
                 const finishRecording = (reason = 'unknown') => {
                     if (this.config.debug) {
-                        console.warn(`ErrorDetector: Finishing recovery recording (reason: ${reason})`);
+                        this.logger.warn(`ErrorDetector: Finishing recovery recording (reason: ${reason})`);
                     }
 
                     // Clean up listeners/timers FIRST.
@@ -372,7 +375,7 @@ export class ErrorDetector {
                         // Send recovery session separately
                         this.sendRecoverySession(errorContext, recoveryEvents, useBeacon);
                     } else if (this.config.debug) {
-                        console.warn('ErrorDetector: No recovery events captured');
+                        this.logger.warn('ErrorDetector: No recovery events captured');
                     }
 
                     resolve();
@@ -390,7 +393,7 @@ export class ErrorDetector {
                             finishRecording('limit-reached');
                         }
                     } catch (error) {
-                        console.error('ErrorDetector: Error in recovery check interval', error);
+                        this.logger.error('ErrorDetector: Error in recovery check interval', error);
                         finishRecording('check-error');
                     }
                 }, 1000);
@@ -413,14 +416,14 @@ export class ErrorDetector {
                 safetyTimeout = setTimeout(() => {
                     if (this.isRecordingRecovery) {
                         if (this.config.debug) {
-                            console.warn('ErrorDetector: Recovery recording safety timeout (2 minutes)');
+                            this.logger.warn('ErrorDetector: Recovery recording safety timeout (2 minutes)');
                         }
                         finishRecording('safety-timeout');
                     }
                 }, 120000);
             });
         } catch (error) {
-            console.error('ErrorDetector: Failed to start recovery recording', error);
+            this.logger.error('ErrorDetector: Failed to start recovery recording', error);
             this.isRecordingRecovery = false;
             this.recoveryRecordingCleanup = null;
         }
@@ -442,7 +445,7 @@ export class ErrorDetector {
             // Only send when the recovery window contains a user interaction.
             if (!hasUserInteraction(events)) {
                 if (this.config.debug) {
-                    console.warn('ErrorDetector: No click events in recovery session, skipping send', {
+                    this.logger.warn('ErrorDetector: No click events in recovery session, skipping send', {
                         totalEvents: events.length,
                     });
                 }
@@ -460,11 +463,11 @@ export class ErrorDetector {
             // Send via transport if available
             if (this.transport && typeof this.transport.sendRecoverySession === 'function') {
                 this.transport.sendRecoverySession(recoveryPayload, useBeacon).catch(error => {
-                    console.error('ErrorDetector: Failed to send recovery session via transport', error);
+                    this.logger.error('ErrorDetector: Failed to send recovery session via transport', error);
                 });
 
                 if (this.config.debug) {
-                    console.warn('ErrorDetector: Recovery session sent via transport', {
+                    this.logger.warn('ErrorDetector: Recovery session sent via transport', {
                         eventCount: events.length,
                         sessionId: recoveryPayload.sessionId,
                         method: useBeacon ? 'sendBeacon' : 'fetch',
@@ -477,13 +480,13 @@ export class ErrorDetector {
                 }
 
                 if (this.config.debug) {
-                    console.warn('ErrorDetector: Recovery session sent via callback', {
+                    this.logger.warn('ErrorDetector: Recovery session sent via callback', {
                         eventCount: events.length,
                     });
                 }
             }
         } catch (error) {
-            console.error('ErrorDetector: Failed to send recovery session', error);
+            this.logger.error('ErrorDetector: Failed to send recovery session', error);
         }
     }
 

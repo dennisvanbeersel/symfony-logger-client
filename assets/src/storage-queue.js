@@ -14,6 +14,8 @@
  * queue.enqueue({ message: 'Error', stack: '...' });
  * const error = queue.dequeue(); // Returns oldest error or null
  */
+import { logger } from './util/logger.js';
+
 export class StorageQueue {
     /**
      * Create a new StorageQueue instance
@@ -60,8 +62,10 @@ export class StorageQueue {
             this.saveQueue(queue);
         } catch (error) {
             // Storage failures should never crash the app
-            // Common causes: quota exceeded, private browsing mode
-            console.warn('ApplicationLogger: Failed to queue error', error);
+            // Common causes: quota exceeded, private browsing mode.
+            // JSSDK-03: routed through the debug-gated shared logger (no-op in
+            // production) so the SDK never writes to the host page console.
+            logger.warn('Failed to queue error', error);
         }
     }
 

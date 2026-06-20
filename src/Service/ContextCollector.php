@@ -14,10 +14,10 @@ use Symfony\Component\HttpFoundation\RequestStack;
  *
  * RESILIENCE: Returns empty arrays/null on any errors - never throws exceptions.
  *
- * Not declared `final`: it is a mockable collaborator stubbed by the subscriber,
- * Monolog handler and payload-factory unit tests.
+ * `final`: collaborators and tests depend on {@see ContextCollectorInterface} (the
+ * mock seam) rather than on this concrete class, so it can be sealed.
  */
-class ContextCollector
+final class ContextCollector implements ContextCollectorInterface
 {
     public function __construct(
         private readonly DataScrubber $scrubber,
@@ -40,6 +40,10 @@ class ContextCollector
             'server' => $this->collectServer(),
             'environment' => $this->environment,
             'release' => $this->release,
+            // Precompute the session hash ONCE here so ErrorPayloadFactory can read it
+            // from the context instead of re-running getSessionHash() (a second
+            // RequestStack + session lookup) for every error it builds.
+            'session_hash' => $this->getSessionHash(),
         ];
     }
 

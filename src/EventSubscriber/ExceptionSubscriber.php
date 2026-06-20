@@ -6,7 +6,7 @@ namespace ApplicationLogger\Bundle\EventSubscriber;
 
 use ApplicationLogger\Bundle\Service\ApiClient;
 use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
-use ApplicationLogger\Bundle\Service\ContextCollector;
+use ApplicationLogger\Bundle\Service\ContextCollectorInterface;
 use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpKernel\Event\ExceptionEvent;
@@ -30,7 +30,7 @@ final class ExceptionSubscriber implements EventSubscriberInterface
 {
     public function __construct(
         private readonly ApiClient $apiClient,
-        private readonly ContextCollector $contextCollector,
+        private readonly ContextCollectorInterface $contextCollector,
         private readonly BreadcrumbCollector $breadcrumbCollector,
         private readonly ErrorPayloadFactory $payloadFactory,
         private readonly bool $debug = false,

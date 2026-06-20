@@ -162,6 +162,19 @@ final class ResilientHttpDispatcher
                         $this->circuitBreaker->recordFailure();
                         --$pendingCount[$id];
                         --$unresolved;
+                        // CRITICAL (CLI/__destruct fatal): cancel the still-in-flight
+                        // handle here, exactly as the isLast()/error/early-end branches do.
+                        // Without this, a timed-out handle is left uncancelled; on a CLI /
+                        // worker (no kernel.terminate, only __destruct->flushAndComplete())
+                        // against a slow/unreachable backend, CurlResponse::__destruct() later
+                        // initialises the unconsumed response and throws an UNCATCHABLE
+                        // TransportException at shutdown — a host Fatal error. Cancelling now
+                        // tears the response down cleanly so its destructor is a no-op.
+                        try {
+                            $response->cancel();
+                        } catch (\Throwable) {
+                            // ignore — never throw during cleanup
+                        }
                         continue;
                     }
 

@@ -26,14 +26,34 @@ namespace ApplicationLogger\Bundle\Service;
  * failure it returns a safe default (redacted/empty/null) rather than leaking data
  * or crashing the host application.
  */
-final class DataScrubber
+final readonly class DataScrubber
 {
+    /**
+     * Lowercased, de-duplicated, non-empty scrub fragments, precomputed once at
+     * construction. {@see keyIsSensitive()} then lowercases the candidate key ONCE and
+     * does a plain (case-sensitive) str_contains per fragment, instead of calling the
+     * locale-aware stripos() for every (key, fragment) pair on the hot scrub path. The
+     * matching SEMANTICS are unchanged: stripos($key, $field) is case-insensitive ASCII
+     * substring matching, which is exactly str_contains(strtolower($key), strtolower($field)).
+     *
+     * @var list<string>
+     */
+    private readonly array $normalizedScrubFields;
+
     /**
      * @param list<string> $scrubFields field-name fragments to redact (case-insensitive substring match)
      */
-    public function __construct(
-        private readonly array $scrubFields,
-    ) {
+    public function __construct(array $scrubFields)
+    {
+        $normalized = [];
+        foreach ($scrubFields as $field) {
+            if ('' === $field) {
+                continue;
+            }
+            $lower = strtolower($field);
+            $normalized[$lower] = true;
+        }
+        $this->normalizedScrubFields = array_keys($normalized);
     }
 
     /**
@@ -86,8 +106,12 @@ final class DataScrubber
 
     private function keyIsSensitive(string $key): bool
     {
-        foreach ($this->scrubFields as $field) {
-            if ('' !== $field && false !== stripos($key, $field)) {
+        // Lowercase the candidate key ONCE, then do plain str_contains per fragment.
+        // Equivalent to the previous per-pair stripos() (case-insensitive ASCII substring
+        // match) but avoids re-lowercasing/locale work for every fragment.
+        $lowerKey = strtolower($key);
+        foreach ($this->normalizedScrubFields as $field) {
+            if (str_contains($lowerKey, $field)) {
                 return true;
             }
         }
