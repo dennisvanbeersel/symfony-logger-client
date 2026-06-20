@@ -166,8 +166,17 @@ export class Client {
      * These are catastrophic errors that broke JS execution before the SDK
      * could send them. On the next (normalised) page load we re-send them with
      * a `resurrected` flag, then clear localStorage once all succeed.
+     *
+     * Async + awaited per-error: the `failed` counter must reflect the REAL send
+     * outcome. `captureException()` never throws, so a fire-and-forget call could
+     * not surface a network failure and `failed` would always stay 0 — the
+     * retry/attempt-bookkeeping below would then wrongly clear storage even when
+     * delivery failed. We therefore await each delivery and treat a rejected send
+     * as a failure. The whole method still never throws into the host app.
+     *
+     * @returns {Promise<void>}
      */
-    processResurrectedErrors() {
+    async processResurrectedErrors() {
         try {
             const attempts = parseInt(localStorage.getItem(RESURRECTION_ATTEMPTS_KEY) || '0', 10);
             if (attempts >= MAX_RESURRECTION_ATTEMPTS) {
@@ -224,7 +233,12 @@ export class Client {
                     const error = new Error(message);
                     error.name = 'NuclearError';
 
-                    this.captureException(error, {
+                    // Build the payload here and AWAIT the transport directly so a
+                    // network failure rejects and is counted. captureException()
+                    // swallows all errors, so awaiting it would never surface a
+                    // failed send (the bug this guards). Nuclear errors carry no
+                    // session replay, so the direct transport.send is equivalent.
+                    const payload = this.buildPayload(error, 'error', {
                         extra: {
                             resurrected: true,
                             nuclear: true,
@@ -244,6 +258,8 @@ export class Client {
                             sessionGap: true,
                         },
                     });
+
+                    await this.transport.send(payload);
                 } catch (sendError) {
                     failed++;
                     if (this.shouldLog()) {

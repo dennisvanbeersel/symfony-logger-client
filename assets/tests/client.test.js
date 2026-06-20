@@ -798,19 +798,70 @@ handler@/path/to/handler.js:20:10`;
             expect(mockTransport.sentPayloads).toHaveLength(0);
         });
 
-        test('resurrects stored nuclear errors and clears storage on success', () => {
+        test('resurrects stored nuclear errors and clears storage on success', async () => {
             const now = Date.now();
             localStorage.setItem('_appLogger_nuclear', JSON.stringify([
                 { m: 'Catastrophic failure', t: now, f: 'app.js', l: 10, c: 5, u: '/home' },
             ]));
 
-            client.processResurrectedErrors();
+            await client.processResurrectedErrors();
 
             expect(mockTransport.sentPayloads).toHaveLength(1);
             const payload = mockTransport.sentPayloads[0].payload;
             expect(payload.type).toBe('NuclearError');
             // Storage cleared after a fully successful resurrection
             expect(localStorage.getItem('_appLogger_nuclear')).toBeNull();
+        });
+
+        // The failed counter must reflect REAL send outcomes. captureException()
+        // swallows errors, so the resurrection loop must await the transport
+        // directly; a rejected send has to increment `failed`, KEEP the nuclear
+        // errors in storage, and bump the retry-attempts counter for a later load.
+        test('keeps storage and bumps attempts when delivery fails', async () => {
+            const now = Date.now();
+            localStorage.setItem('_appLogger_nuclear', JSON.stringify([
+                { m: 'Catastrophic failure', t: now, f: 'app.js', l: 10, c: 5, u: '/home' },
+            ]));
+
+            // Force the transport to reject (network failure).
+            mockTransport.send = () => Promise.reject(new Error('Network down'));
+
+            // Never throws into the host even when delivery fails.
+            await expect(client.processResurrectedErrors()).resolves.not.toThrow();
+
+            // Storage retained for retry on the next load.
+            expect(localStorage.getItem('_appLogger_nuclear')).not.toBeNull();
+            // Attempts incremented from 0 -> 1 because failed > 0.
+            expect(localStorage.getItem('_appLogger_resurrection_attempts')).toBe('1');
+        });
+
+        // Mixed outcome: one delivery succeeds, one fails. Storage must be kept
+        // (because failed > 0) and attempts bumped — the success alone must not
+        // wipe the still-undelivered error.
+        test('partial failure keeps storage and counts only real failures', async () => {
+            const now = Date.now();
+            localStorage.setItem('_appLogger_nuclear', JSON.stringify([
+                { m: 'First', t: now },
+                { m: 'Second', t: now },
+            ]));
+
+            let call = 0;
+            mockTransport.send = (payload) => {
+                call++;
+                if (call === 2) {
+                    return Promise.reject(new Error('Network down'));
+                }
+                mockTransport.sentPayloads.push({ payload, replayData: null });
+                return Promise.resolve();
+            };
+
+            await client.processResurrectedErrors();
+
+            // Only the first send is recorded as delivered.
+            expect(mockTransport.sentPayloads).toHaveLength(1);
+            // Storage retained because one delivery failed.
+            expect(localStorage.getItem('_appLogger_nuclear')).not.toBeNull();
+            expect(localStorage.getItem('_appLogger_resurrection_attempts')).toBe('1');
         });
 
         test('clears storage when max resurrection attempts reached', () => {
@@ -843,7 +894,7 @@ handler@/path/to/handler.js:20:10`;
         // SEC-JS-02: the nuclear trap stores the raw page URL (location.href).
         // A catastrophic error on a token-bearing URL must not resurrect that
         // secret into extra.originalUrl — scrub at the source.
-        test('redacts sensitive query values in resurrected originalUrl', () => {
+        test('redacts sensitive query values in resurrected originalUrl', async () => {
             const now = Date.now();
             localStorage.setItem('_appLogger_nuclear', JSON.stringify([
                 {
@@ -856,7 +907,7 @@ handler@/path/to/handler.js:20:10`;
                 },
             ]));
 
-            client.processResurrectedErrors();
+            await client.processResurrectedErrors();
 
             expect(mockTransport.sentPayloads).toHaveLength(1);
             const originalUrl = mockTransport.sentPayloads[0].payload.context.originalUrl;
