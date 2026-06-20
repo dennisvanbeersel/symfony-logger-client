@@ -315,7 +315,7 @@ export class Transport {
     async sendRecoverySession(recoveryPayload, useBeacon = false) {
         try {
             // Use dedicated recovery session endpoint
-            const endpoint = `${this.dsn.protocol}://${this.dsn.host}/api/errors/recovery-session`;
+            const endpoint = `${this.dsn.protocol}://${this.dsn.host}/api/v1/errors/recovery-session`;
 
             // Scrub before sending: the top-level `url` and every nested `event.url`
             // carry raw query strings (?token=...). scrubSensitiveData() applies

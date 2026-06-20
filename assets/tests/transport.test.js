@@ -1182,7 +1182,7 @@ describe('Transport', () => {
             const result = await transport.sendRecoverySession(recoveryPayload);
 
             expect(mockFetch).toHaveBeenCalledWith(
-                'https://localhost:8111/api/errors/recovery-session',
+                'https://localhost:8111/api/v1/errors/recovery-session',
                 expect.objectContaining({
                     method: 'POST',
                     headers: expect.objectContaining({ 'X-Api-Key': 'test-api-key' }),
@@ -1211,7 +1211,7 @@ describe('Transport', () => {
             const result = await transport.sendRecoverySession(recoveryPayload, true);
 
             expect(beaconCalls).toHaveLength(1);
-            expect(beaconCalls[0].url).toBe('https://localhost:8111/api/errors/recovery-session');
+            expect(beaconCalls[0].url).toBe('https://localhost:8111/api/v1/errors/recovery-session');
             expect(result).toEqual({ success: true, method: 'beacon' });
             expect(mockFetch).not.toHaveBeenCalled();
         });
