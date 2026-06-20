@@ -14,6 +14,7 @@ use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpFoundation\Session\Session;
 use Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage;
 use Symfony\Component\HttpKernel\Event\RequestEvent;
+use Symfony\Component\HttpKernel\Event\TerminateEvent;
 use Symfony\Component\HttpKernel\HttpKernelInterface;
 use Symfony\Component\HttpKernel\KernelEvents;
 
@@ -50,23 +51,86 @@ final class SessionTrackingSubscriberTest extends TestCase
         };
     }
 
+    /**
+     * Drive the full request → terminate lifecycle so the DEFERRED (BUNDLE-2) session
+     * POSTs are actually dispatched. Session API calls now happen on kernel.terminate
+     * (post-response), not on kernel.request, so every test that asserts a POST must
+     * fire terminate too.
+     */
+    private function dispatchLifecycle(Request $request, ?SessionTrackingSubscriber $subscriber = null): void
+    {
+        $subscriber ??= $this->subscriber;
+        $kernel = $this->createKernelStub();
+
+        $subscriber->onKernelRequest(
+            new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST)
+        );
+        $subscriber->onKernelTerminate(
+            new TerminateEvent($kernel, $request, new Response())
+        );
+    }
+
     public function testGetSubscribedEvents(): void
     {
         $events = SessionTrackingSubscriber::getSubscribedEvents();
 
         $this->assertArrayHasKey(KernelEvents::REQUEST, $events);
+        // BUNDLE-2: TERMINATE is now subscribed — the session POSTs are deferred there
+        // (post-response) so the request hot path pays ~0.
+        $this->assertArrayHasKey(KernelEvents::TERMINATE, $events);
         // RESPONSE is no longer subscribed: the listener was empty (M8). We must
         // not subscribe to an event we don't handle.
         $this->assertArrayNotHasKey(KernelEvents::RESPONSE, $events);
+    }
+
+    public function testSessionPostsAreDeferredToTerminateNotRequest(): void
+    {
+        // BUNDLE-2 core guarantee: NOTHING is POSTed during kernel.request (the hot
+        // path); the createSession + page_view POSTs fire only on kernel.terminate.
+        $request = Request::create('/test-page');
+        $request->setSession($this->session);
+
+        $kernel = $this->createKernelStub();
+
+        // No API calls yet on the request event.
+        $this->apiClient->expects($this->once())->method('createSession');
+        $this->apiClient->expects($this->once())->method('addSessionEvent');
+
+        $this->subscriber->onKernelRequest(
+            new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST)
+        );
+
+        // The session id was still written to the session bag synchronously so the next
+        // request observes it, even though no POST has fired.
+        $this->assertNotNull($this->session->get('_application_logger_session_id'));
+
+        // Now the deferred POSTs fire at terminate.
+        $this->subscriber->onKernelTerminate(
+            new TerminateEvent($kernel, $request, new Response())
+        );
+    }
+
+    public function testTerminateWithoutPriorRequestIsNoOp(): void
+    {
+        // A terminate with no collected intent (e.g. an ignored/sessionless request)
+        // must not POST anything and must never throw.
+        $this->apiClient->expects($this->never())->method('createSession');
+        $this->apiClient->expects($this->never())->method('addSessionEvent');
+        $this->apiClient->expects($this->never())->method('endSession');
+
+        $kernel = $this->createKernelStub();
+        $request = Request::create('/api/ignored');
+        $request->setSession($this->session);
+
+        $this->subscriber->onKernelTerminate(
+            new TerminateEvent($kernel, $request, new Response())
+        );
     }
 
     public function testOnKernelRequestCreatesNewSession(): void
     {
         $request = Request::create('/test-page');
         $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
 
         // Expect session creation API call
         $this->apiClient->expects($this->once())
@@ -84,7 +148,7 @@ final class SessionTrackingSubscriberTest extends TestCase
         $this->apiClient->expects($this->once())
             ->method('addSessionEvent');
 
-        $this->subscriber->onKernelRequest($event);
+        $this->dispatchLifecycle($request);
 
         // Session ID should be stored
         $sessionId = $this->session->get('_application_logger_session_id');
@@ -133,9 +197,6 @@ final class SessionTrackingSubscriberTest extends TestCase
         $request = Request::create('/test-page');
         $request->setSession($this->session);
 
-        $kernel = $this->createKernelStub();
-        $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
-
         // Should create/update session (always called)
         $this->apiClient->expects($this->once())
             ->method('createSession');
@@ -156,7 +217,7 @@ final class SessionTrackingSubscriberTest extends TestCase
                 })
             );
 
-        $this->subscriber->onKernelRequest($event);
+        $this->dispatchLifecycle($request);
     }
 
     public function testOnKernelRequestCreatesNewSessionAfterIdleTimeout(): void
@@ -167,9 +228,6 @@ final class SessionTrackingSubscriberTest extends TestCase
 
         $request = Request::create('/test-page');
         $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
 
         // Should end old session
         $this->apiClient->expects($this->once())
@@ -184,7 +242,7 @@ final class SessionTrackingSubscriberTest extends TestCase
         $this->apiClient->expects($this->once())
             ->method('addSessionEvent');
 
-        $this->subscriber->onKernelRequest($event);
+        $this->dispatchLifecycle($request);
 
         // New session ID should be different
         $newSessionId = $this->session->get('_application_logger_session_id');
@@ -222,9 +280,6 @@ final class SessionTrackingSubscriberTest extends TestCase
         $request->setSession($this->session);
         $request->headers->set('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)');
 
-        $kernel = $this->createKernelStub();
-        $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
-
         $this->apiClient->expects($this->once())
             ->method('createSession')
             ->with($this->callback(function (array $data) {
@@ -237,7 +292,7 @@ final class SessionTrackingSubscriberTest extends TestCase
         $this->apiClient->expects($this->once())
             ->method('addSessionEvent');
 
-        $this->subscriber->onKernelRequest($event);
+        $this->dispatchLifecycle($request);
     }
 
     public function testPageViewUrlScrubsSensitiveQueryParam(): void
@@ -246,9 +301,6 @@ final class SessionTrackingSubscriberTest extends TestCase
         // before it ever leaves the host app (same credential-leak class as C1).
         $request = Request::create('/dashboard?token=secret123&page=2');
         $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
 
         $this->apiClient->expects($this->once())->method('createSession');
 
@@ -269,16 +321,13 @@ final class SessionTrackingSubscriberTest extends TestCase
                 })
             );
 
-        $this->subscriber->onKernelRequest($event);
+        $this->dispatchLifecycle($request);
     }
 
     public function testSessionIdIsValidUuid(): void
     {
         $request = Request::create('/test');
         $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
 
         $this->apiClient->expects($this->once())
             ->method('createSession')
@@ -294,6 +343,6 @@ final class SessionTrackingSubscriberTest extends TestCase
         $this->apiClient->expects($this->once())
             ->method('addSessionEvent');
 
-        $this->subscriber->onKernelRequest($event);
+        $this->dispatchLifecycle($request);
     }
 }

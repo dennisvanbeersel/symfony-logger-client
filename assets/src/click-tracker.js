@@ -1,4 +1,5 @@
 import { ThrottledDOMSerializer } from './dom-serializer.js';
+import { createLogger } from './util/logger.js';
 
 // Sensitive-data heuristics, hoisted to module scope so the RegExp objects are
 // created once at load instead of reallocated on every selector segment
@@ -39,6 +40,8 @@ export class ClickTracker {
         this.replayBuffer = replayBuffer;
         this.sessionManager = sessionManager;
         this.config = config;
+        // Debug-gated internal logger (no-op in production) - JSSDK-03/04.
+        this.logger = createLogger(config);
         this.isInstalled = false;
         // Retained bound click handler so cleanup() can removeEventListener the
         // exact same reference it registered (anonymous handlers can't be removed).
@@ -92,10 +95,10 @@ export class ClickTracker {
             this.isInstalled = true;
 
             if (this.config.debug) {
-                console.warn('ClickTracker: Installed (buffer-based recording)');
+                this.logger.warn('ClickTracker: Installed (buffer-based recording)');
             }
         } catch (error) {
-            console.error('ClickTracker: Failed to install', error);
+            this.logger.error('ClickTracker: Failed to install', error);
         }
     }
 
@@ -116,7 +119,7 @@ export class ClickTracker {
             if (now - this.lastClickTime < this.clickDebounceMs) {
                 this.debounceStats.debouncedClicks++;
                 if (this.config.debug) {
-                    console.warn('ClickTracker: Click debounced', {
+                    this.logger.warn('ClickTracker: Click debounced', {
                         timeSinceLastClick: now - this.lastClickTime,
                         debounceThreshold: this.clickDebounceMs,
                     });
@@ -153,7 +156,7 @@ export class ClickTracker {
 
                     if (this.config.debug) {
                         const size = this.domSerializer.serializer.estimateSize(domSnapshot);
-                        console.warn('ClickTracker: DOM snapshot captured', {
+                        this.logger.warn('ClickTracker: DOM snapshot captured', {
                             elements: domSnapshot.stats?.totalElements || 0,
                             sizeBytes: size,
                             sizeKB: (size / 1024).toFixed(2),
@@ -164,14 +167,14 @@ export class ClickTracker {
                     this.domCaptureStats.throttled++;
 
                     if (this.config.debug) {
-                        console.warn('ClickTracker: DOM snapshot throttled');
+                        this.logger.warn('ClickTracker: DOM snapshot throttled');
                     }
                 }
             } catch (domError) {
                 // DOM serialization failed - don't block the click capture
                 this.domCaptureStats.errors++;
                 if (this.config.debug) {
-                    console.error('ClickTracker: DOM serialization failed', domError);
+                    this.logger.error('ClickTracker: DOM serialization failed', domError);
                 }
                 // Continue without DOM snapshot
             }
@@ -180,11 +183,11 @@ export class ClickTracker {
             const added = this.replayBuffer.addEvent(clickEvent);
 
             if (!added && this.config.debug) {
-                console.warn('ClickTracker: Failed to add click to buffer');
+                this.logger.warn('ClickTracker: Failed to add click to buffer');
             }
         } catch (error) {
             // Never crash on tracking
-            console.error('ClickTracker: Failed to capture click', error);
+            this.logger.error('ClickTracker: Failed to capture click', error);
         }
     }
 
@@ -334,10 +337,10 @@ export class ClickTracker {
             this.isInstalled = false;
 
             if (this.config.debug) {
-                console.warn('ClickTracker: Cleanup complete');
+                this.logger.warn('ClickTracker: Cleanup complete');
             }
         } catch (error) {
-            console.error('ClickTracker: Cleanup failed', error);
+            this.logger.error('ClickTracker: Cleanup failed', error);
         }
     }
 }

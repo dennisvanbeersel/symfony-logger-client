@@ -65,23 +65,34 @@ final readonly class FlushTelemetrySubscriber implements EventSubscriberInterfac
      */
     public function onKernelTerminate(TerminateEvent $_event): void
     {
+        // INDEPENDENT try/catch per flush: a throw from the log-handler flush must NOT
+        // skip the apiClient flush (which drains in-flight error/session POSTs). Wrapping
+        // both in one try/catch meant an early failure in flushLogs() silently dropped
+        // the pending error transfers. Each flush is best-effort and self-contained;
+        // either failing never affects the host app (CRITICAL: never throw into the host).
+
+        // Flush buffered log-aggregation records FIRST, at this controlled post-response
+        // point, so the log path gets the same deferred, circuit-breaker-gated,
+        // bounded-timeout delivery as the error path.
+        //
+        // Previously the handler only flushed its buffer in __destruct (PHP shutdown).
+        // That ran AFTER kernel.terminate, when the cache pool may already be torn down —
+        // so circuit-breaker failures recorded for a slow/unreachable collector did NOT
+        // persist, the breaker never opened, and every request that shipped logs kept
+        // paying the full per-flush timeout. Draining here (cache still live) lets the
+        // breaker shed load, and on real FPM/FrankenPHP this runs after the response is
+        // flushed.
         try {
-            // Flush buffered log-aggregation records FIRST, at this controlled
-            // post-response point, so the log path gets the same deferred,
-            // circuit-breaker-gated, bounded-timeout delivery as the error path.
-            //
-            // Previously the handler only flushed its buffer in __destruct (PHP
-            // shutdown). That ran AFTER kernel.terminate, when the cache pool may
-            // already be torn down — so circuit-breaker failures recorded for a
-            // slow/unreachable collector did NOT persist, the breaker never opened,
-            // and every request that shipped logs kept paying the full per-flush
-            // timeout. Draining here (cache still live) lets the breaker shed load,
-            // and on real FPM/FrankenPHP this runs after the response is flushed.
             $this->logHandler?->flushLogs();
+        } catch (\Throwable) {
+            // Best-effort; never let a log-flush error affect the host or block the
+            // apiClient flush below.
+        }
+
+        try {
             $this->apiClient->flush();
         } catch (\Throwable) {
-            // CRITICAL: Never let telemetry flush errors affect the host application.
-            // The flush is best-effort; if it fails for any reason, we silently discard.
+            // Best-effort; never let an error/session-flush error affect the host.
         }
     }
 }

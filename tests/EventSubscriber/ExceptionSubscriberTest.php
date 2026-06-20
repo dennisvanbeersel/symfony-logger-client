@@ -7,7 +7,7 @@ namespace ApplicationLogger\Bundle\Tests\EventSubscriber;
 use ApplicationLogger\Bundle\EventSubscriber\ExceptionSubscriber;
 use ApplicationLogger\Bundle\Service\ApiClient;
 use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
-use ApplicationLogger\Bundle\Service\ContextCollector;
+use ApplicationLogger\Bundle\Service\ContextCollectorInterface;
 use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -23,7 +23,7 @@ use Symfony\Component\HttpKernel\KernelEvents;
 final class ExceptionSubscriberTest extends TestCase
 {
     private MockObject&ApiClient $apiClient;
-    private MockObject&ContextCollector $contextCollector;
+    private MockObject&ContextCollectorInterface $contextCollector;
     private MockObject&BreadcrumbCollector $breadcrumbCollector;
     private ExceptionSubscriber $subscriber;
     private Session $session;
@@ -31,7 +31,7 @@ final class ExceptionSubscriberTest extends TestCase
     protected function setUp(): void
     {
         $this->apiClient = $this->createMock(ApiClient::class);
-        $this->contextCollector = $this->createMock(ContextCollector::class);
+        $this->contextCollector = $this->createMock(ContextCollectorInterface::class);
         $this->breadcrumbCollector = $this->createMock(BreadcrumbCollector::class);
         $this->session = new Session(new MockArraySessionStorage());
         $this->session->start();
@@ -289,7 +289,7 @@ final class ExceptionSubscriberTest extends TestCase
     public function testIncludesSessionHashWhenAvailable(): void
     {
         // Create a new mock that includes getSessionHash
-        $contextCollector = $this->createMock(ContextCollector::class);
+        $contextCollector = $this->createMock(ContextCollectorInterface::class);
         $contextCollector->method('collectContext')->willReturn([
             'environment' => 'test',
             'release' => '1.0.0',

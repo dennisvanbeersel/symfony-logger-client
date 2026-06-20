@@ -3,6 +3,7 @@ import { StorageQueue } from './storage-queue.js';
 import { RateLimiter } from './rate-limiter.js';
 import { DEFAULT_SCRUB_FIELDS, scrubUrlQueryValues } from './scrub-fields.js';
 import { hashString } from './util/hash.js';
+import { createLogger } from './util/logger.js';
 
 /**
  * Payload keys whose STRING value is a URL/URI and may carry sensitive query
@@ -160,6 +161,9 @@ function hasUserinfoAuthority(value) {
 export class Transport {
     constructor(config) {
         this.config = config;
+        // Debug-gated internal logger: no-op unless config.debug is true, so the
+        // SDK never writes to the host page console in production (JSSDK-03/04).
+        this.logger = createLogger(config);
         this.apiKey = config.apiKey; // Store API key separately (not in DSN)
         this.dsn = this.parseDsn(config.dsn);
         this.queue = [];
@@ -190,6 +194,16 @@ export class Transport {
         this.recentErrors = new Map();
         this.deduplicationWindow = config.deduplicationWindowMs ?? 5000;
 
+        // JSSDK-05: bookkeeping for the OPPORTUNISTIC dedup sweep. The expired-entry
+        // cleanup used to run a full O(n) scan of recentErrors on EVERY send(). We
+        // now only sweep when it is actually worthwhile: at most once per
+        // `dedupSweepIntervalMs`, OR immediately once the map grows past
+        // `dedupSweepMaxEntries` (a safety bound so a burst of unique errors can't
+        // grow the map without limit between time-based sweeps).
+        this.lastDedupSweep = 0;
+        this.dedupSweepIntervalMs = config.dedupSweepIntervalMs ?? this.deduplicationWindow;
+        this.dedupSweepMaxEntries = config.dedupSweepMaxEntries ?? 100;
+
         // Try to flush stored errors on init
         this.flushStoredErrors();
     }
@@ -219,7 +233,11 @@ export class Transport {
                 protocol: url.protocol.replace(':', ''),
                 host: url.host,
                 projectId: projectId,
-                endpoint: `${url.protocol}//${url.host}/api/errors/ingest`,
+                // JSSDK-01: canonical ingestion route. Matches the platform and the
+                // PHP bundle (ApiClient $errorPath / DsnGenerator::INGEST_PATH).
+                // The legacy /api/errors/ingest route is deprecated (Sunset
+                // 2027-01-01); the JS SDK was the last caller of it.
+                endpoint: `${url.protocol}//${url.host}/api/v1/errors`,
             };
         } catch (error) {
             throw new Error(`Invalid DSN format: ${error.message}. Expected: https://host/project-id`);
@@ -245,12 +263,10 @@ export class Transport {
                     replay_data: replayData.events,
                 };
 
-                if (this.config.debug) {
-                    console.warn('ApplicationLogger: Sending error with replay data', {
-                        sessionId: replayData.sessionId,
-                        eventCount: replayData.events?.length || 0,
-                    });
-                }
+                this.logger.warn('Sending error with replay data', {
+                    sessionId: replayData.sessionId,
+                    eventCount: replayData.events?.length || 0,
+                });
             }
 
             // Scrub sensitive data
@@ -258,17 +274,13 @@ export class Transport {
 
             // Check for duplicates
             if (this.isDuplicate(scrubbedPayload)) {
-                if (this.config.debug) {
-                    console.warn('ApplicationLogger: Duplicate error ignored');
-                }
+                this.logger.warn('Duplicate error ignored');
                 return;
             }
 
             // Check rate limit
             if (!this.rateLimiter.consume()) {
-                if (this.config.debug) {
-                    console.warn('ApplicationLogger: Rate limit exceeded, error queued');
-                }
+                this.logger.warn('Rate limit exceeded, error queued');
                 this.storageQueue.enqueue(scrubbedPayload);
                 return;
             }
@@ -281,8 +293,9 @@ export class Transport {
                 await this.processQueue();
             }
         } catch (error) {
-            // Never crash on send errors
-            console.error('ApplicationLogger: Send failed', error);
+            // Never crash on send errors. JSSDK-04: gate behind the debug logger
+            // so SDK internals don't leak to the host page console in production.
+            this.logger.error('Send failed', error);
         }
     }
 
@@ -310,13 +323,11 @@ export class Transport {
             // class as C1; must run on BOTH the beacon and fetch branches.
             const scrubbedPayload = this.scrubSensitiveData(recoveryPayload);
 
-            if (this.config.debug) {
-                console.warn('ApplicationLogger: Sending recovery session', {
-                    sessionId: scrubbedPayload.sessionId,
-                    eventCount: scrubbedPayload.events?.length || 0,
-                    method: useBeacon ? 'sendBeacon' : 'fetch',
-                });
-            }
+            this.logger.warn('Sending recovery session', {
+                sessionId: scrubbedPayload.sessionId,
+                eventCount: scrubbedPayload.events?.length || 0,
+                method: useBeacon ? 'sendBeacon' : 'fetch',
+            });
 
             // Use sendBeacon for page unload (synchronous, guaranteed delivery)
             if (useBeacon && navigator.sendBeacon) {
@@ -333,9 +344,7 @@ export class Transport {
                 const sent = navigator.sendBeacon(endpoint, blob);
 
                 if (sent) {
-                    if (this.config.debug) {
-                        console.warn('ApplicationLogger: Recovery session queued via sendBeacon');
-                    }
+                    this.logger.warn('Recovery session queued via sendBeacon');
                     return { success: true, method: 'beacon' };
                 } else {
                     throw new Error('sendBeacon failed (queue full or too large)');
@@ -364,13 +373,11 @@ export class Transport {
                 throw new Error(`Recovery session send failed: ${response.status}`);
             }
 
-            if (this.config.debug) {
-                console.warn('ApplicationLogger: Recovery session sent successfully');
-            }
+            this.logger.warn('Recovery session sent successfully');
 
             return response.json();
         } catch (error) {
-            console.error('ApplicationLogger: Failed to send recovery session', error);
+            this.logger.error('Failed to send recovery session', error);
 
             // Store in queue for retry (best effort). Scrub here too so a queued
             // retry can never leak a raw URL even if scrubbing happened to fail
@@ -381,7 +388,7 @@ export class Transport {
                     payload: this.scrubSensitiveData(recoveryPayload),
                 });
             } catch (queueError) {
-                console.error('ApplicationLogger: Failed to queue recovery session', queueError);
+                this.logger.error('Failed to queue recovery session', queueError);
             }
 
             throw error;
@@ -404,9 +411,7 @@ export class Transport {
             try {
                 await this.sendToApi(payload);
 
-                if (this.config.debug) {
-                    console.warn('ApplicationLogger: Error sent successfully');
-                }
+                this.logger.warn('Error sent successfully');
             } catch {
                 // Error already handled in sendToApi
                 // Don't re-queue here as sendToApi handles storage
@@ -422,9 +427,7 @@ export class Transport {
     async sendToApi(payload, attempt = 0) {
         // Check circuit breaker
         if (this.circuitBreaker.isOpen()) {
-            if (this.config.debug) {
-                console.warn('ApplicationLogger: Circuit breaker is open, error queued to storage');
-            }
+            this.logger.warn('Circuit breaker is open, error queued to storage');
             this.storageQueue.enqueue(payload);
             return;
         }
@@ -465,9 +468,7 @@ export class Transport {
             if (error.name === 'AbortError') {
                 this.circuitBreaker.recordFailure();
 
-                if (this.config.debug) {
-                    console.error('ApplicationLogger: Request timeout');
-                }
+                this.logger.error('Request timeout');
 
                 this.storageQueue.enqueue(payload);
                 return;
@@ -485,9 +486,7 @@ export class Transport {
             // Max retries reached
             this.circuitBreaker.recordFailure();
 
-            if (this.config.debug) {
-                console.error('ApplicationLogger: Max retries reached', error);
-            }
+            this.logger.error('Max retries reached', error);
 
             this.storageQueue.enqueue(payload);
         }
@@ -509,27 +508,55 @@ export class Transport {
             });
 
             const hash = this.simpleHash(signature);
+            const now = Date.now();
 
-            // Check if we've seen this recently
-            if (this.recentErrors.has(hash)) {
+            // Check if we've seen this WITHIN the dedup window. We check the
+            // timestamp on lookup (rather than relying on a per-call sweep to
+            // have already evicted stale entries) so that making the sweep
+            // opportunistic below does NOT change dedup behaviour: an entry older
+            // than the window is treated as absent even if it hasn't been swept
+            // yet (JSSDK-05). This preserves the original semantics where an error
+            // recurring after the window is reported again.
+            const previous = this.recentErrors.get(hash);
+            if (previous !== undefined && now - previous <= this.deduplicationWindow) {
                 return true;
             }
 
-            // Add to recent errors
-            this.recentErrors.set(hash, Date.now());
+            // Add/refresh entry for this signature.
+            this.recentErrors.set(hash, now);
 
-            // Clean up old entries
-            const now = Date.now();
-            for (const [key, timestamp] of this.recentErrors) {
-                if (now - timestamp > this.deduplicationWindow) {
-                    this.recentErrors.delete(key);
-                }
+            // JSSDK-05: opportunistic cleanup. Instead of an O(n) scan on every
+            // call, only sweep expired entries when enough time has passed since
+            // the last sweep OR the map has grown past its size bound (a safety
+            // cap so a burst of unique errors can't grow the map unbounded between
+            // time-based sweeps). Lingering expired entries are harmless because
+            // the age-aware lookup above ignores them.
+            if (now - this.lastDedupSweep >= this.dedupSweepIntervalMs
+                || this.recentErrors.size > this.dedupSweepMaxEntries) {
+                this.sweepRecentErrors(now);
             }
 
             return false;
         } catch {
             return false; // If deduplication fails, allow the error through
         }
+    }
+
+    /**
+     * Remove dedup-cache entries older than the deduplication window.
+     * Called opportunistically from {@link isDuplicate} (JSSDK-05), not on every
+     * send, to keep the hot path O(1) amortised.
+     *
+     * @param {number} [now=Date.now()] - Reference timestamp
+     * @returns {void}
+     */
+    sweepRecentErrors(now = Date.now()) {
+        for (const [key, timestamp] of this.recentErrors) {
+            if (now - timestamp > this.deduplicationWindow) {
+                this.recentErrors.delete(key);
+            }
+        }
+        this.lastDedupSweep = now;
     }
 
     /**
@@ -553,9 +580,7 @@ export class Transport {
                 return;
             }
 
-            if (this.config.debug) {
-                console.warn(`ApplicationLogger: Flushing ${queueSize} stored errors`);
-            }
+            this.logger.warn(`Flushing ${queueSize} stored errors`);
 
             // Limit flush to 5 errors at a time to avoid overwhelming
             const limit = Math.min(queueSize, 5);
@@ -575,9 +600,7 @@ export class Transport {
             }
         } catch (error) {
             // Never crash on flush
-            if (this.config.debug) {
-                console.error('ApplicationLogger: Flush failed', error);
-            }
+            this.logger.error('Flush failed', error);
         }
     }
 
@@ -755,9 +778,7 @@ export class Transport {
             return response.json();
         } catch (error) {
             // Silently fail - session tracking is non-critical
-            if (this.config.debug) {
-                console.error('ApplicationLogger: Failed to send session event', error);
-            }
+            this.logger.error('Failed to send session event', error);
         }
     }
 
@@ -789,16 +810,12 @@ export class Transport {
                 throw new Error(`HTTP ${response.status}`);
             }
 
-            if (this.config.debug) {
-                console.warn(`ApplicationLogger: Sent ${clicks.length} heatmap clicks`);
-            }
+            this.logger.warn(`Sent ${clicks.length} heatmap clicks`);
 
             return response.json();
         } catch (error) {
             // Silently fail - heatmap tracking is non-critical
-            if (this.config.debug) {
-                console.error('ApplicationLogger: Failed to send heatmap data', error);
-            }
+            this.logger.error('Failed to send heatmap data', error);
         }
     }
 
@@ -873,14 +890,10 @@ export class Transport {
                 fromStorage--;
             }
 
-            if (this.config.debug) {
-                console.warn(`ApplicationLogger: Flushed ${sentCount} error(s) via Beacon API`);
-            }
+            this.logger.warn(`Flushed ${sentCount} error(s) via Beacon API`);
         } catch (error) {
             // Errors remain queued for next session on failure.
-            if (this.config.debug) {
-                console.error('ApplicationLogger: Beacon flush failed', error);
-            }
+            this.logger.error('Beacon flush failed', error);
         }
     }
 }

@@ -25,6 +25,7 @@ import { ErrorDetector } from './error-detector.js';
 import { SessionManager } from './session-manager.js';
 import { StorageManager } from './storage-manager.js';
 import { DEFAULT_SCRUB_FIELDS } from './scrub-fields.js';
+import { createLogger, setSharedLoggerConfig } from './util/logger.js';
 
 /**
  * Main ApplicationLogger class
@@ -40,7 +41,12 @@ class ApplicationLogger {
      * @param {string[]} [config.scrubFields] Additional fields to scrub
      *
      * Session Replay Configuration (error-triggered only):
-     * @param {boolean} [config.sessionReplayEnabled=true] Enable session replay on errors
+     * @param {boolean} [config.sessionReplayEnabled=false] Enable session replay on
+     *   errors. OPT-IN as of JSSDK-02: disabled by default so the default install
+     *   stays lean (no replay buffer/DOM-serializer/click-tracker code paths run,
+     *   and NO replay listeners/timers are added to the host page). Set to `true`
+     *   to enable error-triggered session replay, or call
+     *   `window.ApplicationLogger.sessionReplay.enable()` at runtime.
      * @param {number} [config.bufferBeforeErrorSeconds=30] Seconds to buffer before error (max 60)
      * @param {number} [config.bufferBeforeErrorClicks=10] Clicks to buffer before error (max 15)
      * @param {number} [config.bufferAfterErrorSeconds=30] Seconds to buffer after error (max 60)
@@ -77,8 +83,11 @@ class ApplicationLogger {
             // Spread into a fresh array so callers cannot mutate the frozen export.
             scrubFields: [...DEFAULT_SCRUB_FIELDS],
 
-            // Session replay config (error-triggered only)
-            sessionReplayEnabled: true,
+            // Session replay config (error-triggered only).
+            // JSSDK-02: OPT-IN. Default off so the lean error-tracking install adds
+            // no replay listeners/timers and never activates the heavier replay
+            // code paths. Enable via config or the runtime sessionReplay.enable() API.
+            sessionReplayEnabled: false,
             bufferBeforeErrorSeconds: 30,
             bufferBeforeErrorClicks: 10,
             bufferAfterErrorSeconds: 30,
@@ -102,6 +111,13 @@ class ApplicationLogger {
             ...config,
         };
 
+        // Debug-gated internal logger (no-op in production) - JSSDK-03/04.
+        this.logger = createLogger(this.config);
+        // Point the shared logger (used by config-less modules such as
+        // StorageQueue) at this instance's debug flag, so their diagnostics are
+        // gated by the same setting (JSSDK-03).
+        setSharedLoggerConfig(this.config);
+
         // Initialize core components
         this.transport = new Transport(this.config);
 
@@ -110,10 +126,7 @@ class ApplicationLogger {
         this.breadcrumbs = new BreadcrumbCollector(
             50, // maxBreadcrumbs
             (error, options) => {
-                // Debug log
-                if (this.config && this.config.debug) {
-                    console.warn('ApplicationLogger: Auto-capturing error from console.error()', error);
-                }
+                this.logger.warn('Auto-capturing error from console.error()', error);
                 this.captureException(error, options);
             }, // errorCaptureCallback
         );
@@ -191,18 +204,14 @@ class ApplicationLogger {
             const savedBuffer = this.storageManager.load();
             if (savedBuffer) {
                 this.replayBuffer.deserialize(savedBuffer);
-                if (this.config.debug) {
-                    console.warn('ApplicationLogger: Loaded replay buffer from localStorage', {
-                        events: savedBuffer.buffer?.length || 0,
-                    });
-                }
+                this.logger.warn('Loaded replay buffer from localStorage', {
+                    events: savedBuffer.buffer?.length || 0,
+                });
             }
 
-            if (this.config.debug) {
-                console.warn('ApplicationLogger: Session replay initialized');
-            }
+            this.logger.warn('Session replay initialized');
         } catch (error) {
-            console.error('ApplicationLogger: Failed to initialize session replay', error);
+            this.logger.error('Failed to initialize session replay', error);
             // Disable session replay on initialization failure
             this.config.sessionReplayEnabled = false;
         }
@@ -224,19 +233,17 @@ class ApplicationLogger {
     // eslint-disable-next-line no-unused-vars
     async handleReplayCapture(errorContext, events, errorPayload) {
         try {
-            if (this.config.debug) {
-                console.warn('ApplicationLogger: Replay captured for error', {
-                    errorMessage: errorContext.message,
-                    eventCount: events.length,
-                    sessionId: this.sessionManager.getSessionId(),
-                });
-            }
+            this.logger.warn('Replay captured for error', {
+                errorMessage: errorContext.message,
+                eventCount: events.length,
+                sessionId: this.sessionManager.getSessionId(),
+            });
 
             // Save buffer to localStorage for cross-page continuity
             const serialized = this.replayBuffer.serialize();
             this.storageManager.save(serialized);
         } catch (error) {
-            console.error('ApplicationLogger: Failed to save replay buffer', error);
+            this.logger.error('Failed to save replay buffer', error);
         }
     }
 
@@ -250,7 +257,7 @@ class ApplicationLogger {
      */
     init() {
         if (this.initialized) {
-            console.warn('ApplicationLogger already initialized');
+            this.logger.warn('Already initialized');
             return;
         }
 
@@ -269,12 +276,12 @@ class ApplicationLogger {
 
         this.initialized = true;
 
-        if (this.config.debug) {
+        if (this.logger.isEnabled()) {
             const sdkLoadTime = window._appLoggerBuffer?.startTime
                 ? Date.now() - window._appLoggerBuffer.startTime
                 : 'unknown';
 
-            console.warn('ApplicationLogger initialized', {
+            this.logger.warn('Initialized', {
                 environment: this.config.environment,
                 release: this.config.release,
                 sessionReplayEnabled: this.config.sessionReplayEnabled,
@@ -312,9 +319,7 @@ class ApplicationLogger {
         window.addEventListener('beforeunload', this.boundSaveBuffer);
         document.addEventListener('visibilitychange', this.boundVisibilitySave);
 
-        if (this.config.debug) {
-            console.warn('ApplicationLogger: Session replay enabled (error-triggered, periodic saves every 5s)');
-        }
+        this.logger.warn('Session replay enabled (error-triggered, periodic saves every 5s)');
     }
 
     /**
@@ -344,12 +349,10 @@ class ApplicationLogger {
                 const serialized = this.replayBuffer.serialize();
                 this.storageManager.save(serialized);
 
-                if (this.config.debug) {
-                    console.warn('ApplicationLogger: Buffer saved to localStorage');
-                }
+                this.logger.warn('Buffer saved to localStorage');
             }
         } catch (error) {
-            console.error('ApplicationLogger: Failed to save buffer', error);
+            this.logger.error('Failed to save buffer', error);
         }
     }
 
@@ -458,9 +461,7 @@ class ApplicationLogger {
                         }
                     }
 
-                    if (this.config.debug) {
-                        console.warn('ApplicationLogger: Session replay enabled');
-                    }
+                    this.logger.warn('Session replay enabled');
                 }
             },
 
@@ -495,9 +496,7 @@ class ApplicationLogger {
                     this.replayBuffer = null;
                     this.sessionManager = null;
 
-                    if (this.config.debug) {
-                        console.warn('ApplicationLogger: Session replay disabled');
-                    }
+                    this.logger.warn('Session replay disabled');
                 }
             },
 

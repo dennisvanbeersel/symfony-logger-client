@@ -12,6 +12,8 @@
  * - Serialization for localStorage
  * - Automatic pruning of old data
  */
+import { createLogger } from './util/logger.js';
+
 export class ReplayBuffer {
     /**
      * @param {Object} config Configuration options
@@ -32,6 +34,8 @@ export class ReplayBuffer {
             maxBufferSizeMB: Math.min(config.maxBufferSizeMB || 5, 20),
             debug: config.debug || false,
         };
+        // Debug-gated internal logger (no-op in production) - JSSDK-03/04.
+        this.logger = createLogger(this.config);
 
         // Buffer state
         this.buffer = []; // Circular buffer of events
@@ -57,7 +61,7 @@ export class ReplayBuffer {
         };
 
         if (this.config.debug) {
-            console.warn('ReplayBuffer initialized with config:', this.config);
+            this.logger.warn('ReplayBuffer initialized with config:', this.config);
         }
     }
 
@@ -75,7 +79,7 @@ export class ReplayBuffer {
     addEvent(event) {
         try {
             if (!event || !event.timestamp) {
-                console.warn('ReplayBuffer: Invalid event (missing timestamp)');
+                this.logger.warn('ReplayBuffer: Invalid event (missing timestamp)');
                 return false;
             }
 
@@ -106,7 +110,7 @@ export class ReplayBuffer {
 
             return true;
         } catch (error) {
-            console.error('ReplayBuffer: Failed to add event:', error);
+            this.logger.error('ReplayBuffer: Failed to add event:', error);
             this.stats.eventsDropped++;
             return false;
         }
@@ -148,14 +152,14 @@ export class ReplayBuffer {
             this.isRecordingAfterError = true;
 
             if (this.config.debug) {
-                console.warn('ReplayBuffer: Started recording after error', {
+                this.logger.warn('ReplayBuffer: Started recording after error', {
                     errorId: errorContext.errorId,
                     bufferSize: this.buffer.length,
                     willRecordFor: `${this.config.bufferAfterErrorSeconds}s or ${this.config.bufferAfterErrorClicks} clicks`,
                 });
             }
         } catch (error) {
-            console.error('ReplayBuffer: Failed to start post-error recording:', error);
+            this.logger.error('ReplayBuffer: Failed to start post-error recording:', error);
         }
     }
 
@@ -171,13 +175,13 @@ export class ReplayBuffer {
             this.isRecordingAfterError = false;
 
             if (this.config.debug) {
-                console.warn('ReplayBuffer: Stopped recording after error', {
+                this.logger.warn('ReplayBuffer: Stopped recording after error', {
                     totalEvents: this.buffer.length,
                     postErrorEvents: this.postErrorEventCount,
                 });
             }
         } catch (error) {
-            console.error('ReplayBuffer: Failed to stop recording:', error);
+            this.logger.error('ReplayBuffer: Failed to stop recording:', error);
         }
     }
 
@@ -201,7 +205,7 @@ export class ReplayBuffer {
         // Check time limit
         if (elapsedSeconds >= this.config.bufferAfterErrorSeconds) {
             if (this.config.debug) {
-                console.warn(`ReplayBuffer: Time limit reached (${elapsedSeconds.toFixed(1)}s)`);
+                this.logger.warn(`ReplayBuffer: Time limit reached (${elapsedSeconds.toFixed(1)}s)`);
             }
             return true;
         }
@@ -209,7 +213,7 @@ export class ReplayBuffer {
         // Check click limit
         if (this.postErrorEventCount >= this.config.bufferAfterErrorClicks) {
             if (this.config.debug) {
-                console.warn(`ReplayBuffer: Click limit reached (${this.postErrorEventCount} clicks)`);
+                this.logger.warn(`ReplayBuffer: Click limit reached (${this.postErrorEventCount} clicks)`);
             }
             return true;
         }
@@ -269,7 +273,7 @@ export class ReplayBuffer {
                 this.stats.eventsDropped += dropped;
             }
         } catch (error) {
-            console.error('ReplayBuffer: Failed to prune old events:', error);
+            this.logger.error('ReplayBuffer: Failed to prune old events:', error);
         }
     }
 
@@ -306,10 +310,10 @@ export class ReplayBuffer {
             this.postErrorEventCount = 0;
 
             if (this.config.debug) {
-                console.warn('ReplayBuffer: Cleared');
+                this.logger.warn('ReplayBuffer: Cleared');
             }
         } catch (error) {
-            console.error('ReplayBuffer: Failed to clear buffer:', error);
+            this.logger.error('ReplayBuffer: Failed to clear buffer:', error);
         }
     }
 
@@ -355,7 +359,7 @@ export class ReplayBuffer {
                 this.recomputeApproxBytes();
             }
         } catch (error) {
-            console.error('ReplayBuffer: Failed to update stats:', error);
+            this.logger.error('ReplayBuffer: Failed to update stats:', error);
         }
     }
 
@@ -443,7 +447,7 @@ export class ReplayBuffer {
         try {
             if (!data || typeof data !== 'object') {
                 if (this.config.debug) {
-                    console.warn('ReplayBuffer: No data to deserialize');
+                    this.logger.warn('ReplayBuffer: No data to deserialize');
                 }
                 return false;
             }
@@ -480,7 +484,7 @@ export class ReplayBuffer {
                     return acc;
                 }, {});
 
-                console.warn('ReplayBuffer: Deserialized from localStorage', {
+                this.logger.warn('ReplayBuffer: Deserialized from localStorage', {
                     totalEvents: this.buffer.length,
                     migratedEvents: migratedCount,
                     phaseBreakdown,
@@ -491,7 +495,7 @@ export class ReplayBuffer {
 
             return true;
         } catch (error) {
-            console.error('ReplayBuffer: Failed to deserialize:', error);
+            this.logger.error('ReplayBuffer: Failed to deserialize:', error);
             return false;
         }
     }
