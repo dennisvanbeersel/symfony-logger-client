@@ -199,6 +199,48 @@ final class ApiClientTest extends TestCase
         $this->assertSame(0, $requests, 'Empty DSN must keep the client inert (no HTTP request).');
     }
 
+    public function testEmptyDsnSessionMethodsDispatchNothingAndDoNotTripBreaker(): void
+    {
+        $requests = 0;
+        $httpClient = new MockHttpClient(function () use (&$requests): MockResponse {
+            ++$requests;
+
+            return new MockResponse('', ['http_code' => 202]);
+        });
+
+        // A real breaker so we can assert no failure was recorded by the session calls.
+        $circuitBreaker = new CircuitBreaker(
+            enabled: true,
+            failureThreshold: 5,
+            timeout: 60,
+            maxHalfOpenAttempts: 2,
+            cache: new ArrayAdapter()
+        );
+
+        $client = new ApiClient(
+            '',            // empty DSN (unconfigured install)
+            '',            // empty API key
+            2.0,
+            0,
+            false,         // sync mode: a dispatch would fire (and trip the breaker) now
+            $circuitBreaker,
+            $this->logger,
+            false,
+            $httpClient
+        );
+
+        $client->createSession(['session_id' => 'abc']);
+        $client->addSessionEvent('abc', ['type' => 'click']);
+        $client->endSession('abc');
+
+        $this->assertSame(0, $requests, 'Empty DSN must keep session calls inert (no HTTP request).');
+        $this->assertSame(
+            0,
+            $client->getCircuitBreakerState()['failureCount'],
+            'Inert session calls must not record a circuit-breaker failure.'
+        );
+    }
+
     public function testDsnWithoutProjectIdThrowsException(): void
     {
         $this->expectException(\InvalidArgumentException::class);

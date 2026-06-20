@@ -220,6 +220,13 @@ class ApiClient
      */
     public function createSession(array $sessionData): void
     {
+        // Inert when unconfigured: no DSN means no platform endpoint to POST to.
+        // Without this guard an empty-DSN install would build a malformed URL and
+        // trip the circuit breaker on every session call (mirrors sendError()).
+        if ('' === $this->endpoint) {
+            return;
+        }
+
         $sessionData['started_at'] = $sessionData['started_at'] ?? (new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM);
 
         $this->dispatcher->post($this->buildApiUrl('/api/v1/sessions'), $sessionData, $this->getApiHeaders());
@@ -232,6 +239,12 @@ class ApiClient
      */
     public function addSessionEvent(string $sessionId, array $eventData): void
     {
+        // Inert when unconfigured (mirrors sendError()/createSession()): an empty
+        // DSN has no platform endpoint, so skip rather than trip the breaker.
+        if ('' === $this->endpoint) {
+            return;
+        }
+
         $url = $this->buildApiUrl(\sprintf('/api/v1/sessions/%s/events', $sessionId));
 
         $this->dispatcher->post($url, $eventData, $this->getApiHeaders());
@@ -242,6 +255,12 @@ class ApiClient
      */
     public function endSession(string $sessionId, ?\DateTimeImmutable $endedAt = null): void
     {
+        // Inert when unconfigured (mirrors sendError()/createSession()): an empty
+        // DSN has no platform endpoint, so skip rather than trip the breaker.
+        if ('' === $this->endpoint) {
+            return;
+        }
+
         $data = [
             'ended_at' => ($endedAt ?? new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM),
         ];

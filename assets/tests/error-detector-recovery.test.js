@@ -205,5 +205,83 @@ describe('ErrorDetector - recovery recording', () => {
 
             expect(detector.isRecordingRecovery).toBe(false);
         });
+
+        // BUNDLE-REPLAY-OPTOUT: opting out (uninstall()/disable()) mid-recording
+        // must fully stop replay — the in-flight recovery must NEVER send.
+        describe('opt-out mid-flight aborts the recovery send', () => {
+            // NOTE: opting out mid-flight runs cleanup() (clearing every timer) but
+            // intentionally never resolves the in-flight startRecoveryRecording promise
+            // — the recording is aborted, not "finished". So we must NOT await that
+            // promise (it would hang). We assert on the observable contract instead:
+            // after opt-out + advancing all timers, NO recovery session is ever sent.
+            test('uninstall() before the finish timer cancels the in-flight send', () => {
+                buffer.afterErrorEvents = [{ type: 'click' }];
+
+                // Recording is in flight (finish timer has NOT fired yet).
+                detector.startRecoveryRecording(new Error('opt out me'));
+                expect(detector.isRecordingRecovery).toBe(true);
+
+                // Opt out mid-flight, BEFORE the 1s completion check runs.
+                detector.uninstall();
+
+                // uninstall() aborts the in-flight recording immediately: it runs the
+                // stored cleanup (clearing the timer/listeners) and resets state, so the
+                // finish path can never fire a send afterwards.
+                expect(detector.isRecordingRecovery).toBe(false);
+                expect(detector.uninstalled).toBe(true);
+
+                // Advance well past the completion check AND the safety timeout to prove
+                // no deferred timer revives the send.
+                buffer.stopRecording = true;
+                jest.advanceTimersByTime(120000);
+
+                expect(transport.recoveryCalls).toHaveLength(0);
+                expect(callbackCalls).toHaveLength(0);
+            });
+
+            test('disable() before the finish timer cancels the in-flight send', () => {
+                buffer.afterErrorEvents = [{ type: 'click' }];
+
+                // install() so setEnabled(false) actually triggers uninstall().
+                detector.install();
+
+                detector.startRecoveryRecording(new Error('disable me'));
+                expect(detector.isRecordingRecovery).toBe(true);
+
+                // Opt out via the public enable/disable toggle, mid-flight.
+                detector.setEnabled(false);
+
+                expect(detector.isRecordingRecovery).toBe(false);
+                expect(detector.uninstalled).toBe(true);
+
+                buffer.stopRecording = true;
+                jest.advanceTimersByTime(120000);
+
+                expect(transport.recoveryCalls).toHaveLength(0);
+                expect(callbackCalls).toHaveLength(0);
+            });
+
+            test('opt-out after the finish timer fires still blocks the send (belt guard)', async () => {
+                buffer.afterErrorEvents = [{ type: 'click' }];
+
+                // Detach the stored cleanup so uninstall() cannot abort via cleanup();
+                // this isolates the finishRecording() `uninstalled` guard (the "belt"
+                // covering a recording already past its timer at opt-out time).
+                const promise = detector.startRecoveryRecording(new Error('belt'));
+                expect(detector.isRecordingRecovery).toBe(true);
+
+                detector.recoveryRecordingCleanup = null;
+                detector.uninstalled = true;
+
+                // Now let the completion check fire; finishRecording() must abort BEFORE
+                // collecting events or sending.
+                buffer.stopRecording = true;
+                jest.advanceTimersByTime(1000);
+                await promise;
+
+                expect(transport.recoveryCalls).toHaveLength(0);
+                expect(callbackCalls).toHaveLength(0);
+            });
+        });
     });
 });
