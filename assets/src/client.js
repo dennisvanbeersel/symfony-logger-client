@@ -397,7 +397,12 @@ export class Client {
         try {
             const payload = this.buildPayload(error, 'error', options);
 
-            const replayEnabled = this.errorDetector
+            // Defense in depth against the opt-out leak (BUNDLE-REPLAY-OPTOUT):
+            // `config.sessionReplayEnabled` is the single source of truth. Even
+            // if a stale errorDetector/sessionManager pointer survived a
+            // disable(), no replay must be attached once replay is opted out.
+            const replayEnabled = this.config.sessionReplayEnabled !== false
+                && this.errorDetector
                 && this.errorDetector.replayBuffer
                 && this.errorDetector.sessionManager;
 

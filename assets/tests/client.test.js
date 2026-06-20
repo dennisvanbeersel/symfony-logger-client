@@ -257,6 +257,21 @@ describe('Client', () => {
 
             await expect(client.captureException(new Error('Test'))).resolves.not.toThrow();
         });
+
+        test('attaches NO replay when sessionReplayEnabled is false even with a live errorDetector (BUNDLE-REPLAY-OPTOUT)', async () => {
+            mockErrorDetector = new MockErrorDetector();
+            // A live detector with replayBuffer + sessionManager is present, but
+            // replay has been opted out via config. The config flag must win.
+            const optedOutConfig = { ...config, sessionReplayEnabled: false };
+            client = new Client(optedOutConfig, mockTransport, mockBreadcrumbs, mockErrorDetector, null);
+
+            await client.captureException(new Error('Opt-out test'));
+
+            // Error is still sent, but with no replay and the detector untouched.
+            expect(mockTransport.sentPayloads).toHaveLength(1);
+            expect(mockTransport.sentPayloads[0].replayData).toBeNull();
+            expect(mockErrorDetector.handledErrors).toHaveLength(0);
+        });
     });
 
     describe('buildPayload', () => {
@@ -958,7 +973,7 @@ handler@/path/to/handler.js:20:10`;
 
             // Falls back to sending the error without replay data
             expect(mockTransport.sentPayloads).toHaveLength(1);
-            expect(mockTransport.sentPayloads[0].replayData == null).toBe(true);
+            expect(mockTransport.sentPayloads[0].replayData).toBeNull();
         });
     });
 

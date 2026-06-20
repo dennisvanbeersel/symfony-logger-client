@@ -39,6 +39,10 @@ export class ErrorDetector {
 
         // State
         this.isInstalled = false;
+        // Set once uninstall() runs (replay opt-out). Distinct from `isInstalled`
+        // so a never-installed detector is NOT treated as torn down
+        // (BUNDLE-REPLAY-OPTOUT).
+        this.uninstalled = false;
         this.recentErrors = new Set(); // Prevent duplicate captures
         this.recentErrorsCleanupInterval = null;
         this.isRecordingRecovery = false; // Prevent concurrent recovery recordings
@@ -84,6 +88,7 @@ export class ErrorDetector {
             }, 60000);
 
             this.isInstalled = true;
+            this.uninstalled = false;
 
             if (this.config.debug) {
                 this.logger.warn('ErrorDetector: Installed');
@@ -103,7 +108,18 @@ export class ErrorDetector {
                 this.recentErrorsCleanupInterval = null;
             }
 
+            // Opt-out must fully stop replay (BUNDLE-REPLAY-OPTOUT): abort any
+            // in-flight recovery recording so its pending timer/listeners are
+            // cleared and it can never complete and send AFTER opt-out. The
+            // `uninstalled` guard below is the belt to this braces, covering any
+            // recovery that was already past its timer when uninstall() ran.
+            if (this.recoveryRecordingCleanup) {
+                this.recoveryRecordingCleanup();
+            }
+            this.isRecordingRecovery = false;
+
             this.isInstalled = false;
+            this.uninstalled = true;
 
             if (this.config.debug) {
                 this.logger.warn('ErrorDetector: Uninstalled');
@@ -124,6 +140,16 @@ export class ErrorDetector {
      */
     async handleError(error, errorPayload) {
         try {
+            // Opt-out guard (BUNDLE-REPLAY-OPTOUT): once the detector has been
+            // torn down via uninstall() (replay disabled), it must NOT capture
+            // or attach any replay, even if a stale pointer still routes an
+            // error here. `uninstalled` is set only by uninstall(), so a
+            // never-installed detector (e.g. unit tests calling handleError
+            // directly) is unaffected.
+            if (this.uninstalled) {
+                return null;
+            }
+
             this.stats.errorsDetected++;
 
             // Check if error should be ignored
@@ -270,6 +296,12 @@ export class ErrorDetector {
      */
     async startRecoveryRecording(error) {
         try {
+            // Opt-out guard (BUNDLE-REPLAY-OPTOUT): once uninstall() has run
+            // (replay disabled), never begin a recovery recording.
+            if (this.uninstalled) {
+                return;
+            }
+
             // A new error supersedes any in-flight recovery recording.
             if (this.isRecordingRecovery) {
                 if (this.config.debug) {
@@ -362,6 +394,18 @@ export class ErrorDetector {
                     // Clean up listeners/timers FIRST.
                     cleanup();
 
+                    // Opt-out guard (BUNDLE-REPLAY-OPTOUT): if replay was
+                    // disabled while this recording was in flight, abort here
+                    // BEFORE collecting or sending — opt-out must fully stop
+                    // replay, even for a recording that already passed its timer.
+                    if (this.uninstalled) {
+                        if (this.config.debug) {
+                            this.logger.warn('ErrorDetector: Recovery recording aborted (replay opted out)');
+                        }
+                        resolve();
+                        return;
+                    }
+
                     // Collect recovery events if the buffer still exposes them.
                     let recoveryEvents = [];
                     if (this.replayBuffer && typeof this.replayBuffer.getEventsByPhase === 'function') {
@@ -438,6 +482,12 @@ export class ErrorDetector {
      */
     sendRecoverySession(errorContext, events, useBeacon = false) {
         try {
+            // Opt-out guard (BUNDLE-REPLAY-OPTOUT): never send/persist a recovery
+            // session once replay has been disabled via uninstall().
+            if (this.uninstalled) {
+                return;
+            }
+
             if (events.length === 0) {
                 return; // No recovery data
             }

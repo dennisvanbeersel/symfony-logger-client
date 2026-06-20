@@ -238,6 +238,51 @@ describe('ApplicationLogger (index.js)', () => {
         });
     });
 
+    describe('disable() prevents replay opt-out leak (BUNDLE-REPLAY-OPTOUT)', () => {
+        test('a manual captureException after disable() carries NO replay data', async () => {
+            const logger = new ApplicationLogger({ ...VALID_CONFIG, sessionReplayEnabled: true });
+            logger.init();
+
+            // Intercept transport so we can inspect the replayData argument.
+            const sendSpy = jest.spyOn(logger.client.transport, 'send')
+                .mockResolvedValue(undefined);
+
+            // Sanity: while enabled, the client is wired to the replay components.
+            expect(logger.client.errorDetector).not.toBeNull();
+            expect(logger.client.sessionManager).not.toBeNull();
+
+            logger.sessionReplay.disable();
+
+            // The client's OWN pointers must be cleared, not just the index-level
+            // ones — otherwise a stale pointer would re-attach replay.
+            expect(logger.client.errorDetector).toBeNull();
+            expect(logger.client.sessionManager).toBeNull();
+
+            await logger.captureException(new Error('Manual after opt-out'));
+
+            // Error is delivered, but with NO replay payload.
+            expect(sendSpy).toHaveBeenCalledTimes(1);
+            const replayArg = sendSpy.mock.calls[0][1];
+            expect(replayArg).toBeUndefined();
+
+            sendSpy.mockRestore();
+        });
+
+        test('a torn-down errorDetector.handleError returns null (no capture)', async () => {
+            const logger = new ApplicationLogger({ ...VALID_CONFIG, sessionReplayEnabled: true });
+            logger.init();
+
+            const detector = logger.errorDetector;
+            expect(detector).not.toBeNull();
+
+            logger.sessionReplay.disable();
+
+            // Even a direct call to the (now torn-down) detector must not capture.
+            const result = await detector.handleError(new Error('Direct after disable'), {});
+            expect(result).toBeNull();
+        });
+    });
+
     describe('init()', () => {
         test('installs components and sets initialized flag', () => {
             const logger = new ApplicationLogger({ ...VALID_CONFIG, sessionReplayEnabled: true });

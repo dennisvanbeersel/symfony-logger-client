@@ -496,6 +496,16 @@ class ApplicationLogger {
                     this.replayBuffer = null;
                     this.sessionManager = null;
 
+                    // Also drop the CLIENT's own pointers. The client retains its
+                    // references independently of these INDEX-level fields, so
+                    // nulling them above is not enough: a later captureException()
+                    // would still see a live errorDetector/sessionManager and
+                    // attach replay data after opt-out (BUNDLE-REPLAY-OPTOUT).
+                    if (this.client) {
+                        this.client.errorDetector = null;
+                        this.client.sessionManager = null;
+                    }
+
                     this.logger.warn('Session replay disabled');
                 }
             },
