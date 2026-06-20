@@ -1,1091 +1,466 @@
-# AppLogger - Symfony Bundle
+# AppLogger Symfony Client
 
-<div align="center">
+> Symfony bundle for the [AppLogger](https://applogger.eu) error tracking and application monitoring platform — automatic exception capture, log aggregation, a frontend JavaScript SDK, and non-blocking, resilient delivery.
 
-**🛡️ Privacy-First Error Tracking for Symfony - Hosted in EU**
-
-[![PHP](https://img.shields.io/badge/php-%5E8.2-blue?style=flat-square)](https://www.php.net/)
-[![Symfony](https://img.shields.io/badge/symfony-6.4%20%7C%207.x%20%7C%208.x-green?style=flat-square)](https://symfony.com/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](https://github.com/dennisvanbeersel/application-logger/blob/master/LICENSE)
-[![Tests](https://img.shields.io/badge/tests-passing-success?style=flat-square)](https://github.com/dennisvanbeersel/symfony-logger-client)
-[![PHPStan](https://img.shields.io/badge/PHPStan-level%206-success?style=flat-square)](https://github.com/dennisvanbeersel/symfony-logger-client)
-
-*Resilience-first error tracking with integrated JavaScript SDK - your app never slows down* ⚡
-
-[Quick Start](#-quick-start) •
-[Why This Bundle?](#-why-this-bundle) •
-[Features](#-features) •
-[Documentation](#-documentation)
-
-</div>
+[![Packagist Version](https://img.shields.io/packagist/v/dennisvanbeersel/symfony-logger-client.svg?style=flat-square)](https://packagist.org/packages/dennisvanbeersel/symfony-logger-client)
+[![Total Downloads](https://img.shields.io/packagist/dt/dennisvanbeersel/symfony-logger-client.svg?style=flat-square)](https://packagist.org/packages/dennisvanbeersel/symfony-logger-client)
+[![PHP Version](https://img.shields.io/packagist/php-v/dennisvanbeersel/symfony-logger-client.svg?style=flat-square)](https://packagist.org/packages/dennisvanbeersel/symfony-logger-client)
+[![License](https://img.shields.io/packagist/l/dennisvanbeersel/symfony-logger-client.svg?style=flat-square)](https://github.com/dennisvanbeersel/symfony-logger-client/blob/main/LICENSE)
 
 ---
 
-## 📦 TL;DR - Get Started in 2 Minutes
+## What is this?
+
+This package is the Symfony client bundle for **[AppLogger](https://applogger.eu)** (`applogger.eu`), an EU-hosted, privacy-first error tracking and application/log monitoring SaaS built for Symfony and PHP applications.
+
+Once installed and enabled, the bundle wires itself into your application and ships telemetry to the AppLogger platform through three channels:
+
+- **Error tracking** — uncaught exceptions and exception-bearing Monolog records are sent to the platform, where they are grouped and fingerprinted into error groups (backed by PostgreSQL).
+- **Log aggregation** — non-exception Monolog records at or above your configured capture level are batched and forwarded to the AppLogger log collector (backed by ClickHouse).
+- **Frontend errors** — a bundled JavaScript SDK captures browser exceptions, unhandled promise rejections, and failed requests, with optional error-triggered session replay.
+
+A central design goal of the bundle is that **telemetry delivery never delays or breaks the host application**. Sending is asynchronous and fire-and-forget by default, completes after the HTTP response has already been flushed to the user, and is guarded end-to-end so that no transport, encoding, or configuration failure propagates into your application's request handling.
+
+The platform provides EU data residency, IP anonymization, PII scrubbing, and session-id hashing to support GDPR-conscious deployments.
+
+---
+
+## Features
+
+- **Automatic exception capture** — uncaught exceptions are captured via an event subscriber (no manual instrumentation required).
+- **Automatic Monolog capture** — any Monolog record carrying a `\Throwable` in its context is routed to error tracking; other records at or above your capture level are routed to log aggregation. Wiring is done automatically — you do not edit `monolog.yaml`.
+- **Non-blocking, resilient delivery** — asynchronous transport with a per-pipeline circuit breaker; delivery is completed on `kernel.terminate` (after the response is sent), with a bounded fallback for CLI and Messenger workers.
+- **Never throws into the host** — the dispatch path is wrapped so transport, encoding, and configuration failures are recorded internally rather than surfaced to your code.
+- **Log aggregation** — buffered, batched log shipping to the AppLogger log collector with memory-bounded buffers.
+- **Bundled JavaScript SDK** — frontend error capture with its own client-side circuit breaker, offline queue, rate limiting, and deduplication. Optional automatic injection via Twig.
+- **Error-triggered session replay (opt-in)** — captures DOM snapshots and interactions around an error; sent together with the error payload.
+- **GDPR-oriented data scrubbing** — key-based redaction of sensitive fields, query-string and URL credential redaction, and IP anonymization, all performed before data leaves your host.
+- **Inert-by-default install** — auto-registers via Symfony Flex and ships disabled until you opt in; installs cleanly even in API-only apps without Twig.
+
+---
+
+## Requirements
+
+The Composer-enforced runtime requirements are:
+
+| Requirement | Constraint |
+|-------------|------------|
+| PHP | `>=8.2` |
+| `symfony/framework-bundle` | `^6.4 \|\| ^7.0 \|\| ^8.0` |
+| `symfony/http-kernel` | `^6.4 \|\| ^7.0 \|\| ^8.0` |
+| `symfony/monolog-bundle` | `^3.0 \|\| ^4.0` |
+| `symfony/http-client` | `^6.4 \|\| ^7.0 \|\| ^8.0` |
+| `symfony/uid` | `^6.4 \|\| ^7.0 \|\| ^8.0` |
+
+> **Note:** The JavaScript SDK is shipped pre-built in `assets/dist/`, so a Node.js toolchain is **not** required to use it. `symfony/asset-mapper`, `symfony/twig-bundle`, and `twig/twig` are development dependencies of this package — their absence in your application is tolerated, and the bundle remains fully functional. AssetMapper integration is wired automatically when AssetMapper is present; the Twig-based JS auto-injection is simply removed when Twig is not installed.
+
+---
+
+## Installation
+
+Install with Composer:
 
 ```bash
-# 1. Install
 composer require dennisvanbeersel/symfony-logger-client
-
-# 2. Configure (config/packages/application_logger.yaml)
-application_logger:
-    dsn: '%env(APPLICATION_LOGGER_DSN)%'
-    api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
-
-# 3. Add credentials to .env
-APPLICATION_LOGGER_DSN=https://applogger.eu/your-project-uuid
-APPLICATION_LOGGER_API_KEY=your-64-character-api-key-here
-
-# 4. Clear cache
-php bin/console cache:clear
 ```
 
-**Done!** All PHP exceptions and JavaScript errors are now automatically tracked. No code changes needed.
+### With Symfony Flex (recommended)
 
----
+If your application uses Symfony Flex, the bundle is registered automatically and a Flex recipe is applied. The recipe:
 
-## 🎯 Why This Bundle?
+- registers `ApplicationLogger\Bundle\ApplicationLoggerBundle` for all environments,
+- installs a `config/packages/application_logger.yaml` configuration file,
+- appends environment-variable placeholders to your `.env`:
 
-**AppLogger** ([applogger.eu](https://applogger.eu)) is an EU-hosted, privacy-first error tracking SaaS platform specifically designed for Symfony applications. This bundle provides zero-config integration with production-grade resilience.
-
-Most error tracking solutions have a **critical flaw**: they can slow down or even crash your application when the tracking service is down. This bundle is different.
-
-### Core Philosophy: **Never Impact Your Application**
-
-We achieve this through battle-tested resilience patterns:
-
-| Feature | This Bundle | Typical Solutions | Impact |
-|---------|------------|-------------------|--------|
-| **Timeout** | ⚡ 2s max (configurable) | ⏰ Often 30s+ or none | **50ms vs 30s+ delay** |
-| **Circuit Breaker** | ✅ Automatic failover | ❌ Keep retrying | **Stops wasting resources** |
-| **Fire & Forget** | ✅ Returns instantly, sends after response | ❌ Waits for response | **~0ms vs 2000ms** |
-| **Reliable async delivery** | ✅ Completed on `kernel.terminate` | ⚠️ Lost under PHP-FPM | **No silent data loss** |
-| **Exception Safety** | ✅ Never throws | ⚠️ Can crash app | **100% uptime guarantee** |
-| **JS Offline Queue** | ✅ localStorage backup | ❌ Errors lost | **Zero data loss** |
-| **JS Rate Limiting** | ✅ Token bucket | ❌ Can overwhelm API | **Protected from error storms** |
-
-### Real-World Impact
-
-**Without resilience patterns:**
-```php
-// API is down, timeout is 30s
-$start = microtime(true);
-errorTracker()->captureException($e);  // Blocks for 30 seconds!
-$elapsed = microtime(true) - $start;   // 30,000ms
-// User waited 30 seconds for page to load 😱
+```dotenv
+APPLICATION_LOGGER_DSN=https://your-logger-host.com/your-project-id
+APPLICATION_LOGGER_API_KEY=your-api-key-here
+APPLICATION_LOGGER_ENABLED=false
 ```
 
-**With this bundle:**
-```php
-// API is down, circuit breaker is open
-$start = microtime(true);
-errorTracker()->captureException($e);  // Returns instantly
-$elapsed = microtime(true) - $start;   // <1ms
-// User doesn't notice anything 🎉
+**The bundle ships inert after installation.** Both PHP error tracking and the JavaScript SDK are gated on `APPLICATION_LOGGER_ENABLED`, which the recipe sets to `false`. To start sending telemetry, set your real DSN and API key (preferably in `.env.local`) and flip the flag:
+
+```dotenv
+# .env.local
+APPLICATION_LOGGER_DSN=https://<your-host>/<your-project-id>
+APPLICATION_LOGGER_API_KEY=<your-api-key>
+APPLICATION_LOGGER_ENABLED=true
 ```
 
-### Non-Blocking, Reliable Delivery (How `async: true` Works)
+The recipe also defaults `release` to `%env(default::APP_VERSION)%`, `environment` to `%kernel.environment%`, and `debug` to `%kernel.debug%`.
 
-In the default fire-and-forget mode the bundle **never blocks the host request**,
-yet still **reliably delivers** telemetry — even under per-request SAPIs like
-PHP-FPM and FrankenPHP (non-worker mode), where naive fire-and-forget loses data:
+### Without Flex (manual setup)
 
-1. **During the request:** the HTTP POST is *initiated* (a single non-blocking
-   poll surfaces immediate connection failures so the circuit breaker can trip),
-   then the method returns — adding ~0ms to the user-visible response.
-2. **After the response is sent:** a `kernel.terminate` listener
-   (`FlushTelemetrySubscriber`) drives the in-flight transfer to completion. This
-   runs *after* Symfony has already flushed the response to the client
-   (`fastcgi_finish_request()` under FPM, the runtime flush under FrankenPHP), so
-   the user is never delayed. Without this step, per-request SAPIs would garbage-
-   collect and abort the cURL handle before the request was transmitted, silently
-   losing the event.
-3. **CLI & Messenger workers:** there is no `kernel.terminate` there, so a bounded
-   `__destruct` fallback drains any pending transfers on shutdown.
+1. Register the bundle in `config/bundles.php`:
 
-Each completed transfer feeds its outcome (2xx/3xx success, 4xx/5xx or
-transport error failure) back into the circuit breaker, all bounded by the
-configured `timeout` and never throwing into the host application.
+   ```php
+   return [
+       // ...
+       ApplicationLogger\Bundle\ApplicationLoggerBundle::class => ['all' => true],
+   ];
+   ```
 
-> **Same-host self-monitoring:** because the send completes *after* the response
-> is flushed, it is safe to point the bundle at the same host it runs on with
-> `async: true`. Separate-host installs (the norm) are always non-blocking too.
+2. Create `config/packages/application_logger.yaml`. A minimal configuration only needs a DSN and an API key:
 
----
+   ```yaml
+   application_logger:
+       dsn: '%env(APPLICATION_LOGGER_DSN)%'
+       api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
+       enabled: '%env(bool:APPLICATION_LOGGER_ENABLED)%'
+       environment: '%kernel.environment%'
+   ```
 
-## ✨ Features
+3. Add the corresponding environment variables to `.env` / `.env.local` and clear the cache:
 
-### PHP Backend Features
+   ```bash
+   php bin/console cache:clear
+   ```
 
-<table>
-<tr>
-<td width="50%" valign="top">
-
-**Automatic Capture**
-- 🚨 Uncaught exceptions
-- 📝 Monolog error logs
-- 📡 Log aggregation (centralized app logs)
-- 🔢 HTTP status codes (404, 500, etc.)
-- 👤 User context from Symfony Security
-- 📊 Request/response data
-- 🍞 Breadcrumb trails
-
-</td>
-<td width="50%" valign="top">
-
-**Resilience (Production-Grade)**
-- ⚡ 2s timeout (configurable 0.5-5s)
-- 🔌 Circuit breaker pattern
-- 🔥 Fire-and-forget async mode
-- 🔄 Optional smart retry (exponential backoff)
-- ✅ Zero exceptions thrown
-- 📊 Health monitoring
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-**Security (GDPR Compliant)**
-- 🔐 Automatic PII scrubbing
-- 🌐 IP anonymization
-- 🛡️ Secure DSN authentication
-- 🔒 Encrypted in transit (HTTPS)
-- 📋 Customizable scrub fields
-- 🚫 No sensitive data leaks
-
-</td>
-<td width="50%" valign="top">
-
-**Developer Experience**
-- 🎯 Zero configuration needed
-- 📦 Works out of the box
-- 🔧 Highly customizable
-- 🐛 Built-in debug mode
-- 📊 Circuit breaker monitoring
-- 📚 Comprehensive docs
-
-</td>
-</tr>
-</table>
-
-### JavaScript SDK Features (Included!)
-
-> **No separate npm package needed!** The JavaScript SDK is bundled with this Symfony bundle.
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-**Automatic Capture**
-- 🌐 Window errors (uncaught exceptions)
-- ❌ Unhandled promise rejections
-- 🔢 HTTP status codes from failed API calls
-- 👤 User context (auto-synced from backend)
-- 📊 Browser/platform detection
-- 🍞 Navigation and user actions
-
-</td>
-<td width="50%" valign="top">
-
-**Resilience (Client-Side)**
-- ⚡ 3s timeout with AbortController
-- 🔌 Circuit breaker (sessionStorage)
-- 💾 Offline queue (localStorage, 50 errors)
-- 🚦 Rate limiting (token bucket, 10/min)
-- ⚖️ Deduplication (prevents spam)
-- 📡 Beacon API (send on page close)
-
-</td>
-</tr>
-</table>
+> The bundle does **not** require a Monolog handler to be declared by hand. It prepends its own `service`-type Monolog handler automatically on the channels `!event`, `!request`, and `!php` (those framework channels are excluded to avoid double-recording uncaught exceptions, which are already handled by the exception subscriber).
 
 ---
 
-## 📊 What Gets Tracked?
+## Configuration
 
-This bundle provides comprehensive monitoring for both backend and frontend:
+The configuration root key is `application_logger`. The DSN and API key are the only values required to start sending; everything else has a sensible default.
 
-### PHP Backend Tracking
-- **Exceptions**: All uncaught exceptions via Symfony event subscriber
-- **HTTP Errors**: 4xx and 5xx status codes (404, 500, etc.)
-- **Monolog Integration**: Error-level logs when configured
-- **Context**: Request/response data, user context, server metadata
-- **Breadcrumbs**: User actions leading up to errors
+### DSN and authentication
 
-### JavaScript Frontend Tracking
-- **Browser Errors**: Uncaught exceptions and unhandled promise rejections
-- **API Failures**: Failed HTTP requests with status codes
-- **Error-Triggered Session Replay**: Captures user actions (30s/10 clicks before and after errors) with DOM snapshots
-- **Session Tracking**: Page views, navigation flows, session duration
-- **User Context**: Browser, platform, screen resolution
+The DSN identifies your project endpoint and has the form:
 
-### GDPR Compliance
-- **Automatic PII Scrubbing**: Passwords, tokens, sensitive fields removed
-- **IP Anonymization**: Last octet masked (192.168.1.0 instead of 192.168.1.100)
-- **Session Hashing**: User identifiers are cryptographically hashed
-- **EU Data Residency**: All data stored in EU datacenters
+```
+https://<host>/<project-id>
+```
 
----
+The client-internal parser validates that a project-id path segment exists. **The API key is not embedded in the DSN** — it is sent separately in the `X-Api-Key` request header.
 
-## 📡 Log Aggregation (Centralized Application Logs)
+Authentication summary:
 
-Beyond error tracking, this bundle can ship your **application logs** (any Monolog
-record) to AppLogger's **log aggregation** backend — a Papertrail/Loggly-style
-centralized logging service backed by ClickHouse via the AppLogger log-collector.
-This is a **distinct, optional feature** from error/exception tracking:
+| Channel | Header | Destination |
+|---------|--------|-------------|
+| Error & session tracking | `X-Api-Key: <api_key>` | Platform API host (from the DSN) |
+| Log aggregation | `X-Api-Key: <log_token>` (format `sk_log_…`) | `log_endpoint` (the AppLogger log collector) |
 
-| | Error tracking | Log aggregation |
-|---|----------------|-----------------|
-| **What** | Exceptions, grouped & fingerprinted | Plain application log lines |
-| **Triggered by** | A Monolog record with an attached `Throwable` | A Monolog record **without** an exception |
-| **Endpoint** | `POST {dsn-host}/api/v1/errors` | `POST {log_endpoint}/v1/logs` (+ `/batch`) |
-| **Auth** | `X-Api-Key: <api_key>` | `X-Api-Key: <log_token>` (`sk_log_…`) |
-| **Storage** | PostgreSQL (error groups) | ClickHouse (high-throughput) |
+Inertness rules:
 
-The single auto-wired Monolog handler routes each record automatically: records
-**with** an exception go to the error pipeline; records **without** one go to log
-aggregation. If log aggregation is not configured, plain log records are simply
-**not shipped anywhere** (the handler silently no-ops — it never errors).
+- An **empty** DSN or API key makes the corresponding feature short-circuit silently (no requests, no errors).
+- A **non-empty but malformed** DSN is treated as active misconfiguration and raises `InvalidArgumentException` (so genuine misconfiguration surfaces early rather than silently dropping telemetry).
+- If `log_endpoint` or `log_token` is empty/null, log aggregation silently no-ops.
 
-### Enabling Log Aggregation
+### Core options
 
-Add a log endpoint and ingestion token (from your AppLogger dashboard) — that's it:
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `dsn` | string | `''` | Project endpoint URL `https://host/project-id`. Empty = inert. Deliberately not required, so a skipped Flex recipe never breaks `cache:clear`. |
+| `api_key` | string | `''` | Sent as `X-Api-Key`. Empty = inert. |
+| `enabled` | bool | `true` | Global error-tracking enable. |
+| `release` | string | `null` | Version / release identifier. |
+| `environment` | string | `'production'` | Environment name reported with telemetry. |
+| `endpoint_path` | string | `/api/v1/errors` | Error ingestion path. |
+
+### Log aggregation
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `log_endpoint` | string | `null` | Collector base URL, e.g. `https://<slug>.logs.applogger.eu`. `null` = aggregation off. |
+| `log_token` | string | `null` | Log token (`sk_log_…`), sent as `X-Api-Key` to the collector. |
+| `log_path` | string | `/v1/logs` | Single-log endpoint path (batch endpoint is `<log_path>/batch`). |
+| `log_batch_size` | int | `50` | Records per batch (min 1, max 1000). |
+| `max_log_buffer` | int | `1000` | Max buffered records before oldest are dropped (min 1, max 10000). |
+
+### Performance & resilience
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `timeout` | float | `2.0` | Request timeout in seconds (min 0.5, max 5.0). |
+| `retry_attempts` | int | `0` | Sync-mode retries (min 0, max 3). `0` = fail fast (recommended). |
+| `async` | bool | `true` | Fire-and-forget transport. |
+| `debug` | bool | `false` | Internal PHP debug logging. |
+
+### Circuit breaker (`circuit_breaker`)
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable the circuit breaker. |
+| `failure_threshold` | int | `5` | Failures before the circuit opens (min 1). |
+| `timeout` | int | `60` | Seconds the circuit stays open (min 10, max 300). |
+| `half_open_attempts` | int | `1` | Trial requests allowed while half-open (min 1). |
+
+### Capture
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `capture_level` | string | `error` | Minimum Monolog level routed by the handler (`debug`–`emergency`). An invalid literal falls back to `error` at runtime rather than throwing. |
+| `scrub_fields` | array | see below | Field names redacted before sending (kept in sync with the JS list). |
+| `max_breadcrumbs` | int | `50` | Maximum breadcrumbs retained (min 10, max 100). |
+
+### JavaScript (`javascript`)
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable the frontend SDK. |
+| `auto_inject` | bool | `true` | Automatically inject the SDK into HTML responses. |
+| `debug` | bool | `false` | SDK debug logging. |
+| `environment` | string | `null` | Falls back to the root `environment`. |
+| `release` | string | `null` | Falls back to the root `release`. |
+| `scrub_fields` | array | `[]` | Merged (deduplicated) with the root `scrub_fields`. |
+
+### Session tracking (`session_tracking`)
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `true` | Required for session replay. |
+| `track_page_views` | bool | `true` | Record page-view events. |
+| `idle_timeout` | int | `1800` | Idle timeout in seconds (min 300, max 7200). |
+| `ignored_routes` | array | `['_profiler', '_wdt']` | Routes excluded from tracking. |
+| `ignored_paths` | array | `['/api/', '/_fragment']` | Path prefixes excluded from tracking. |
+
+### Session replay (`session_replay`)
+
+These values are forwarded to the JavaScript SDK. Replay is **error-triggered only** (never continuous). See [Session replay](#session-replay-opt-in) for the important note on default state.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `true` | Error-triggered replay enable (see note below). |
+| `buffer_before_error_seconds` | int | `30` | Seconds buffered before an error (min 5, max 60). |
+| `buffer_before_error_clicks` | int | `10` | Clicks buffered before an error (min 1, max 15). |
+| `buffer_after_error_seconds` | int | `30` | Seconds buffered after an error (min 5, max 60). |
+| `buffer_after_error_clicks` | int | `10` | Clicks buffered after an error (min 1, max 15). |
+| `snapshot_throttle_ms` | int | `1000` | DOM snapshot throttle (min 500, max 5000). |
+| `click_debounce_ms` | int | `1000` | Click debounce (min 100, max 5000). |
+| `max_snapshot_size` | int | `1048576` | Max snapshot size in bytes (min 102400, max 5242880). |
+| `session_timeout_minutes` | int | `30` | Replay session timeout (min 5, max 120). |
+| `max_buffer_size_mb` | int | `5` | Max replay buffer size in MB (min 1, max 20). |
+| `expose_api` | bool | `true` | Expose the JS enable/disable/isEnabled runtime API. |
+
+### Realistic example
 
 ```yaml
 # config/packages/application_logger.yaml
 application_logger:
-    # ... error tracking config (dsn, api_key) ...
+    dsn: '%env(APPLICATION_LOGGER_DSN)%'
+    api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
+    enabled: '%env(bool:APPLICATION_LOGGER_ENABLED)%'
+    environment: '%kernel.environment%'
+    release: '%env(default::APP_VERSION)%'
+
+    # Resilience
+    timeout: 2.0
+    async: true
+    retry_attempts: 0
+
+    circuit_breaker:
+        enabled: true
+        failure_threshold: 5
+        timeout: 60
+
+    # Capture
+    capture_level: error
+    max_breadcrumbs: 50
 
     # Log aggregation (optional)
-    log_endpoint: '%env(APPLICATION_LOGGER_LOG_ENDPOINT)%'  # e.g. https://your-slug.logs.applogger.eu
-    log_token: '%env(APPLICATION_LOGGER_LOG_TOKEN)%'        # sk_log_…
+    log_endpoint: '%env(default::APPLICATION_LOGGER_LOG_ENDPOINT)%'
+    log_token: '%env(default::APPLICATION_LOGGER_LOG_TOKEN)%'
+    log_batch_size: 50
+    max_log_buffer: 1000
 
-    # Minimum Monolog level shipped (debug|info|notice|warning|error|critical|alert|emergency)
-    capture_level: info
-```
-
-```bash
-# .env.local
-APPLICATION_LOGGER_LOG_ENDPOINT=https://your-slug.logs.applogger.eu
-APPLICATION_LOGGER_LOG_TOKEN=sk_log_xxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-Now every `$logger->info()`, `$logger->warning()`, etc. (at or above
-`capture_level`) is shipped to log aggregation. Records carrying an exception keep
-going to error tracking.
-
-> **Zero manual wiring.** The bundle auto-registers its Monolog handler via a
-> container prepend, so you do **not** need to add anything to `monolog.yaml`. The
-> handler is attached to all channels except `event`, `request` and `php` (those
-> framework channels carry uncaught-exception logs already shipped by the
-> exception subscriber, so excluding them avoids double-recording).
-
-### Behavior
-
-- **Batched & async:** records are buffered and flushed in a single HTTP request
-  (default `log_batch_size: 50`), using the **same dispatcher and guarantees** as
-  error tracking — non-blocking, completed after the response, circuit-breaker
-  protected, never throwing.
-- **Memory-bounded:** at most `max_log_buffer` records (default 1000) are buffered;
-  the oldest are dropped beyond that.
-- **Batch cap:** the collector hard-caps batches at **1000** entries; larger
-  buffers are chunked defensively.
-- **Sensitive data scrubbed:** log context is run through the same scrubber as
-  errors, then flattened to a string map for the collector.
-
-### The LogEntry Contract
-
-Each shipped record maps to a collector `LogEntry`:
-
-| Field | Source | Notes |
-|-------|--------|-------|
-| `timestamp` | record datetime | RFC 3339 / ATOM |
-| `severity` | Monolog level | syslog keyword (`debug`…`emergency`) |
-| `message` | record message | truncated to 8000 chars |
-| `app_name` | Monolog channel | truncated to 255 chars |
-| `environment` | `environment` config | e.g. `production` |
-| `context` | record context | scrubbed, flattened to `map<string,string>` (original channel preserved as `context.channel`) |
-
-Single records `POST {log_endpoint}/v1/logs`; multiple records
-`POST {log_endpoint}/v1/logs/batch` with body `{"logs": [LogEntry, …]}`. A
-successful ingestion returns **HTTP 202 Accepted**.
-
-### Log Aggregation Only (No Error Tracking)
-
-`dsn` and `api_key` are still required by the bundle (they configure the error
-client), but if you only want centralized logs, set a high `capture_level` so
-routine logs flow to aggregation while leaving error tracking effectively idle —
-or simply enable both. A typical "logs + errors" setup:
-
-```yaml
-application_logger:
-    dsn: '%env(APPLICATION_LOGGER_DSN)%'
-    api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
-
-    # Error tracking is automatic (exceptions → /api/v1/errors)
-
-    # Log aggregation for everything info-and-above
-    log_endpoint: '%env(APPLICATION_LOGGER_LOG_ENDPOINT)%'
-    log_token: '%env(APPLICATION_LOGGER_LOG_TOKEN)%'
-    capture_level: info
-```
-
----
-
-## 🚀 Quick Start
-
-### Installation
-
-```bash
-composer require dennisvanbeersel/symfony-logger-client
-```
-
-If you're not using Symfony Flex, register the bundle in `config/bundles.php`:
-
-```php
-return [
-    // ...
-    ApplicationLogger\Bundle\ApplicationLoggerBundle::class => ['all' => true],
-];
-```
-
-### Configuration
-
-#### Minimal Configuration (Recommended)
-
-```yaml
-# config/packages/application_logger.yaml
-application_logger:
-    dsn: '%env(APPLICATION_LOGGER_DSN)%'
-```
-
-Add to `.env`:
-
-```bash
-APPLICATION_LOGGER_DSN=https://public_key@logger.example.com/project_id
-APP_VERSION=1.0.0  # Optional but recommended
-```
-
-#### Full Configuration Example
-
-<details>
-<summary><strong>Click to see all available options</strong></summary>
-
-> **Source of truth:** the canonical, installed configuration is the Symfony Flex
-> recipe at `recipe/config/packages/application_logger.yaml` (and its versioned
-> copy under `recipe/contrib/.../config/`). The snippet below and
-> `config/packages/application_logger.yaml.example` are illustrative mirrors —
-> defaults (e.g. `scrub_fields`) are authoritatively defined in
-> `src/DependencyInjection/Configuration.php`. If they ever disagree, the recipe
-> and `Configuration.php` win.
-
-```yaml
-# config/packages/application_logger.yaml
-application_logger:
-    # Required: Your AppLogger DSN (get from applogger.eu dashboard)
-    dsn: '%env(APPLICATION_LOGGER_DSN)%'
-
-    # Optional: Enable/disable the bundle
-    enabled: true
-
-    # Optional: Application version for release tracking
-    release: '%env(APP_VERSION)%'
-
-    # Optional: Environment identifier
-    environment: '%kernel.environment%'
-
-    # Resilience Settings
-    timeout: 2.0              # API timeout (0.5-5.0 seconds)
-    retry_attempts: 0         # Retry failed requests (0-3, 0=fail fast)
-    async: true               # Fire-and-forget mode (recommended)
-
-    # Circuit Breaker
-    circuit_breaker:
-        enabled: true         # Enable circuit breaker pattern
-        failure_threshold: 5  # Open after N consecutive failures
-        timeout: 60           # Stay open for N seconds
-        half_open_attempts: 1 # Test requests before closing
-
-    # What to Capture (minimum Monolog level routed by the handler)
-    capture_level: error      # debug, info, notice, warning, error, critical, alert, emergency
-
-    # Log Aggregation (optional) - ship non-exception logs to centralized logging.
-    # Leave null to disable; plain log records are then not shipped anywhere.
-    log_endpoint: null        # e.g. https://your-slug.logs.applogger.eu
-    log_token: null           # log ingestion token (sk_log_…)
-    log_path: '/v1/logs'      # collector ingestion path (batch is this + "/batch")
-    log_batch_size: 50        # buffer N records before flushing one batch (1-1000)
-    max_log_buffer: 1000      # hard cap on buffered records (1-10000)
-
-    # Error ingestion path on the platform API
-    endpoint_path: '/api/v1/errors'
-
-    # Breadcrumbs
-    max_breadcrumbs: 50       # Maximum breadcrumbs to keep (10-100)
-
-    # Security: Sensitive Data Scrubbing (these are the built-in defaults)
-    scrub_fields:
-        - password
-        - token
-        - api_key
-        - secret
-        - authorization
-        - credit_card
-        - creditcard
-        - card_number
-        - cvv
-        - ssn
-        - iban
-
-    # Session Tracking (Required for session replay)
-    session_tracking:
-        enabled: true              # Enable automatic session tracking (default: true)
-        track_page_views: true     # Track page views as session events (default: true)
-        idle_timeout: 1800         # Session idle timeout in seconds (default: 30 min)
-
-    # Error-Triggered Session Replay
-    session_replay:
-        enabled: true                      # Enable session replay (default: true)
-        buffer_before_error_seconds: 30    # Seconds to buffer before error (5-60, default: 30)
-        buffer_before_error_clicks: 10     # Clicks to buffer before error (1-15, default: 10)
-        buffer_after_error_seconds: 30     # Seconds to buffer after error (5-60, default: 30)
-        buffer_after_error_clicks: 10      # Clicks to buffer after error (1-15, default: 10)
-        click_debounce_ms: 1000            # Click debounce delay (100-5000ms, default: 1000)
-        snapshot_throttle_ms: 1000         # DOM snapshot throttle (500-5000ms, default: 1000)
-        max_snapshot_size: 1048576         # Max snapshot size in bytes (default: 1MB)
-        session_timeout_minutes: 30        # Cross-page session timeout (5-120 min, default: 30)
-        max_buffer_size_mb: 5              # Max localStorage size (1-20MB, default: 5MB)
-        expose_api: true                   # Expose JS API for user control (default: true)
-
-    # JavaScript SDK
+    # Frontend SDK
     javascript:
-        enabled: true         # Enable Twig globals for JS SDK
-        auto_inject: true     # Auto-inject init script (recommended)
-        debug: false          # Enable console.log debugging
+        enabled: '%env(bool:APPLICATION_LOGGER_ENABLED)%'
+        auto_inject: true
 
-    # Debug
-    debug: '%kernel.debug%'   # Enable internal logging
+    session_replay:
+        enabled: true
 ```
-
-</details>
-
-### Clear Cache
-
-```bash
-php bin/console cache:clear
-```
-
-**Done!** All exceptions are now automatically tracked. Visit your AppLogger dashboard at [applogger.eu](https://applogger.eu) to see errors.
 
 ---
 
-## 📖 Usage
+## Usage
 
-### 1️⃣ PHP Backend Usage
+### Automatic exception capture (zero-config)
 
-#### Automatic Capture (Zero Code Changes)
+Once the bundle is enabled with a valid DSN and API key, uncaught exceptions are captured automatically. The exception subscriber listens on `kernel.exception` at a low priority (`-100`, after the framework's own handlers), extracts the HTTP status code (the status of an `HttpExceptionInterface`, otherwise `500`), attaches `exception_class` and `exception_code` tags plus a breadcrumb, and sends the error payload. The subscriber is wrapped in its own try/catch and never interferes with your application's exception handling.
 
-The bundle automatically captures:
+No code changes are needed for this.
 
-- ✅ **Uncaught exceptions** via Symfony event subscriber
-- ✅ **HTTP status codes** (404, 403, 500, etc.)
-- ✅ **Monolog error logs** (when configured)
-- ✅ **User context** from Symfony Security
-- ✅ **Request data** (headers, POST data, query params)
+### Manual capture via Monolog
 
-**No code changes required!** Just install and configure.
+Because the bundle auto-registers a Monolog handler, the most natural way to record events from your own code is to log through Monolog. The handler routes records by content:
 
-#### Monolog Integration (Auto-Wired)
-
-The bundle **automatically registers its Monolog handler** for you — there is
-**no need to edit `monolog.yaml`**. On install, every Monolog record is routed:
-
-- records carrying an exception → **error tracking** (`/api/v1/errors`)
-- plain records (no exception), at or above `capture_level` → **log aggregation**
-  (when `log_endpoint`/`log_token` are configured; otherwise silently dropped)
-
-So `$logger->error('...', ['exception' => $e])` is tracked as an error, while
-`$logger->info('User signed in')` is shipped to log aggregation. The handler is
-attached to all channels except `event`, `request` and `php` (those carry
-uncaught-exception logs already shipped by the exception subscriber).
-
-Control the floor with `capture_level`:
-
-```yaml
-# config/packages/application_logger.yaml
-application_logger:
-    capture_level: info  # debug|info|notice|warning|error|critical|alert|emergency
-```
-
-> See [Log Aggregation](#-log-aggregation-centralized-application-logs) for
-> shipping plain logs to centralized logging.
-
-#### Manual Error Capture
-
-For custom error handling:
+- a record whose `context['exception']` is a `\Throwable` is sent to **error tracking**;
+- any other record at or above `capture_level` is sent to **log aggregation**.
 
 ```php
-use ApplicationLogger\Bundle\Service\ApiClient;
-use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
+use Psr\Log\LoggerInterface;
 
-class PaymentService
+final class CheckoutService
 {
-    public function __construct(
-        private ApiClient $apiClient,
-        private BreadcrumbCollector $breadcrumbs
-    ) {}
-
-    public function processPayment(Order $order): void
+    public function __construct(private readonly LoggerInterface $logger)
     {
-        // Add breadcrumb for context
-        $this->breadcrumbs->add([
-            'type' => 'user',
-            'category' => 'payment',
-            'message' => 'Processing payment',
-            'data' => ['order_id' => $order->getId()],
-        ]);
+    }
 
+    public function process(Order $order): void
+    {
         try {
-            $this->chargeCustomer($order);
-        } catch (\Exception $e) {
-            // Manual error reporting
-            $this->apiClient->sendError([
-                'exception' => [
-                    'type' => $e::class,
-                    'value' => $e->getMessage(),
-                    'stacktrace' => $this->formatStackTrace($e),
-                ],
-                'level' => 'error',
-                'tags' => ['feature' => 'payment'],
+            // ... domain logic ...
+        } catch (\Throwable $e) {
+            // Routed to error tracking (carries a Throwable in context).
+            $this->logger->error('Checkout failed', [
+                'exception' => $e,
+                'order_id'  => $order->getId(),
             ]);
 
-            throw $e; // Re-throw if needed
+            throw $e;
         }
     }
 }
 ```
 
-#### Adding Breadcrumbs
+### Log aggregation via Monolog
 
-Track user actions leading up to errors:
+Records without an exception that meet the `capture_level` threshold are buffered and shipped to the log collector in batches:
 
 ```php
-use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
-
-class CheckoutController extends AbstractController
-{
-    public function __construct(
-        private BreadcrumbCollector $breadcrumbs
-    ) {}
-
-    #[Route('/checkout/step-1')]
-    public function step1(): Response
-    {
-        $this->breadcrumbs->add([
-            'type' => 'navigation',
-            'category' => 'checkout',
-            'message' => 'User entered checkout',
-            'level' => 'info',
-        ]);
-
-        // ... your code
-    }
-}
+$this->logger->warning('Payment gateway latency elevated', [
+    'gateway' => 'acme-pay',
+    'latency_ms' => 812,
+]);
 ```
 
-### 2️⃣ JavaScript SDK Usage
+Each record is converted into a log entry with an RFC3339 timestamp, an RFC5424 severity keyword (`debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, `emergency`), the Monolog channel as the application name, the environment, and a scrubbed, flattened context map. Entries are sent to `POST <log_endpoint><log_path>` (or the `/batch` variant for batches); a successful ingestion returns `HTTP 202 Accepted`. If no `log_endpoint` / `log_token` is configured, log aggregation is silently skipped.
 
-#### Zero-Config Mode (Automatic) ⭐ Recommended
+### JavaScript SDK
 
-**Default behavior - no setup needed!**
+The bundled SDK is shipped pre-built and integrated through AssetMapper automatically. With `javascript.auto_inject` enabled (the default), the SDK is injected into eligible HTML responses — main requests with a `text/html` content type, a status below 400, a `</body>` tag, and a body under 1 MiB. Error pages (4xx/5xx) are deliberately skipped.
 
-The bundle automatically:
-1. ✅ Registers JS SDK with AssetMapper
-2. ✅ Injects initialization script on all HTML pages
-3. ✅ Configures with your DSN
-4. ✅ Sets environment and release
-5. ✅ Populates user context
-6. ✅ Makes `window.appLogger` available
-
-**Just install the bundle - JavaScript tracking works immediately!**
-
-#### Manual Mode (Custom Control)
-
-If you want control over when/where the SDK loads:
-
-```yaml
-# config/packages/application_logger.yaml
-application_logger:
-    javascript:
-        auto_inject: false  # Disable automatic injection
-```
-
-Then manually add to your templates:
+If you prefer to place the SDK yourself (and Twig is available), disable `auto_inject` and call the Twig function just before `</body>`:
 
 ```twig
 {# templates/base.html.twig #}
-<!DOCTYPE html>
-<html>
-<body>
-    {% block body %}{% endblock %}
-
-    {# Manually place the initialization script #}
     {{ application_logger_init() }}
-</body>
+  </body>
 </html>
 ```
 
-#### Using the JavaScript SDK
-
-Once loaded, use `window.appLogger`:
+At runtime the SDK is exposed as `window.ApplicationLogger`. It automatically captures `window` `error` events, unhandled promise rejections, failed fetch/HTTP requests, and `console.error()` breadcrumbs. When `expose_api` is enabled (the default), you can also report manually:
 
 ```javascript
-// Capture exceptions
-try {
-    riskyOperation();
-} catch (error) {
-    window.appLogger.captureException(error, {
-        tags: { component: 'checkout' },
-        extra: { orderId: 12345 }
-    });
-}
-
-// Capture messages
-window.appLogger.captureMessage('Payment processed', 'info');
-
-// Add breadcrumbs
-window.appLogger.addBreadcrumb({
-    type: 'user',
-    message: 'User clicked checkout button',
-    data: { cartTotal: 99.99 }
+// Capture an exception
+window.ApplicationLogger.captureException(new Error('Manual report'), {
+  tags: { feature: 'checkout' },
 });
 
-// Set user context
-window.appLogger.setUser({
-    id: 'user-123',
-    email: 'user@example.com'
-});
+// Capture a message
+window.ApplicationLogger.captureMessage('User completed onboarding', 'info');
 
-// Check circuit breaker status
-window.appLogger.transport.getStats();
-// {queueSize: 0, rateLimitTokens: 9.2, circuitBreaker: {state: 'closed'}}
+// Enrich context
+window.ApplicationLogger.setUser({ id: '123' });
+window.ApplicationLogger.setTags({ plan: 'pro' });
+window.ApplicationLogger.addBreadcrumb({ category: 'ui', message: 'Opened modal' });
 ```
 
----
+The SDK is resilient on the client side too: a sessionStorage-backed circuit breaker (default threshold 5, 60s open window), a localStorage offline queue (default 50 events, 24h max age), token-bucket rate limiting (default burst of 10, refilling at 1 token/second), and deduplication (default 5s window). On page close it uses the Beacon API to flush queued events. Breadcrumbs are capped at 50 by default.
 
-## 🛡️ Resilience Features Explained
+### Session replay (opt-in)
 
-### Circuit Breaker Pattern
+Session replay is **error-triggered only** — it never records continuously. When enabled, the SDK buffers a window of DOM snapshots and interactions before and after an error and sends that data **together with the error payload** (not as a separate request). Cross-page continuity is maintained via localStorage.
 
-**Problem:** When the API is down, your app wastes resources retrying.
+Session tracking (`session_tracking.enabled`) must be on for replay to function.
 
-**Solution:** Circuit breaker with three states:
-
-```
-CLOSED (normal) → [5 failures] → OPEN (service down)
-                                      ↓
-                               [60 seconds wait]
-                                      ↓
-CLOSED ← [success] ← HALF_OPEN ← [timeout passed]
-         [failure] → OPEN
-```
-
-**PHP Implementation:**
-- Uses Symfony Cache for state persistence
-- After 5 consecutive failures → opens for 60 seconds
-- While OPEN: all API calls skip immediately (zero overhead)
-- After 60s: enters HALF_OPEN, tries 1 request
-- Success → CLOSED, failure → OPEN for another 60s
-
-**JavaScript Implementation:**
-- Uses sessionStorage for state persistence
-- Same 3-state logic as PHP
-- Prevents browser from hitting failing API
-
-**Monitoring:**
-
-```php
-// PHP
-$state = $apiClient->getCircuitBreakerState();
-// ['state' => 'closed', 'failureCount' => 2, 'openedAt' => null]
-```
+> **Important — default state:** Replay is an opt-in feature. The JavaScript SDK itself defaults `sessionReplayEnabled` to `false`, while the bundle's PHP `session_replay.enabled` config node defaults to `true`; the effective value forwarded to the SDK is whatever the PHP configuration / Twig integration provides. Treat replay as **opt-in and error-triggered**, and explicitly confirm `session_replay.enabled` in your configuration to match your intended behavior. When `expose_api` is `true`, replay can also be toggled at runtime:
 
 ```javascript
-// JavaScript
-window.appLogger.transport.circuitBreaker.getState();
-// {state: 'closed', failureCount: 0, openedAt: null}
+window.ApplicationLogger.sessionReplay.enable();
+window.ApplicationLogger.sessionReplay.disable();
+window.ApplicationLogger.sessionReplay.isEnabled();
 ```
 
-### Timeout Protection
+### The non-blocking, never-throws guarantee
 
-**PHP:**
-- Maximum 2 seconds per API call (configurable 0.5-5s)
-- Configured at HTTP client level
-- After timeout: connection aborted, circuit breaker records failure
+By default (`async: true`) telemetry is dispatched fire-and-forget and completed **after** the HTTP response has been flushed to the client:
 
-**JavaScript:**
-- Maximum 3 seconds per API call
-- Uses `AbortController` to forcefully abort
-- After timeout: error queued to localStorage
+- On the web, a `kernel.terminate` subscriber (priority `-1024`, runs last) flushes buffered logs and then completes any in-flight error requests, so the user is never delayed by telemetry. This also makes **same-host self-monitoring safe** — the send finishes after the response is sent.
+- For CLI commands and Messenger workers (which have no `kernel.terminate`), a bounded destructor-based fallback completes outstanding requests within a short time budget.
+- Post-response completion is capped (at `min(timeout, 2.0)` seconds) so a slow backend cannot stall worker recycling.
 
-### Fire-and-Forget Mode (PHP)
-
-When `async: true` (default):
-
-```php
-// With async: false (synchronous)
-$start = microtime(true);
-$apiClient->sendError($payload);
-$elapsed = microtime(true) - $start;
-// $elapsed could be 2000ms (full timeout)
-
-// With async: true (fire-and-forget)
-$start = microtime(true);
-$apiClient->sendError($payload);
-$elapsed = microtime(true) - $start;
-// $elapsed is typically < 1ms (request initiated, method returns)
-```
-
-**Reliable post-response completion:** the request is *initiated* during your
-request (adding ~0ms) and *completed* on `kernel.terminate` — after Symfony has
-already sent the response to the client. This makes async delivery reliable even
-on per-request SAPIs (PHP-FPM, FrankenPHP non-worker mode) where a naive fire-
-and-forget request would be aborted before transmission. CLI commands and
-Messenger consumers fall back to a bounded `__destruct` drain on shutdown. The
-host request is never delayed. (See
-[Non-Blocking, Reliable Delivery](#non-blocking-reliable-delivery-how-async-true-works).)
-
-### Offline Queue (JavaScript)
-
-When API is unreachable:
-1. Errors stored in localStorage (FIFO queue)
-2. Maximum 50 errors (oldest removed first)
-3. Errors expire after 24 hours
-4. On next successful connection: queue automatically flushed
-
-**Handles quota errors gracefully:**
-- If localStorage full → removes oldest 50%
-- If still full → clears entire queue
-
-### Rate Limiting (JavaScript)
-
-Token bucket algorithm prevents error storms:
-- **Capacity:** 10 tokens
-- **Refill rate:** ~1 token per 6 seconds (~10 per minute)
-- **Behavior:** No tokens → error goes to offline queue
-
-```javascript
-window.appLogger.transport.getStats();
-// {rateLimitTokens: 8.5, queueSize: 0, ...}
-```
-
-### Deduplication (JavaScript)
-
-Prevents sending the same error repeatedly:
-- Creates hash from: error type + message + top 3 stack frames
-- Remembers recently sent errors for 5 seconds
-- Duplicate detected → ignored
-
-### Beacon API (JavaScript)
-
-**Problem:** When user closes tab, errors in queue are lost.
-
-**Solution:** `navigator.sendBeacon()` API
-- Listens to `beforeunload` and `visibilitychange`
-- Flushes up to 10 most recent errors
-- Guaranteed delivery even as page closes
+The single dispatch envelope is guarded throughout: the global kill-switch, JSON encoding, the circuit breaker, and the transport itself are all wrapped so failures are recorded internally and **never thrown into your application**. The only intentional exceptions are at construction time (an out-of-range `timeout`, or a non-empty but malformed DSN), which surface genuine misconfiguration early.
 
 ---
 
-## 🔒 Security Features
+## Privacy & GDPR
 
-### Automatic Data Scrubbing
+The bundle is designed to scrub sensitive data **on your host, before anything is transmitted**:
 
-Sensitive data automatically removed from error reports:
+- **Key-based field redaction.** Values whose key name (case-insensitive substring match) contains a configured scrub fragment are replaced with `[REDACTED]`, recursively (depth-limited). The default PHP scrub fields are:
 
-**Default scrubbed fields:**
-- password, token, api_key, secret, authorization
-- credit_card, creditcard, card_number, cvv, ssn, iban
+  ```text
+  password, token, api_key, secret, authorization,
+  credit_card, creditcard, card_number, cvv, ssn, iban
+  ```
 
-**How it works:**
-- Recursive key check (case-insensitive substring matching)
-- Replaces values with `[REDACTED]`
-- Applies to: request data, headers, cookies, extra context
+  > This redaction is key-based: values stored under non-matching keys are not inspected, so secrets embedded in free-form text under an innocuous key are not caught. Add your own field names via `scrub_fields` as needed. The JavaScript SDK maintains its own (broader) default scrub list — the two lists are kept in parallel rather than shared, so configure both if you add custom fields.
 
-**Example:**
+- **URL and query-string redaction.** Query-string values whose name matches a scrub fragment are redacted, and embedded userinfo credentials (`user:pass@host`) are always redacted, while scheme, host, port, path, and fragment are preserved.
 
-```php
-$request->request->all();
-// ['email' => 'user@example.com', 'password' => 'secret123']
+- **IP anonymization.** IPv4 addresses have their last octet masked (e.g. `192.168.1.100` → `192.168.1.0`); IPv6 addresses keep the first 48 bits and zero the remaining 80 bits. Invalid or null inputs return `null` — a raw IP is never echoed.
 
-// Sent to API as:
-// ['email' => 'user@example.com', 'password' => '[REDACTED]']
-```
+- **Session-id hashing.** Session identifiers are SHA-256 hashed before leaving the host.
 
-**Custom scrub fields:**
-
-```yaml
-application_logger:
-    scrub_fields:
-        - password
-        - credit_card
-        - my_custom_secret
-```
-
-### IP Address Anonymization
-
-**IPv4:** Masks last octet
-```
-192.168.1.100 → 192.168.1.0
-```
-
-**IPv6:** Masks last 80 bits
-```
-2001:0db8:85a3:0000:0000:8a2e:0370:7334
-→ 2001:0db8:85a3:0000:0000:0000:0000:0000
-```
-
-**Why:** GDPR compliance - IP addresses are personal data.
+The AppLogger platform itself is EU-hosted with EU data residency. As with any monitoring tool, review what your application logs and adjust `scrub_fields` to match your data-protection obligations.
 
 ---
 
-## 🔧 Advanced Configuration
+## The AppLogger.eu platform
 
-### Disable in Development
+[AppLogger](https://applogger.eu) is an EU-hosted, privacy-first error tracking and application/log monitoring SaaS built on a Symfony stack:
 
-```yaml
-# config/packages/dev/application_logger.yaml
-application_logger:
-    enabled: false
-```
+- **Error tracking** — errors are grouped and fingerprinted into error groups, backed by PostgreSQL.
+- **Log aggregation** — high-volume logs are stored in ClickHouse, ingested through a dedicated log collector.
+- **Privacy by design** — EU data residency, IP anonymization, PII scrubbing, and session-id hashing.
 
-Or use `.env.local`:
+### Getting a DSN and tokens
+
+1. Sign up at **[applogger.eu](https://applogger.eu)**.
+2. Create a project to obtain its **DSN** and **API key** (used for error and session tracking).
+3. For log aggregation, obtain the project's **log endpoint** and **log token** (`sk_log_…`).
+4. Put these values in your `.env.local` and set `APPLICATION_LOGGER_ENABLED=true`.
+
+---
+
+## Links
+
+- **Website & sign-up:** https://applogger.eu
+- **Package repository & issues:** https://github.com/dennisvanbeersel/symfony-logger-client
+- **Platform documentation** (API, architecture, security): https://github.com/dennisvanbeersel/application-logger
+
+---
+
+## Contributing
+
+Contributions are welcome. Please open issues and pull requests on the [package repository](https://github.com/dennisvanbeersel/symfony-logger-client).
+
+The project follows PSR-12 with `declare(strict_types=1)` and is checked at PHPStan level 6. Convenience Composer scripts are provided:
 
 ```bash
-APPLICATION_LOGGER_ENABLED=false
+composer test       # Run the PHPUnit test suite
+composer cs-check   # Check coding style (PHP-CS-Fixer)
+composer cs-fix     # Apply coding-style fixes
+composer phpstan    # Run static analysis
+composer lint       # cs-check + phpstan
 ```
 
-### Multiple Projects
-
-Send errors to different AppLogger projects:
-
-```yaml
-# config/services.yaml
-services:
-    app.logger.project_a:
-        class: ApplicationLogger\Bundle\Service\ApiClient
-        arguments:
-            $dsn: '%env(LOGGER_DSN_PROJECT_A)%'
-            $timeout: 2.0
-            $circuitBreaker: '@ApplicationLogger\Bundle\Service\CircuitBreaker'
-
-    app.logger.project_b:
-        class: ApplicationLogger\Bundle\Service\ApiClient
-        arguments:
-            $dsn: '%env(LOGGER_DSN_PROJECT_B)%'
-            $timeout: 2.0
-            $circuitBreaker: '@ApplicationLogger\Bundle\Service\CircuitBreaker'
-```
-
-### Custom Error Handler
-
-```php
-use ApplicationLogger\Bundle\Service\ApiClient;
-use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
-use ApplicationLogger\Bundle\Service\ContextCollector;
-
-class CustomErrorHandler
-{
-    public function __construct(
-        private ApiClient $apiClient,
-        private ContextCollector $contextCollector,
-        private BreadcrumbCollector $breadcrumbs
-    ) {}
-
-    public function handleBusinessError(BusinessException $e): void
-    {
-        $this->apiClient->sendError([
-            'exception' => [
-                'type' => $e::class,
-                'value' => $e->getMessage(),
-                'stacktrace' => $this->formatTrace($e),
-            ],
-            'level' => 'warning', // Business errors are warnings
-            'context' => $this->contextCollector->collectContext(),
-            'breadcrumbs' => $this->breadcrumbs->get(),
-            'tags' => [
-                'error_type' => 'business',
-                'rule' => $e->getBusinessRule(),
-            ],
-        ]);
-    }
-}
-```
+Please ensure `composer lint` and `composer test` pass before submitting a pull request.
 
 ---
 
-## 🐛 Troubleshooting
+## Security
 
-<details>
-<summary><strong>Errors Not Appearing in Dashboard</strong></summary>
-
-**1. Check bundle is enabled:**
-```bash
-php bin/console debug:config application_logger
-```
-
-**2. Check DSN is correct:**
-```bash
-php bin/console debug:container --parameters | grep application_logger.dsn
-```
-
-**3. Check circuit breaker:**
-```php
-$cbState = $this->apiClient->getCircuitBreakerState();
-// If state is 'open', wait 60s or clear cache
-```
-
-**4. Enable debug mode:**
-```yaml
-application_logger:
-    debug: true
-```
-Check `var/log/dev.log` for details.
-
-</details>
-
-<details>
-<summary><strong>Circuit Breaker Stuck Open</strong></summary>
-
-**Solution 1:** Wait for timeout (default 60 seconds)
-
-**Solution 2:** Clear cache:
-```bash
-php bin/console cache:clear
-```
-
-**Solution 3:** Manually reset:
-```php
-$cache->delete('app_logger_circuit_breaker_state');
-```
-
-</details>
-
-<details>
-<summary><strong>JavaScript SDK Not Loading</strong></summary>
-
-**1. Check AssetMapper:**
-```bash
-php bin/console debug:asset-map | grep application-logger
-```
-
-**2. Check browser console** for import errors
-
-**3. Verify meta tag exists:**
-```html
-<meta name="app-logger-dsn" content="https://...">
-```
-
-</details>
-
-<details>
-<summary><strong>DSN Format Error</strong></summary>
-
-**Correct format:**
-```
-https://public_key@your-host.com/project_id
-```
-
-**Common mistakes:**
-```
-❌ http://public_key@host/project       (use https://)
-❌ https://host/project                 (missing public_key@)
-❌ https://public_key:secret@host/proj  (secret not needed)
-❌ https://public_key@host              (missing /project_id)
-```
-
-</details>
+If you discover a security vulnerability, please report it responsibly rather than opening a public issue. Use the security advisory channel on the [package repository](https://github.com/dennisvanbeersel/symfony-logger-client/security) so it can be addressed before public disclosure.
 
 ---
 
-## 🛠️ Development
+## License
 
-### Code Quality
+Released under the [MIT License](https://github.com/dennisvanbeersel/symfony-logger-client/blob/main/LICENSE).
 
-```bash
-composer lint        # PHP-CS-Fixer + PHPStan
-composer cs-check    # Check PSR-12
-composer cs-fix      # Auto-fix PSR-12
-composer phpstan     # Static analysis (level 6)
-npm run lint         # ESLint
-npm run lint:fix     # Auto-fix ESLint
-```
-
-### Testing
-
-```bash
-# PHP tests
-composer test
-vendor/bin/phpunit
-
-# JavaScript tests
-npm test
-npm run test:coverage
-```
-
-### Requirements
-
-**Minimum:**
-- PHP 8.2+
-- Symfony 6.4, 7.x or 8.x
-- ext-json, ext-curl
-
-**Recommended:**
-- PHP 8.3+
-- Symfony 7.1+
-- APCu or Redis (production cache)
-
----
-
-## 📚 Documentation
-
-| Document | Description |
-|----------|-------------|
-| [AppLogger Website](https://applogger.eu) | Sign up and get your DSN |
-| [API Reference](https://github.com/dennisvanbeersel/application-logger/blob/master/docs/API.md) | REST API documentation |
-| [Architecture](https://github.com/dennisvanbeersel/application-logger/blob/master/docs/ARCHITECTURE.md) | Technical architecture |
-| [Security & Testing](https://github.com/dennisvanbeersel/application-logger/blob/master/docs/SECURITY_AND_TESTING.md) | Security practices and testing guidelines |
-
----
-
-## 📝 License
-
-Part of the AppLogger project - see main [LICENSE](https://github.com/dennisvanbeersel/application-logger/blob/master/LICENSE) file.
-
----
-
-## 🙏 Credits
-
-**Key Design Principles:**
-1. **Resilience first** - never impact the host application
-2. **Secure by default** - no sensitive data exposure
-3. **Zero configuration** - works out of the box
-4. **Production ready** - battle-tested patterns
-5. **Developer friendly** - comprehensive docs
-
-Built with ❤️ for the Symfony community.
-
----
-
-<div align="center">
-
-**Questions? Issues? Feedback?**
-
-[📖 Documentation](https://github.com/dennisvanbeersel/application-logger/tree/master/docs) •
-[🐛 Report Bug](https://github.com/dennisvanbeersel/symfony-logger-client/issues) •
-[💬 Discussions](https://github.com/dennisvanbeersel/application-logger/discussions)
-
-[⬆ Back to Top](#applogger---symfony-bundle)
-
-</div>
+Authored by Dennis Van Beersel — [applogger.eu](https://applogger.eu).
