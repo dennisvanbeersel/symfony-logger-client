@@ -11,8 +11,6 @@
  * - LRU eviction when quota is tight
  * - Size monitoring and reporting
  */
-import { createLogger } from './util/logger.js';
-
 export class StorageManager {
     /**
      * @param {Object} [config] - Configuration options
@@ -24,8 +22,6 @@ export class StorageManager {
             maxBufferSizeMB: Math.min(config.maxBufferSizeMB || 5, 20),
             debug: config.debug || false,
         };
-        // Debug-gated internal logger (no-op in production) - JSSDK-03/04.
-        this.logger = createLogger(this.config);
 
         // localStorage keys
         this.STORAGE_KEY_BUFFER = '_app_logger_replay_buffer';
@@ -42,7 +38,7 @@ export class StorageManager {
         };
 
         if (this.config.debug) {
-            this.logger.warn('StorageManager initialized with config:', this.config);
+            console.warn('StorageManager initialized with config:', this.config);
         }
     }
 
@@ -55,7 +51,7 @@ export class StorageManager {
     save(bufferData) {
         try {
             if (!bufferData || typeof bufferData !== 'object') {
-                this.logger.warn('StorageManager: Invalid buffer data');
+                console.warn('StorageManager: Invalid buffer data');
                 return false;
             }
 
@@ -65,7 +61,7 @@ export class StorageManager {
 
             if (estimatedSize > maxSizeBytes) {
                 if (this.config.debug) {
-                    this.logger.warn('StorageManager: Buffer too large', {
+                    console.warn('StorageManager: Buffer too large', {
                         size: estimatedSize,
                         max: maxSizeBytes,
                         sizeMB: (estimatedSize / 1024 / 1024).toFixed(2),
@@ -93,7 +89,7 @@ export class StorageManager {
             this.stats.savesSuccessful++;
 
             if (this.config.debug) {
-                this.logger.warn('StorageManager: Buffer saved', {
+                console.warn('StorageManager: Buffer saved', {
                     size: estimatedSize,
                     events: bufferData.buffer?.length || 0,
                 });
@@ -107,7 +103,7 @@ export class StorageManager {
                 this.stats.quotaExceededCount++;
 
                 if (this.config.debug) {
-                    this.logger.warn('StorageManager: Quota exceeded, attempting cleanup');
+                    console.warn('StorageManager: Quota exceeded, attempting cleanup');
                 }
 
                 // Try to make space and retry
@@ -128,12 +124,12 @@ export class StorageManager {
                     this.stats.savesSuccessful++;
                     return true;
                 } catch {
-                    this.logger.error('StorageManager: Failed to save even after cleanup');
+                    console.error('StorageManager: Failed to save even after cleanup');
                     return false;
                 }
             }
 
-            this.logger.error('StorageManager: Failed to save buffer:', error);
+            console.error('StorageManager: Failed to save buffer:', error);
             return false;
         }
     }
@@ -159,14 +155,14 @@ export class StorageManager {
 
             // Validate buffer structure
             if (!Array.isArray(bufferData.buffer)) {
-                this.logger.warn('StorageManager: Invalid buffer structure');
+                console.warn('StorageManager: Invalid buffer structure');
                 return null;
             }
 
             this.stats.loadsSuccessful++;
 
             if (this.config.debug) {
-                this.logger.warn('StorageManager: Buffer loaded', {
+                console.warn('StorageManager: Buffer loaded', {
                     events: bufferData.buffer.length,
                     isRecording: bufferData.isRecordingAfterError,
                 });
@@ -175,7 +171,7 @@ export class StorageManager {
             return bufferData;
         } catch (error) {
             this.stats.loadsFailed++;
-            this.logger.error('StorageManager: Failed to load buffer:', error);
+            console.error('StorageManager: Failed to load buffer:', error);
             return null;
         }
     }
@@ -189,10 +185,10 @@ export class StorageManager {
             localStorage.removeItem(this.STORAGE_KEY_METADATA);
 
             if (this.config.debug) {
-                this.logger.warn('StorageManager: Buffer cleared');
+                console.warn('StorageManager: Buffer cleared');
             }
         } catch (error) {
-            this.logger.error('StorageManager: Failed to clear buffer:', error);
+            console.error('StorageManager: Failed to clear buffer:', error);
         }
     }
 
@@ -213,14 +209,14 @@ export class StorageManager {
                     this.stats.cleanupCount++;
 
                     if (this.config.debug) {
-                        this.logger.warn('StorageManager: Cleaned up old buffer', {
+                        console.warn('StorageManager: Cleaned up old buffer', {
                             ageHours: (age / 1000 / 60 / 60).toFixed(1),
                         });
                     }
                 }
             }
         } catch (error) {
-            this.logger.error('StorageManager: Cleanup failed:', error);
+            console.error('StorageManager: Cleanup failed:', error);
         }
     }
 
@@ -238,7 +234,7 @@ export class StorageManager {
         } catch (error) {
             // Metadata save failure is not critical
             if (this.config.debug) {
-                this.logger.warn('StorageManager: Failed to save metadata:', error);
+                console.warn('StorageManager: Failed to save metadata:', error);
             }
         }
     }
@@ -294,7 +290,7 @@ export class StorageManager {
             }
 
             if (this.config.debug) {
-                this.logger.warn('StorageManager: Buffer pruned', {
+                console.warn('StorageManager: Buffer pruned', {
                     originalEvents: bufferData.buffer.length,
                     prunedEvents: events.length,
                     originalSize: this.estimateSize(bufferData),
@@ -304,7 +300,7 @@ export class StorageManager {
 
             return pruned;
         } catch (error) {
-            this.logger.error('StorageManager: Failed to prune buffer:', error);
+            console.error('StorageManager: Failed to prune buffer:', error);
             return bufferData;
         }
     }

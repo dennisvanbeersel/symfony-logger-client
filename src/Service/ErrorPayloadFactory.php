@@ -27,7 +27,7 @@ final class ErrorPayloadFactory
     use StackTraceParserTrait;
 
     public function __construct(
-        private readonly ContextCollectorInterface $contextCollector,
+        private readonly ContextCollector $contextCollector,
         private readonly BreadcrumbCollector $breadcrumbCollector,
     ) {
     }
@@ -57,12 +57,7 @@ final class ErrorPayloadFactory
             'source' => 'backend',
             'environment' => $context['environment'] ?? 'production',
             'release' => $context['release'] ?? null,
-            // Reuse the session hash precomputed by ContextCollector::collectContext()
-            // (avoids a second RequestStack/session lookup per error). Fall back to a
-            // direct lookup only when a caller passes a context lacking the key (BC).
-            'session_hash' => \array_key_exists('session_hash', $context)
-                ? $context['session_hash']
-                : $this->contextCollector->getSessionHash(),
+            'session_hash' => $this->contextCollector->getSessionHash(),
             'timestamp' => (new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM),
             'server_name' => $context['server']['server_name'] ?? null,
             'url' => $context['request']['url'] ?? null,

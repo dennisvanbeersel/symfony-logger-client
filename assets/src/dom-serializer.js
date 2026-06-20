@@ -28,8 +28,6 @@
  * This allows session replay visualization without exposing any user data.
  */
 
-import { createLogger } from './util/logger.js';
-
 // Constant tag-name lookups, hoisted to module scope so the Sets are created
 // once at load instead of reallocated on every element visit (JSPERF-04).
 // Set.has() is O(1) and matches the previous Array.includes() semantics exactly.
@@ -77,8 +75,6 @@ export class DOMSerializer {
         this.skipInvisible = options.skipInvisible !== false; // Skip hidden elements
         this.captureColors = options.captureColors !== false; // Capture bg colors
         this.debug = options.debug || false;
-        // Debug-gated internal logger (no-op in production) - JSSDK-03/04.
-        this.logger = createLogger({ debug: this.debug });
 
         // Performance tracking
         this.stats = {
@@ -123,7 +119,7 @@ export class DOMSerializer {
             const elapsed = performance.now() - startTime;
 
             if (this.debug) {
-                this.logger.warn('DOM Serialization Stats:', {
+                console.warn('DOM Serialization Stats:', {
                     ...this.stats,
                     elapsedMs: elapsed.toFixed(2),
                 });
@@ -136,7 +132,7 @@ export class DOMSerializer {
                 stats: this.stats,
             };
         } catch (error) {
-            this.logger.error('DOM serialization failed:', error);
+            console.error('DOM serialization failed:', error);
             return null;
         }
     }

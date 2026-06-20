@@ -5,21 +5,20 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\Tests\Service;
 
 use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
-use ApplicationLogger\Bundle\Service\ContextCollectorInterface;
+use ApplicationLogger\Bundle\Service\ContextCollector;
 use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
 final class ErrorPayloadFactoryTest extends TestCase
 {
-    private MockObject&ContextCollectorInterface $contextCollector;
+    private MockObject&ContextCollector $contextCollector;
     private MockObject&BreadcrumbCollector $breadcrumbCollector;
     private ErrorPayloadFactory $factory;
 
     protected function setUp(): void
     {
-        // Mock the interface seam (the concrete ContextCollector is now final).
-        $this->contextCollector = $this->createMock(ContextCollectorInterface::class);
+        $this->contextCollector = $this->createMock(ContextCollector::class);
         $this->breadcrumbCollector = $this->createMock(BreadcrumbCollector::class);
 
         $this->breadcrumbCollector->method('get')->willReturn([
@@ -78,54 +77,6 @@ final class ErrorPayloadFactoryTest extends TestCase
         $this->assertSame(['server_name' => 'test-server'], $payload['context']);
         $this->assertSame([], $payload['tags']);
         $this->assertCount(1, $payload['breadcrumbs']);
-    }
-
-    public function testSessionHashIsReusedFromContextWithoutExtraLookup(): void
-    {
-        // BUNDLE-6: when the context already carries a precomputed session_hash (as
-        // ContextCollector::collectContext() now provides), the factory must NOT call
-        // getSessionHash() again (avoids a second RequestStack/session lookup per error).
-        $contextCollector = $this->createMock(ContextCollectorInterface::class);
-        $contextCollector->expects($this->never())->method('getSessionHash');
-        $breadcrumbs = $this->createMock(BreadcrumbCollector::class);
-        $breadcrumbs->method('get')->willReturn([]);
-
-        $factory = new ErrorPayloadFactory($contextCollector, $breadcrumbs);
-
-        $context = $this->sampleContext();
-        $context['session_hash'] = 'precomputed-hash';
-
-        $payload = $factory->fromThrowable(new \RuntimeException('x'), $context);
-
-        $this->assertSame('precomputed-hash', $payload['session_hash']);
-    }
-
-    public function testSessionHashFallsBackToLookupWhenContextLacksKey(): void
-    {
-        // BC: a caller passing a context WITHOUT session_hash still gets a value via the
-        // direct getSessionHash() lookup (exercised by the existing sampleContext()).
-        $payload = $this->factory->fromThrowable(new \RuntimeException('x'), $this->sampleContext());
-
-        $this->assertSame(hash('sha256', 'sid'), $payload['session_hash']);
-    }
-
-    public function testNullSessionHashInContextIsPreservedNotReLookedUp(): void
-    {
-        // A context with an explicit null session_hash (no session) must be honoured as
-        // null, NOT trigger a fallback lookup.
-        $contextCollector = $this->createMock(ContextCollectorInterface::class);
-        $contextCollector->expects($this->never())->method('getSessionHash');
-        $breadcrumbs = $this->createMock(BreadcrumbCollector::class);
-        $breadcrumbs->method('get')->willReturn([]);
-
-        $factory = new ErrorPayloadFactory($contextCollector, $breadcrumbs);
-
-        $context = $this->sampleContext();
-        $context['session_hash'] = null;
-
-        $payload = $factory->fromThrowable(new \RuntimeException('x'), $context);
-
-        $this->assertNull($payload['session_hash']);
     }
 
     public function testOverridesAreMergedOnTop(): void

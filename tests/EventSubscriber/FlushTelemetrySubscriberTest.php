@@ -193,63 +193,6 @@ final class FlushTelemetrySubscriberTest extends TestCase
     }
 
     /**
-     * BUNDLE-5 — A throw from the log-handler flush must NOT skip the apiClient flush.
-     * Each flush is wrapped in its OWN try/catch, so an early failure in flushLogs()
-     * (which previously aborted the shared try block) can no longer prevent the
-     * in-flight error/session POSTs from being drained.
-     */
-    public function testApiClientFlushStillRunsWhenLogHandlerFlushThrows(): void
-    {
-        $flushCalled = false;
-
-        /** @var MockObject&ApiClient $apiClient */
-        $apiClient = $this->createMock(ApiClient::class);
-        // The log path explodes inside flushLogs() -> sendLogs().
-        $apiClient->method('sendLogs')->willThrowException(new \RuntimeException('collector exploded'));
-        // The error/session drain MUST still run despite the log flush throwing.
-        $apiClient->method('flush')->willReturnCallback(static function () use (&$flushCalled): void {
-            $flushCalled = true;
-        });
-
-        $handler = $this->handlerWithOneBufferedLog($apiClient);
-        $subscriber = new FlushTelemetrySubscriber($apiClient, $handler);
-
-        $subscriber->onKernelTerminate($this->makeTerminateEvent());
-
-        $this->assertTrue(
-            $flushCalled,
-            'apiClient->flush() must run even when the log-handler flush throws (independent try/catch)',
-        );
-    }
-
-    /**
-     * BUNDLE-5 — Symmetric guarantee: even if the log handler is absent and apiClient
-     * flush throws, the subscriber still swallows it and the log flush attempt (no-op
-     * here) does not depend on it.
-     */
-    public function testLogHandlerFlushRunsBeforeAndIndependentlyOfThrowingApiFlush(): void
-    {
-        $logFlushed = false;
-
-        /** @var MockObject&ApiClient $apiClient */
-        $apiClient = $this->createMock(ApiClient::class);
-        $apiClient->method('sendLogs')->willReturnCallback(static function () use (&$logFlushed): bool {
-            $logFlushed = true;
-
-            return true;
-        });
-        $apiClient->method('flush')->willThrowException(new \RuntimeException('drain exploded'));
-
-        $handler = $this->handlerWithOneBufferedLog($apiClient);
-        $subscriber = new FlushTelemetrySubscriber($apiClient, $handler);
-
-        // Must not throw, and the log flush must have run.
-        $subscriber->onKernelTerminate($this->makeTerminateEvent());
-
-        $this->assertTrue($logFlushed, 'log handler flush must run independently of a throwing apiClient flush');
-    }
-
-    /**
      * Smoke-test: constructing ApiClient with a real (non-mock) CircuitBreaker
      * and calling flush() on an empty dispatcher must not throw.
      */

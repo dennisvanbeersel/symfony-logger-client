@@ -4,7 +4,6 @@ import { SessionManager } from './session-manager.js';
 import { hashHex64 } from './util/hash.js';
 import { countUserInteractions } from './util/interaction.js';
 import { scrubUrlQueryValues } from './scrub-fields.js';
-import { createLogger } from './util/logger.js';
 
 const NUCLEAR_KEY = '_appLogger_nuclear';
 const RESURRECTION_ATTEMPTS_KEY = '_appLogger_resurrection_attempts';
@@ -33,8 +32,6 @@ export class Client {
      */
     constructor(config, transport, breadcrumbs, errorDetector = null, sessionManager = null) {
         this.config = config;
-        // Debug-gated internal logger (no-op in production) - JSSDK-03/04.
-        this.logger = createLogger(config);
         this.transport = transport;
         this.breadcrumbs = breadcrumbs;
         this.errorDetector = errorDetector;
@@ -73,7 +70,7 @@ export class Client {
                 });
             } catch (error) {
                 if (this.shouldLog()) {
-                    this.logger.error('ApplicationLogger: Failed to capture error', error);
+                    console.error('ApplicationLogger: Failed to capture error', error);
                 }
             }
         };
@@ -84,7 +81,7 @@ export class Client {
                 });
             } catch (error) {
                 if (this.shouldLog()) {
-                    this.logger.error('ApplicationLogger: Failed to capture rejection', error);
+                    console.error('ApplicationLogger: Failed to capture rejection', error);
                 }
             }
         };
@@ -133,7 +130,7 @@ export class Client {
             this.installed = true;
         } catch (error) {
             if (this.shouldLog()) {
-                this.logger.error('ApplicationLogger: Failed to install', error);
+                console.error('ApplicationLogger: Failed to install', error);
             }
         }
     }
@@ -172,7 +169,7 @@ export class Client {
             const attempts = parseInt(localStorage.getItem(RESURRECTION_ATTEMPTS_KEY) || '0', 10);
             if (attempts >= MAX_RESURRECTION_ATTEMPTS) {
                 if (this.shouldLog()) {
-                    this.logger.warn('ApplicationLogger: Max resurrection attempts reached, clearing nuclear errors');
+                    console.warn('ApplicationLogger: Max resurrection attempts reached, clearing nuclear errors');
                 }
                 localStorage.removeItem(NUCLEAR_KEY);
                 localStorage.removeItem(RESURRECTION_ATTEMPTS_KEY);
@@ -189,7 +186,7 @@ export class Client {
                 errors = JSON.parse(stored);
             } catch (parseError) {
                 if (this.shouldLog()) {
-                    this.logger.error('ApplicationLogger: Failed to parse nuclear errors, clearing', parseError);
+                    console.error('ApplicationLogger: Failed to parse nuclear errors, clearing', parseError);
                 }
                 localStorage.removeItem(NUCLEAR_KEY);
                 return;
@@ -205,14 +202,14 @@ export class Client {
 
             if (validErrors.length === 0) {
                 if (this.shouldLog()) {
-                    this.logger.warn('ApplicationLogger: All nuclear errors expired, clearing');
+                    console.warn('ApplicationLogger: All nuclear errors expired, clearing');
                 }
                 localStorage.removeItem(NUCLEAR_KEY);
                 return;
             }
 
             if (this.shouldLog()) {
-                this.logger.warn(`ApplicationLogger: Resurrecting ${validErrors.length} nuclear error(s) from previous session`);
+                console.warn(`ApplicationLogger: Resurrecting ${validErrors.length} nuclear error(s) from previous session`);
             }
 
             let failed = 0;
@@ -247,7 +244,7 @@ export class Client {
                 } catch (sendError) {
                     failed++;
                     if (this.shouldLog()) {
-                        this.logger.error('ApplicationLogger: Failed to resurrect nuclear error', sendError);
+                        console.error('ApplicationLogger: Failed to resurrect nuclear error', sendError);
                     }
                 }
             }
@@ -256,16 +253,16 @@ export class Client {
                 localStorage.removeItem(NUCLEAR_KEY);
                 localStorage.removeItem(RESURRECTION_ATTEMPTS_KEY);
                 if (this.shouldLog()) {
-                    this.logger.warn(`ApplicationLogger: Successfully resurrected ${validErrors.length} nuclear error(s)`);
+                    console.warn(`ApplicationLogger: Successfully resurrected ${validErrors.length} nuclear error(s)`);
                 }
             } else {
                 localStorage.setItem(RESURRECTION_ATTEMPTS_KEY, String(attempts + 1));
                 if (this.shouldLog()) {
-                    this.logger.warn(`ApplicationLogger: Resurrection partial success (${validErrors.length - failed} succeeded, ${failed} failed), will retry on next load`);
+                    console.warn(`ApplicationLogger: Resurrection partial success (${validErrors.length - failed} succeeded, ${failed} failed), will retry on next load`);
                 }
             }
         } catch (error) {
-            this.logger.error('ApplicationLogger: Failed to process resurrected errors', error);
+            console.error('ApplicationLogger: Failed to process resurrected errors', error);
         }
     }
 
@@ -285,7 +282,7 @@ export class Client {
             }
 
             if (this.shouldLog()) {
-                this.logger.warn(`ApplicationLogger: Processing ${buffered.length} buffered error(s)`);
+                console.warn(`ApplicationLogger: Processing ${buffered.length} buffered error(s)`);
             }
 
             // Clear immediately to prevent reprocessing.
@@ -354,23 +351,23 @@ export class Client {
                         processed++;
                     } else {
                         if (this.shouldLog()) {
-                            this.logger.warn('ApplicationLogger: Unknown buffered item type:', item.type);
+                            console.warn('ApplicationLogger: Unknown buffered item type:', item.type);
                         }
                         failed++;
                     }
                 } catch (itemError) {
                     failed++;
                     if (this.shouldLog()) {
-                        this.logger.error('ApplicationLogger: Failed to process buffered item', itemError);
+                        console.error('ApplicationLogger: Failed to process buffered item', itemError);
                     }
                 }
             }
 
             if (this.shouldLog()) {
-                this.logger.warn(`ApplicationLogger: Buffered errors processed (${processed} succeeded, ${failed} failed)`);
+                console.warn(`ApplicationLogger: Buffered errors processed (${processed} succeeded, ${failed} failed)`);
             }
         } catch (error) {
-            this.logger.error('ApplicationLogger: Failed to process buffered errors', error);
+            console.error('ApplicationLogger: Failed to process buffered errors', error);
         }
     }
 
@@ -403,7 +400,7 @@ export class Client {
 
             if (!replayEnabled) {
                 if (this.shouldLog() && !this.errorDetector) {
-                    this.logger.warn('ApplicationLogger: Session replay disabled (no error detector)');
+                    console.warn('ApplicationLogger: Session replay disabled (no error detector)');
                 }
                 await this.transport.send(payload);
                 return;
@@ -421,18 +418,18 @@ export class Client {
                 if (typeof this.errorDetector.startRecoveryRecording === 'function') {
                     this.errorDetector.startRecoveryRecording(error).catch(recoveryError => {
                         if (this.shouldLog()) {
-                            this.logger.error('ApplicationLogger: Recovery recording failed', recoveryError);
+                            console.error('ApplicationLogger: Recovery recording failed', recoveryError);
                         }
                     });
                 }
             } catch (replayError) {
                 if (this.shouldLog()) {
-                    this.logger.error('ApplicationLogger: Session replay failed, sending error without replay', replayError);
+                    console.error('ApplicationLogger: Session replay failed, sending error without replay', replayError);
                 }
                 await this.transport.send(payload);
             }
         } catch (captureError) {
-            this.logger.error('Client: Failed to capture exception', captureError);
+            console.error('Client: Failed to capture exception', captureError);
         }
     }
 
@@ -602,14 +599,14 @@ export class Client {
             const sessionId = this.getOrCreateSessionId();
             this.cachedSessionHash = await SessionManager.computeSessionHash(sessionId);
             if (this.shouldLog()) {
-                this.logger.warn('ApplicationLogger: Session hash initialized');
+                console.warn('ApplicationLogger: Session hash initialized');
             }
         } catch (error) {
             try {
                 this.cachedSessionHash = SessionManager.computeSessionHashSync(this.getOrCreateSessionId());
             } catch {
                 if (this.shouldLog()) {
-                    this.logger.error('ApplicationLogger: Failed to initialize session hash', error);
+                    console.error('ApplicationLogger: Failed to initialize session hash', error);
                 }
             }
         }

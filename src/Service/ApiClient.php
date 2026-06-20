@@ -6,7 +6,6 @@ namespace ApplicationLogger\Bundle\Service;
 
 use ApplicationLogger\Bundle\Service\Http\ResilientHttpDispatcher;
 use Psr\Log\LoggerInterface;
-use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 /**
@@ -79,20 +78,6 @@ class ApiClient
         $this->errorPath = $errorPath;
         $this->publicKey = $apiKey;
 
-        // Share ONE underlying HttpClient across BOTH dispatchers. When the host app
-        // injects its framework.http_client we already share it. When it does NOT, each
-        // dispatcher would otherwise call HttpClient::create() and spin up its OWN
-        // CurlHttpClient — two independent cURL connection pools/multi-handles for the
-        // same install. Create a single client here (with the dispatcher's own aggressive
-        // fire-and-forget options) and pass it to both, so the error/session and log
-        // paths reuse one connection pool. The dispatchers KEEP their independent circuit
-        // breakers; only the transport is shared.
-        $sharedHttpClient = $httpClient ?? HttpClient::create([
-            'timeout' => $timeout,
-            'max_duration' => $timeout,
-            'http_version' => '1.1', // HTTP/1.1 is more reliable than HTTP/2 for fire-and-forget
-        ]);
-
         // The dispatcher owns all transport machinery. We construct it here from the
         // raw transport args so the bundle's services.yaml + the host decorator (which
         // never calls parent::__construct) keep working unchanged.
@@ -103,7 +88,7 @@ class ApiClient
             circuitBreaker: $circuitBreaker,
             logger: $logger,
             debug: $debug,
-            httpClient: $sharedHttpClient,
+            httpClient: $httpClient,
             enabled: $enabled,
         );
 
@@ -111,7 +96,6 @@ class ApiClient
         // breaker is wired, so a failing collector trips an INDEPENDENT breaker instead
         // of being masked by healthy error/session traffic on a shared one. When not
         // wired (older config / host decorator), logs reuse the main dispatcher (BC).
-        // Either way it reuses the SAME shared HttpClient (single connection pool).
         $this->logDispatcher = (null !== $logCircuitBreaker)
             ? new ResilientHttpDispatcher(
                 timeout: $timeout,
@@ -120,7 +104,7 @@ class ApiClient
                 circuitBreaker: $logCircuitBreaker,
                 logger: $logger,
                 debug: $debug,
-                httpClient: $sharedHttpClient,
+                httpClient: $httpClient,
                 enabled: $enabled,
             )
             : $this->dispatcher;

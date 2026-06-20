@@ -12,7 +12,6 @@
  * - Session metadata (start time, page count)
  */
 import { sha256Hex, hashHex64 } from './util/hash.js';
-import { createLogger } from './util/logger.js';
 
 export class SessionManager {
     /**
@@ -53,8 +52,6 @@ export class SessionManager {
             sessionTimeoutMinutes: Math.min(config.sessionTimeoutMinutes || 30, 120),
             debug: config.debug || false,
         };
-        // Debug-gated internal logger (no-op in production) - JSSDK-03/04.
-        this.logger = createLogger(this.config);
 
         // localStorage keys
         this.STORAGE_KEY_SESSION_ID = '_app_logger_session_id';
@@ -78,7 +75,7 @@ export class SessionManager {
         this.initialize();
 
         if (this.config.debug) {
-            this.logger.warn('SessionManager initialized', {
+            console.warn('SessionManager initialized', {
                 sessionId: this.sessionId,
                 metadata: this.metadata,
             });
@@ -107,7 +104,7 @@ export class SessionManager {
             // Set up page transition tracking
             this.setupPageTransitionTracking();
         } catch (error) {
-            this.logger.error('SessionManager: Failed to initialize:', error);
+            console.error('SessionManager: Failed to initialize:', error);
             // Fallback: create new session
             this.createNewSession();
         }
@@ -129,10 +126,10 @@ export class SessionManager {
             this.saveSession();
 
             if (this.config.debug) {
-                this.logger.warn('SessionManager: Created new session', this.sessionId);
+                console.warn('SessionManager: Created new session', this.sessionId);
             }
         } catch (error) {
-            this.logger.error('SessionManager: Failed to create new session:', error);
+            console.error('SessionManager: Failed to create new session:', error);
         }
     }
 
@@ -160,7 +157,7 @@ export class SessionManager {
             this.metadata = metadata;
 
             if (this.config.debug) {
-                this.logger.warn('SessionManager: Loaded session', {
+                console.warn('SessionManager: Loaded session', {
                     sessionId,
                     age: this.getSessionAge(),
                 });
@@ -168,7 +165,7 @@ export class SessionManager {
 
             return true;
         } catch (error) {
-            this.logger.error('SessionManager: Failed to load session:', error);
+            console.error('SessionManager: Failed to load session:', error);
             return false;
         }
     }
@@ -184,7 +181,7 @@ export class SessionManager {
                 JSON.stringify(this.metadata),
             );
         } catch (error) {
-            this.logger.error('SessionManager: Failed to save session:', error);
+            console.error('SessionManager: Failed to save session:', error);
         }
     }
 
@@ -217,7 +214,7 @@ export class SessionManager {
             this.metadata.lastActivityAt = Date.now();
             this.saveSession();
         } catch (error) {
-            this.logger.error('SessionManager: Failed to update activity:', error);
+            console.error('SessionManager: Failed to update activity:', error);
         }
     }
 
@@ -256,7 +253,7 @@ export class SessionManager {
             };
 
             if (this.config.debug) {
-                this.logger.warn('SessionManager: Page view tracked', {
+                console.warn('SessionManager: Page view tracked', {
                     url,
                     pageCount: this.metadata.pageCount,
                 });
@@ -264,7 +261,7 @@ export class SessionManager {
 
             return pageEvent;
         } catch (error) {
-            this.logger.error('SessionManager: Failed to track page view:', error);
+            console.error('SessionManager: Failed to track page view:', error);
             return null;
         }
     }
@@ -326,7 +323,7 @@ export class SessionManager {
 
             this.pageTransitionTrackingInstalled = true;
         } catch (error) {
-            this.logger.error('SessionManager: Failed to setup page transition tracking:', error);
+            console.error('SessionManager: Failed to setup page transition tracking:', error);
         }
     }
 
@@ -358,7 +355,7 @@ export class SessionManager {
             }
             this._ownsReplaceStateWrapper = false;
         } catch (error) {
-            this.logger.error('SessionManager: Failed to teardown page transition tracking:', error);
+            console.error('SessionManager: Failed to teardown page transition tracking:', error);
         } finally {
             this.pageTransitionTrackingInstalled = false;
         }
@@ -380,13 +377,13 @@ export class SessionManager {
             const url = window.location.href;
 
             if (this.config.debug) {
-                this.logger.warn('SessionManager: Navigation detected', url);
+                console.warn('SessionManager: Navigation detected', url);
             }
 
             // Track the navigation as a page transition
             this.trackPageView(url);
         } catch (error) {
-            this.logger.error('SessionManager: Failed to handle navigation change:', error);
+            console.error('SessionManager: Failed to handle navigation change:', error);
         }
     }
 
@@ -462,10 +459,10 @@ export class SessionManager {
             };
 
             if (this.config.debug) {
-                this.logger.warn('SessionManager: Session cleared');
+                console.warn('SessionManager: Session cleared');
             }
         } catch (error) {
-            this.logger.error('SessionManager: Failed to clear session:', error);
+            console.error('SessionManager: Failed to clear session:', error);
         }
     }
 
@@ -477,10 +474,10 @@ export class SessionManager {
             this.updateActivity();
 
             if (this.config.debug) {
-                this.logger.warn('SessionManager: Session extended');
+                console.warn('SessionManager: Session extended');
             }
         } catch (error) {
-            this.logger.error('SessionManager: Failed to extend session:', error);
+            console.error('SessionManager: Failed to extend session:', error);
         }
     }
 

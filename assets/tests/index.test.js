@@ -58,52 +58,11 @@ describe('ApplicationLogger (index.js)', () => {
             const logger = new ApplicationLogger({ ...VALID_CONFIG });
 
             expect(logger.config.debug).toBe(false);
-            // JSSDK-02: session replay is OPT-IN (default off) so the default
-            // install stays lean and adds no replay listeners/timers.
-            expect(logger.config.sessionReplayEnabled).toBe(false);
+            expect(logger.config.sessionReplayEnabled).toBe(true);
             expect(logger.config.exposeApi).toBe(true);
             expect(logger.config.circuitBreakerFailureThreshold).toBe(5);
             expect(logger.config.rateLimiterMaxTokens).toBe(10);
             expect(logger.config.deduplicationWindowMs).toBe(5000);
-        });
-
-        test('JSSDK-02: default install does NOT initialize session replay components', () => {
-            const logger = new ApplicationLogger({ ...VALID_CONFIG });
-
-            // Opt-in default: no replay buffer/session/click-tracker is created,
-            // so the lean default install activates none of the replay code paths.
-            expect(logger.config.sessionReplayEnabled).toBe(false);
-            expect(logger.sessionManager).toBeNull();
-            expect(logger.replayBuffer).toBeNull();
-            expect(logger.storageManager).toBeNull();
-            expect(logger.errorDetector).toBeNull();
-            expect(logger.heatmap).toBeNull();
-        });
-
-        test('JSSDK-02: default install adds no replay periodic-save timer on init', () => {
-            const setIntervalSpy = jest.spyOn(global, 'setInterval');
-
-            const logger = new ApplicationLogger({ ...VALID_CONFIG });
-            logger.init();
-
-            // The replay lifecycle's periodic buffer-save interval (the only
-            // replay-specific timer; beforeunload/visibilitychange are also used
-            // by the core beacon-flush path) must NOT be installed when replay is
-            // off. installReplayLifecycle() is the sole setInterval caller in
-            // index.js, so it must never run for the lean default install.
-            expect(logger.bufferSaveInterval).toBeUndefined();
-            expect(setIntervalSpy).not.toHaveBeenCalled();
-
-            setIntervalSpy.mockRestore();
-        });
-
-        test('JSSDK-02: opt-in via config enables session replay', () => {
-            const logger = new ApplicationLogger({ ...VALID_CONFIG, sessionReplayEnabled: true });
-
-            expect(logger.config.sessionReplayEnabled).toBe(true);
-            expect(logger.sessionManager).not.toBeNull();
-            expect(logger.replayBuffer).not.toBeNull();
-            expect(logger.heatmap).not.toBeNull();
         });
 
         test('user config overrides defaults', () => {

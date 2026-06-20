@@ -1,5 +1,4 @@
 import { parseStackTrace } from './stack-parser.js';
-import { createLogger } from './util/logger.js';
 
 /**
  * Builds error payloads in the flat, snake_case shape the ingestion API
@@ -18,8 +17,6 @@ export class PayloadBuilder {
      */
     constructor(config, breadcrumbs, sessionManager, sessionHashProvider) {
         this.config = config;
-        // Debug-gated internal logger (no-op in production) - JSSDK-03/04.
-        this.logger = createLogger(config);
         this.breadcrumbs = breadcrumbs;
         this.sessionManager = sessionManager;
         this.sessionHashProvider = sessionHashProvider;
@@ -72,7 +69,7 @@ export class PayloadBuilder {
 
             return this.removeNullValues(payload);
         } catch (err) {
-            this.logger.error('ApplicationLogger: Failed to build payload', err);
+            console.error('ApplicationLogger: Failed to build payload', err);
             return {
                 type: 'Error',
                 message: this.truncate('Failed to build error payload', 1000),

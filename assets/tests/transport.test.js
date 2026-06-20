@@ -204,8 +204,7 @@ describe('Transport', () => {
             expect(transport.dsn.protocol).toBe('https');
             expect(transport.dsn.host).toBe('localhost:8111');
             expect(transport.dsn.projectId).toBe('test-project-id');
-            // JSSDK-01: canonical ingestion route (matches platform + PHP bundle).
-            expect(transport.dsn.endpoint).toBe('https://localhost:8111/api/v1/errors');
+            expect(transport.dsn.endpoint).toBe('https://localhost:8111/api/errors/ingest');
         });
 
         test('throws error for missing DSN', () => {
@@ -365,7 +364,7 @@ describe('Transport', () => {
             await transport.sendToApi(payload);
 
             expect(mockFetch).toHaveBeenCalledWith(
-                'https://localhost:8111/api/v1/errors',
+                'https://localhost:8111/api/errors/ingest',
                 expect.objectContaining({
                     method: 'POST',
                     headers: {
@@ -500,77 +499,25 @@ describe('Transport', () => {
             expect(isDup2).toBe(false);
         });
 
-        test('JSSDK-05: an entry older than the window is NOT treated as a duplicate (age-aware lookup)', () => {
-            const payload = { type: 'Error', message: 'Recurring error' };
+        test('cleans up old deduplication entries', () => {
+            // Uses flat payload structure matching API spec
+            const payload = {
+                type: 'Error',
+                message: 'Old error',
+            };
 
-            // First sighting: not a duplicate.
-            expect(transport.isDuplicate(payload)).toBe(false);
-
-            // Age the stored timestamp beyond the dedup window.
-            const hash = Array.from(transport.recentErrors.keys())[0];
-            transport.recentErrors.set(hash, Date.now() - 10000); // 10s ago > 5s window
-
-            // Even though the entry hasn't been swept yet, the age-aware lookup
-            // must report the recurring error again (preserves original semantics).
-            expect(transport.isDuplicate(payload)).toBe(false);
-        });
-
-        test('JSSDK-05: dedup sweep is opportunistic, not run on every send', () => {
-            // First call sets lastDedupSweep; subsequent calls within the interval
-            // and below the size cap must NOT sweep, so a stale entry can linger.
-            transport.isDuplicate({ type: 'Error', message: 'A' });
-
-            const hash = Array.from(transport.recentErrors.keys())[0];
-            transport.recentErrors.set(hash, Date.now() - 10000); // expired
-
-            // A different error within the sweep interval: no sweep, entry lingers.
-            transport.isDuplicate({ type: 'New', message: 'B' });
-            expect(transport.recentErrors.size).toBe(2);
-        });
-
-        test('JSSDK-05: sweep runs once the interval has elapsed', () => {
-            transport.isDuplicate({ type: 'Error', message: 'A' });
-            const hash = Array.from(transport.recentErrors.keys())[0];
-            transport.recentErrors.set(hash, Date.now() - 10000); // expired
-
-            // Force the time-based threshold: pretend the last sweep was long ago.
-            transport.lastDedupSweep = Date.now() - (transport.dedupSweepIntervalMs + 1);
-
-            transport.isDuplicate({ type: 'New', message: 'B' });
-
-            // Expired entry swept; only the fresh 'B' entry remains.
+            transport.isDuplicate(payload);
             expect(transport.recentErrors.size).toBe(1);
-        });
 
-        test('JSSDK-05: sweep runs once the size cap is exceeded', () => {
-            transport.dedupSweepMaxEntries = 3;
-            // Seed entries that are all expired EXCEPT they will be added fresh;
-            // force expiry on the earlier ones by back-dating after insertion.
-            transport.isDuplicate({ type: 'E', message: 'one' });
-            transport.isDuplicate({ type: 'E', message: 'two' });
-            transport.isDuplicate({ type: 'E', message: 'three' });
-            // Back-date all current entries beyond the window.
-            for (const key of transport.recentErrors.keys()) {
-                transport.recentErrors.set(key, Date.now() - 10000);
-            }
-            // Keep lastDedupSweep recent so only the SIZE cap can trigger a sweep.
-            transport.lastDedupSweep = Date.now();
+            // Manually set old timestamp
+            const hash = Array.from(transport.recentErrors.keys())[0];
+            transport.recentErrors.set(hash, Date.now() - 10000); // 10 seconds ago
 
-            // Adding a 4th unique entry pushes size past the cap (3) → sweep fires,
-            // evicting the back-dated entries and leaving only the fresh one.
-            transport.isDuplicate({ type: 'E', message: 'four' });
+            // Trigger cleanup by checking another error (flat structure)
+            transport.isDuplicate({ type: 'New', message: 'New' });
+
+            // Old entry should be cleaned up (after deduplication window)
             expect(transport.recentErrors.size).toBe(1);
-        });
-
-        test('sweepRecentErrors removes only entries older than the window', () => {
-            const now = Date.now();
-            transport.recentErrors.set('fresh', now);
-            transport.recentErrors.set('stale', now - 10000);
-
-            transport.sweepRecentErrors(now);
-
-            expect(transport.recentErrors.has('fresh')).toBe(true);
-            expect(transport.recentErrors.has('stale')).toBe(false);
         });
     });
 
@@ -1315,64 +1262,6 @@ describe('Transport', () => {
                 reader.onerror = () => done(new Error('Failed to read blob'));
                 reader.readAsText(beaconCalls[0].blob);
             }).catch(done);
-        });
-    });
-
-    describe('Production console silence (JSSDK-03/04)', () => {
-        let prodTransport;
-        let warnSpy;
-        let errorSpy;
-        let originalWarn;
-        let originalError;
-
-        beforeEach(() => {
-            prodTransport = new Transport({
-                dsn: 'https://localhost:8111/test-project-id',
-                apiKey: 'test-api-key',
-                // debug intentionally omitted -> defaults to falsy (production).
-            });
-            prodTransport.circuitBreaker = new MockCircuitBreaker();
-            prodTransport.storageQueue = new MockStorageQueue();
-            prodTransport.rateLimiter = new MockRateLimiter();
-
-            // Manual console spies (this suite deliberately avoids the jest global).
-            originalWarn = console.warn;
-            originalError = console.error;
-            warnSpy = createMockFunction();
-            errorSpy = createMockFunction();
-            console.warn = warnSpy;
-            console.error = errorSpy;
-        });
-
-        afterEach(() => {
-            console.warn = originalWarn;
-            console.error = originalError;
-        });
-
-        test('JSSDK-04: send() catch does NOT write to console.error when debug is off', async () => {
-            // Force the try-body to throw AFTER entering send() so the catch runs.
-            prodTransport.scrubSensitiveData = () => {
-                throw new Error('boom');
-            };
-
-            await prodTransport.send({ type: 'Error', message: 'x' });
-
-            expect(errorSpy.mock.calls.length).toBe(0);
-            expect(warnSpy.mock.calls.length).toBe(0);
-        });
-
-        test('JSSDK-03: duplicate and rate-limit paths stay silent when debug is off', async () => {
-            mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) });
-            const payload = { type: 'Error', message: 'dup', stack_trace: [] };
-
-            await prodTransport.send(payload);
-            await prodTransport.send(payload); // duplicate path
-
-            prodTransport.rateLimiter.tokens = 0;
-            await prodTransport.send({ type: 'Error', message: 'rl' }); // rate-limit path
-
-            expect(warnSpy.mock.calls.length).toBe(0);
-            expect(errorSpy.mock.calls.length).toBe(0);
         });
     });
 

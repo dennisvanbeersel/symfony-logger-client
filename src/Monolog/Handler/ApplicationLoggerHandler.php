@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\Monolog\Handler;
 
 use ApplicationLogger\Bundle\Service\ApiClient;
-use ApplicationLogger\Bundle\Service\ContextCollectorInterface;
+use ApplicationLogger\Bundle\Service\ContextCollector;
 use ApplicationLogger\Bundle\Service\DataScrubber;
 use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
 use Monolog\Handler\AbstractProcessingHandler;
@@ -37,7 +37,7 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
 
     public function __construct(
         private readonly ApiClient $apiClient,
-        private readonly ContextCollectorInterface $contextCollector,
+        private readonly ContextCollector $contextCollector,
         private readonly DataScrubber $scrubber,
         private readonly ErrorPayloadFactory $payloadFactory,
         private readonly bool $enabled = true,
