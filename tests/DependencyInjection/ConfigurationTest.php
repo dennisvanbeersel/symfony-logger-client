@@ -6,6 +6,7 @@ namespace ApplicationLogger\Bundle\Tests\DependencyInjection;
 
 use ApplicationLogger\Bundle\DependencyInjection\Configuration;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Definition\Processor;
 
 final class ConfigurationTest extends TestCase
@@ -42,5 +43,29 @@ final class ConfigurationTest extends TestCase
 
         $this->assertSame('https://example.com/project-id', $config['dsn']);
         $this->assertSame('secret-key', $config['api_key']);
+    }
+
+    public function testFlushBudgetDefaultsToTwoSeconds(): void
+    {
+        $processor = new Processor();
+        $config = $processor->processConfiguration(new Configuration(), []);
+
+        self::assertSame(2.0, $config['flush_budget']);
+    }
+
+    public function testFlushBudgetRejectsOutOfRange(): void
+    {
+        $processor = new Processor();
+
+        $this->expectException(InvalidConfigurationException::class);
+        $processor->processConfiguration(new Configuration(), [['flush_budget' => 0.04]]);
+    }
+
+    public function testFlushBudgetRejectsAboveMax(): void
+    {
+        $processor = new Processor();
+
+        $this->expectException(InvalidConfigurationException::class);
+        $processor->processConfiguration(new Configuration(), [['flush_budget' => 9.0]]);
     }
 }

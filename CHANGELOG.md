@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`flush_budget` config (default `2.0`s):** bounds the post-response telemetry drain
+  (kernel.terminate / CLI `__destruct`) to `min(timeout, flush_budget)` of **real
+  wall-clock** time. The default matches the previous hardcoded terminate cap, so
+  **delivery behavior is unchanged**. **Lower it (e.g. `0.5`)** to harden a FrankenPHP
+  worker pool against a slow collector — this is the opt-in worker-mode safety knob.
+- `ApiClient::getLogCircuitBreakerState()` to expose the log-aggregation breaker state
+  independently of the error/session breaker.
+
+### Changed
+- The post-response drain is now bounded by a true **wall-clock** deadline (previously
+  the cap was a per-poll idle timeout that a trickling backend could exceed) and is
+  **skipped entirely when the circuit breaker is OPEN** (previously it re-paid the
+  drain on every request until the breaker happened to recover).
+- The circuit breaker **no longer trips on a *healthy-but-slow* collector**: a handle
+  that connected (or returned 2xx/3xx) but exceeded the drain budget is dropped without
+  recording a failure, so a slow-but-alive backend no longer sheds all telemetry.
+  This progress-aware classification now applies to **all** settling sites, including
+  the non-blocking soft-cap reap (`flushPendingResponses`): sustained logging to a
+  healthy-but-slow collector can no longer false-trip the breaker mid-request.
+- CLI/`__destruct` drain cap changed from a hardcoded `min(timeout, 1.0)` to
+  `min(timeout, flush_budget)` (default ⇒ up to 2.0s; more delivery time on CLI, which
+  has no worker pool to saturate).
+
 ## [0.3.0] - 2026-06-19
 
 ### Changed

@@ -54,6 +54,7 @@ services:
             $enabled: '%application_logger.enabled%'
             # Independent breaker for the log path (see service above).
             $logCircuitBreaker: '@application_logger.circuit_breaker.log'
+            $flushBudget: '%application_logger.flush_budget%'
 
     # Context Collector - gathers request/user/server context
     ApplicationLogger\Bundle\Service\ContextCollector:

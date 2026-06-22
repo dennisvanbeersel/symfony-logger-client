@@ -37,6 +37,13 @@ class ApiClient
     /** Collector hard-caps batches at 1000; we chunk defensively to match. */
     private const MAX_LOG_BATCH_SIZE = 1000;
 
+    /**
+     * Floor (s) for a HALF_OPEN recovery-probe drain, so a slow-but-healthy collector
+     * can recover even under a tight opt-in flush_budget. Used as a floor, never to
+     * NARROW the budget: the recovery ceiling is min(timeout, max(flush_budget, this)).
+     */
+    private const RECOVERY_BUDGET_FLOOR_SECONDS = 1.0;
+
     private readonly string $endpoint;
     private readonly string $errorPath;
     private readonly string $publicKey;
@@ -50,6 +57,7 @@ class ApiClient
      */
     private readonly ResilientHttpDispatcher $logDispatcher;
     private readonly float $timeout;
+    private readonly float $flushBudget;
 
     public function __construct(
         string $dsn,
@@ -67,11 +75,19 @@ class ApiClient
         private readonly string $logPath = '/v1/logs',
         bool $enabled = true,
         ?CircuitBreaker $logCircuitBreaker = null,
+        float $flushBudget = 2.0,
     ) {
         // Validate timeout
         if ($timeout < 0.5 || $timeout > 5.0) {
             throw new \InvalidArgumentException('Timeout must be between 0.5 and 5.0 seconds');
         }
+
+        // flush_budget bounds the post-response drain wall-clock. Validate the raw
+        // value; the effective cap is min(timeout, flushBudget), computed in flush().
+        if ($flushBudget < 0.05 || $flushBudget > 2.0) {
+            throw new \InvalidArgumentException('flush_budget must be between 0.05 and 2.0 seconds');
+        }
+        $this->flushBudget = $flushBudget;
 
         // Parse DSN and initialize readonly properties.
         $this->timeout = $timeout;
@@ -105,6 +121,7 @@ class ApiClient
             debug: $debug,
             httpClient: $sharedHttpClient,
             enabled: $enabled,
+            flushBudget: $flushBudget,
         );
 
         // The log-aggregation path gets its OWN dispatcher+breaker when a separate log
@@ -122,6 +139,7 @@ class ApiClient
                 debug: $debug,
                 httpClient: $sharedHttpClient,
                 enabled: $enabled,
+                flushBudget: $flushBudget,
             )
             : $this->dispatcher;
     }
@@ -278,22 +296,64 @@ class ApiClient
      * telemetry is reliably delivered in per-request SAPIs (PHP-FPM, FrankenPHP
      * non-worker mode) without ever blocking the user-visible response.
      *
-     * The post-response flush is capped at min(configured_timeout, 2.0) seconds so
-     * a misconfigured or slow backend cannot cause excessive post-response latency
-     * even when the dispatcher's configured timeout is higher.
+     * Both dispatchers (error/session and log) share ONE bounded terminate budget so
+     * the post-response block stays ~one ceiling, not 2x. The ceiling widens to a
+     * recovery budget only while a breaker is HALF_OPEN.
      *
      * Safe to call when no requests are pending (no-op). Never throws.
      */
     public function flush(): void
     {
-        // Cap at 2 s: the post-response flush must not stall FPM worker recycling.
-        $cap = min($this->timeout, 2.0);
-        $this->dispatcher->flushAndComplete($cap);
-        // Drain the dedicated log dispatcher too (no-op if it is the same instance or
-        // has no pending handles).
+        // Single shared terminate budget across BOTH dispatchers so the post-response
+        // block stays ~one budget, not 2x. The ceiling widens to the recovery budget
+        // ONLY while a breaker is HALF_OPEN, so a slow-but-healthy collector's probe can
+        // complete and close the breaker. Errors/sessions drain first; under a recovery
+        // cycle the log path may be starved this terminate and recovers next cycle.
+        $ceiling = $this->flushCeiling($this->anyBreakerHalfOpen());
+        $deadline = microtime(true) + $ceiling;
+
+        $this->dispatcher->flushAndComplete($this->remainingBudget($deadline));
         if ($this->logDispatcher !== $this->dispatcher) {
-            $this->logDispatcher->flushAndComplete($cap);
+            $this->logDispatcher->flushAndComplete($this->remainingBudget($deadline));
         }
+    }
+
+    /**
+     * The terminate drain ceiling: the steady-state budget min(timeout, flush_budget),
+     * widened to min(timeout, max(flush_budget, RECOVERY_BUDGET_FLOOR_SECONDS)) while a
+     * breaker is recovering. The max() is a FLOOR — it never narrows the budget, so at
+     * the default flush_budget (2.0) recovery does not change the ceiling at all.
+     *
+     * @internal exposed for tests via flushCeilingForTesting()
+     */
+    private function flushCeiling(bool $anyHalfOpen): float
+    {
+        if ($anyHalfOpen) {
+            return min($this->timeout, max($this->flushBudget, self::RECOVERY_BUDGET_FLOOR_SECONDS));
+        }
+
+        return min($this->timeout, $this->flushBudget);
+    }
+
+    /** TEST SEAM: pure ceiling computation. @internal */
+    public function flushCeilingForTesting(bool $anyHalfOpen): float
+    {
+        return $this->flushCeiling($anyHalfOpen);
+    }
+
+    private function anyBreakerHalfOpen(): bool
+    {
+        if ('half_open' === $this->dispatcher->getCircuitBreakerState()['state']) {
+            return true;
+        }
+
+        return $this->logDispatcher !== $this->dispatcher
+            && 'half_open' === $this->logDispatcher->getCircuitBreakerState()['state'];
+    }
+
+    private function remainingBudget(float $deadline): float
+    {
+        return max(0.0, $deadline - microtime(true));
     }
 
     /**
@@ -304,6 +364,18 @@ class ApiClient
     public function getCircuitBreakerState(): array
     {
         return $this->dispatcher->getCircuitBreakerState();
+    }
+
+    /**
+     * Get the LOG-aggregation circuit breaker state for monitoring. Independent of the
+     * error/session breaker so an operator can see which path is shedding load. Returns
+     * the same state when no dedicated log breaker is wired (BC).
+     *
+     * @return array{state: string, failureCount: int, openedAt: int|null, halfOpenAttempts: int}
+     */
+    public function getLogCircuitBreakerState(): array
+    {
+        return $this->logDispatcher->getCircuitBreakerState();
     }
 
     /**

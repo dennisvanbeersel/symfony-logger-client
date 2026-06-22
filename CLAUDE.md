@@ -214,6 +214,14 @@ flushed (and the platform ingestion is disconnect-safe), it is safe to point the
 bundle at the same host it runs on with `async: true`. Separate-host installs are
 the norm and are always non-blocking.
 
+**Post-response drain budget (`flush_budget`, default 2.0s):** the kernel.terminate
+(and CLI `__destruct`) drain is bounded to `min(timeout, flush_budget)` wall-clock and
+is skipped entirely when the circuit breaker is OPEN. The default (2.0s) matches the
+previous hardcoded cap, so delivery is unchanged. **Lower `flush_budget` (e.g. 0.5s)
+to harden a FrankenPHP worker pool** against a slow collector. A *healthy-but-slow*
+collector (connected / 2xx headers) that exceeds the budget is dropped WITHOUT
+tripping the breaker.
+
 ### 5. Data Sanitization (GDPR)
 
 Always scrub sensitive data before sending:
@@ -622,6 +630,12 @@ $rootNode
             ->min(0.5)
             ->max(5.0)
             ->info('API timeout in seconds')
+        ->end()
+        ->floatNode('flush_budget')
+            ->defaultValue(2.0)
+            ->min(0.05)
+            ->max(2.0)
+            ->info('Wall-clock cap (s) on the post-response telemetry drain; effective cap = min(timeout, flush_budget). Default 2.0 = previous behavior; lower it to harden FrankenPHP worker pools.')
         ->end()
         ->arrayNode('circuit_breaker')
             ->addDefaultsIfNotSet()

@@ -359,6 +359,37 @@ final class FlushAndCompleteTest extends TestCase
         $this->assertSame(1, $response->successOutcomeReads(), 'getStatusCode() must be consulted exactly once');
     }
 
+    public function testFlushAndCompleteStopsAtWallClockDeadline(): void
+    {
+        $breaker = $this->breaker();
+
+        // A response whose flush-phase stream yields intermediate (non-last) chunks
+        // indefinitely — without a wall-clock break the drain loop would never end.
+        $response = new TwoPhaseResponse(firstPollTimesOut: true, finalStatusCode: 0);
+        $http = new ForeverIntermediateHttpClient($response);
+
+        // Fake clock: 0.0 at start, then jumps to 1.0 on the next read (past any budget).
+        $ticks = [0.0, 1.0, 1.0, 1.0];
+        $i = 0;
+        $clock = static function () use (&$ticks, &$i): float {
+            return $ticks[$i++] ?? 1.0;
+        };
+
+        $dispatcher = new ResilientHttpDispatcher(
+            timeout: 2.0, retryAttempts: 0, async: true, circuitBreaker: $breaker,
+            logger: null, debug: false, httpClient: $http, enabled: true,
+            flushBudget: 0.5, clock: $clock,
+        );
+
+        $dispatcher->post('https://example.com/api', ['event' => 'test'], []);
+
+        // Must RETURN (not hang) because the deadline breaks the loop.
+        $dispatcher->flushAndComplete(0.5);
+
+        // The unsettled handle must be cancelled (destructor-fatal guard).
+        self::assertTrue($response->wasCancelled(), 'deadline break must cancel the still-in-flight handle');
+    }
+
     /**
      * Multiple in-flight responses are all drained in a single flushAndComplete() call,
      * each recording their own circuit-breaker outcome concurrently.
@@ -384,6 +415,33 @@ final class FlushAndCompleteTest extends TestCase
         $state = $breaker->getState();
         $this->assertSame('closed', $state['state']);
         $this->assertSame(0, $state['failureCount'], 'all three 202s must record success');
+    }
+
+    public function testFlushAndCompleteSkipsBlockingStreamWhenBreakerOpen(): void
+    {
+        $breaker = $this->breaker(); // failureThreshold 3
+
+        // A spy client that counts array-form stream() calls (the blocking drain).
+        $response = new TwoPhaseResponse(firstPollTimesOut: true, finalStatusCode: 0, secondPollAlsoTimesOut: true);
+        $http = new StreamCountingHttpClient($response);
+
+        $dispatcher = new ResilientHttpDispatcher(
+            timeout: 2.0, retryAttempts: 0, async: true, circuitBreaker: $breaker,
+            logger: null, debug: false, httpClient: $http, enabled: true, flushBudget: 0.5,
+        );
+
+        // Park a handle, then force the breaker OPEN.
+        $dispatcher->post('https://example.com/api', ['event' => 'test'], []);
+        $breaker->recordFailure();
+        $breaker->recordFailure();
+        $breaker->recordFailure(); // threshold 3 → OPEN
+        self::assertTrue($breaker->isOpen());
+
+        $http->resetStreamCounts();
+        $dispatcher->flushAndComplete();
+
+        self::assertSame(0, $http->blockingStreamCalls(), 'breaker OPEN must skip the blocking array-form stream() drain');
+        self::assertTrue($response->wasCancelled(), 'the parked handle must still be settled+cancelled via the non-blocking reap');
     }
 }
 
@@ -937,5 +995,119 @@ final readonly class ControlledChunk implements ChunkInterface
     public function getError(): ?string
     {
         return null;
+    }
+}
+
+/**
+ * HttpClient whose flush-phase stream yields a non-last, non-timeout chunk every
+ * time valid() is called — i.e. it never completes. Used to prove the wall-clock
+ * deadline terminates the drain loop.
+ */
+final class ForeverIntermediateHttpClient implements HttpClientInterface
+{
+    public function __construct(private readonly TwoPhaseResponse $response)
+    {
+    }
+
+    /** @param array<string, mixed> $options */
+    public function request(string $method, string $url, array $options = []): ResponseInterface
+    {
+        return $this->response;
+    }
+
+    public function stream(ResponseInterface|iterable $responses, ?float $timeout = null): ResponseStreamInterface
+    {
+        // Poll phase (single response): normal timeout chunk so the response is parked.
+        if ($responses instanceof ResponseInterface) {
+            return new SingleChunkStream($this->response, $this->response->nextStreamChunk());
+        }
+
+        // Flush phase (array): an endless stream of intermediate chunks.
+        return new ForeverIntermediateStream($this->response);
+    }
+
+    /** @param array<string, mixed> $options */
+    public function withOptions(array $options): static
+    {
+        return $this;
+    }
+}
+
+/** Yields an intermediate (non-timeout, non-last) chunk forever. */
+final class ForeverIntermediateStream implements ResponseStreamInterface
+{
+    public function __construct(private readonly TwoPhaseResponse $response)
+    {
+    }
+
+    public function key(): ResponseInterface
+    {
+        return $this->response;
+    }
+
+    public function current(): ChunkInterface
+    {
+        return new ControlledChunk(isTimeout: false, isLast: false);
+    }
+
+    public function next(): void
+    {
+    }
+
+    public function rewind(): void
+    {
+    }
+
+    public function valid(): bool
+    {
+        return true; // never completes
+    }
+}
+
+/**
+ * HttpClient that counts array-form stream() calls (the blocking drain). The
+ * single-response poll in dispatchAsync behaves normally so a handle is parked.
+ */
+final class StreamCountingHttpClient implements HttpClientInterface
+{
+    private int $blockingStreamCalls = 0;
+
+    public function __construct(private readonly TwoPhaseResponse $response)
+    {
+    }
+
+    public function blockingStreamCalls(): int
+    {
+        return $this->blockingStreamCalls;
+    }
+
+    public function resetStreamCounts(): void
+    {
+        $this->blockingStreamCalls = 0;
+    }
+
+    /** @param array<string, mixed> $options */
+    public function request(string $method, string $url, array $options = []): ResponseInterface
+    {
+        return $this->response;
+    }
+
+    public function stream(ResponseInterface|iterable $responses, ?float $timeout = null): ResponseStreamInterface
+    {
+        if ($responses instanceof ResponseInterface) {
+            // dispatchAsync 0.0-poll: park the handle.
+            return new SingleChunkStream($this->response, $this->response->nextStreamChunk());
+        }
+
+        // Array form = the blocking drain. Count it and yield a timeout chunk.
+        ++$this->blockingStreamCalls;
+
+        return new SingleChunkStream($this->response, new ControlledChunk(isTimeout: true, isLast: false));
+    }
+
+    /** @param array<string, mixed> $options */
+    public function withOptions(array $options): static
+    {
+        return $this;
     }
 }

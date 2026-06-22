@@ -119,6 +119,7 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
         $container->setParameter('application_logger.dsn', $config['dsn']);
         $container->setParameter('application_logger.api_key', $config['api_key']);
         $container->setParameter('application_logger.timeout', $config['timeout']);
+        $container->setParameter('application_logger.flush_budget', $config['flush_budget']);
         $container->setParameter('application_logger.retry_attempts', $config['retry_attempts']);
         $container->setParameter('application_logger.async', $config['async']);
         $container->setParameter('application_logger.capture_level', $config['capture_level']);

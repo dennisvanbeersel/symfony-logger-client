@@ -178,6 +178,18 @@ class CircuitBreaker
     }
 
     /**
+     * TEST SEAM: force the circuit into HALF_OPEN without waiting for the timeout.
+     * Used only by tests that exercise the recovery-probe drain path. Mirrors the
+     * private halfOpen() transition + persistence.
+     *
+     * @internal
+     */
+    public function forceHalfOpenForTesting(): void
+    {
+        $this->halfOpen();
+    }
+
+    /**
      * Record a successful request.
      *
      * Refreshes from the shared cache before deciding so a long-lived worker acts

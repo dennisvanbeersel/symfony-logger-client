@@ -53,6 +53,9 @@ final class ResilientHttpDispatcher
 
     private readonly HttpClientInterface $httpClient;
 
+    /** Monotonic-ish wall-clock source (injectable for deterministic tests). */
+    private readonly \Closure $clock;
+
     /**
      * Pending fire-and-forget responses. Holding a reference keeps the underlying
      * cURL handle alive so the request is actually transmitted; we drain them at
@@ -71,6 +74,8 @@ final class ResilientHttpDispatcher
         private readonly bool $debug = false,
         ?HttpClientInterface $httpClient = null,
         private readonly bool $enabled = true,
+        private readonly float $flushBudget = 2.0,
+        ?\Closure $clock = null,
     ) {
         // Allow injecting a client (tests / host-app framework.http_client with proxy/SSL
         // configuration). Fall back to a self-created client with aggressive timeouts.
@@ -79,6 +84,7 @@ final class ResilientHttpDispatcher
             'max_duration' => $this->timeout,
             'http_version' => '1.1', // HTTP/1.1 is more reliable than HTTP/2 for fire-and-forget
         ]);
+        $this->clock = $clock ?? static fn (): float => microtime(true);
     }
 
     public function __destruct()
@@ -88,7 +94,7 @@ final class ResilientHttpDispatcher
         // never fires) still deliver telemetry. If the terminate subscriber already
         // flushed (web path), $pendingResponses is empty and this is a no-op.
         // Never throws during shutdown.
-        $this->flushAndComplete(min($this->timeout, 1.0));
+        $this->flushAndComplete(min($this->timeout, $this->flushBudget));
     }
 
     /**
@@ -111,18 +117,29 @@ final class ResilientHttpDispatcher
      *   - Never throws; all transport errors are caught and recorded on the breaker.
      *   - If called when `$pendingResponses` is empty, returns immediately (no-op).
      *
-     * @param float|null $maxWait Idle/inactivity timeout passed to each `stream()` poll:
-     *                            if no chunk arrives within this window the handle is
-     *                            considered timed-out and a pessimistic failure is
-     *                            recorded. It is NOT a single total budget for the whole
-     *                            flush; in practice one poll loop drains all in-flight
-     *                            handles concurrently so the actual wall-clock wait is
-     *                            close to $maxWait regardless of the number of handles.
-     *                            Null uses the dispatcher's configured timeout.
+     * @param float|null $maxWait Per-poll idle timeout for each `stream()` call AND an
+     *                            upper wall-clock bound on the entire drain: the loop
+     *                            breaks once elapsed time >= $maxWait, so the method
+     *                            returns within approximately $maxWait seconds regardless
+     *                            of how many handles are in flight. Null uses the
+     *                            dispatcher's configured timeout.
      */
     public function flushAndComplete(?float $maxWait = null): void
     {
         if ([] === $this->pendingResponses) {
+            return;
+        }
+
+        // Breaker OPEN: do NOT pay the blocking drain. Settle the parked handles
+        // non-blockingly (getInfo + cancel) so nothing leaks and the already-open
+        // breaker is kept current, then return. This is what stops a slow collector
+        // from costing a full budget on every request once it is known-bad.
+        if ($this->circuitBreaker->isOpen()) {
+            if ($this->debug) {
+                $this->logger?->debug('ApplicationLogger: telemetry drain skipped, breaker open');
+            }
+            $this->flushPendingResponses();
+
             return;
         }
 
@@ -144,6 +161,8 @@ final class ResilientHttpDispatcher
         // Total unresolved handles; decremented as each one is settled.
         $unresolved = \count($responses);
 
+        $start = ($this->clock)();
+
         try {
             // stream() multiplexes ALL handles concurrently; each iteration yields one
             // ($response, $chunk) pair. We stop when every handle has produced an
@@ -158,8 +177,8 @@ final class ResilientHttpDispatcher
 
                 try {
                     if ($chunk->isTimeout()) {
-                        // Handle did not complete within $wait; record pessimistic failure.
-                        $this->circuitBreaker->recordFailure();
+                        // Handle did not complete within $wait; classify by progress.
+                        $this->settleUnconfirmed($response);
                         --$pendingCount[$id];
                         --$unresolved;
                         // CRITICAL (CLI/__destruct fatal): cancel the still-in-flight
@@ -200,6 +219,14 @@ final class ResilientHttpDispatcher
                 if ($unresolved <= 0) {
                     break;
                 }
+
+                // Hard WALL-CLOCK bound: stream()'s $wait is only a per-poll idle
+                // timeout, so a trickling backend could otherwise keep this loop alive
+                // up to max_duration. Break once the elapsed wall-clock reaches the
+                // budget; the leftover-reap loop below settles+cancels the remainder.
+                if (($this->clock)() - $start >= $wait) {
+                    break;
+                }
             }
         } catch (\Throwable) {
             // stream() itself threw (e.g. client shut down). Record a pessimistic
@@ -225,12 +252,12 @@ final class ResilientHttpDispatcher
         }
 
         // Any handles that never produced a settling chunk (e.g. stream ended early):
-        // record pessimistic failures and cancel to free cURL resources.
+        // classify by progress and cancel to free cURL resources.
         if ($unresolved > 0) {
             foreach ($responses as $response) {
                 $id = spl_object_id($response);
                 if (isset($pendingCount[$id]) && $pendingCount[$id] > 0) {
-                    $this->circuitBreaker->recordFailure();
+                    $this->settleUnconfirmed($response);
                     --$pendingCount[$id];
                     try {
                         $response->cancel();
@@ -474,15 +501,11 @@ final class ResilientHttpDispatcher
 
     /**
      * Drain retained fire-and-forget responses and record a DETERMINISTIC breaker
-     * outcome for each.
-     *
-     * Previously a handle that had not yet produced an http_code at drain time was
-     * simply cancelled, recording NEITHER success nor failure - so a slow 5xx or a
-     * hung connection in async mode never tripped the breaker. Now:
-     *   - a known 2xx/3xx records success (so HALF_OPEN recovery is not flaky),
-     *   - a known 4xx/5xx records failure,
-     *   - an UNKNOWN code (handle force-cancelled / still incomplete) records a
-     *     PESSIMISTIC failure: we could not confirm delivery, so we assume the worst.
+     * outcome for each, using the same progress-aware classification as
+     * {@see settleUnconfirmed()}: 2xx/3xx success; 4xx/5xx failure; http_code 0 with
+     * TCP connection established → drop without recording (alive but slow); http_code 0
+     * with no connection → pessimistic failure. This prevents sustained logging to a
+     * healthy-but-slow collector from false-tripping the breaker on the soft-cap path.
      */
     private function flushPendingResponses(): void
     {
@@ -495,21 +518,7 @@ final class ResilientHttpDispatcher
 
         foreach ($responses as $response) {
             try {
-                // getInfo('http_code') does not block on an in-flight request; it
-                // returns 0 until headers arrive.
-                $code = $response->getInfo('http_code');
-                if (\is_int($code) && $code > 0) {
-                    if ($code >= 200 && $code < 400) {
-                        $this->circuitBreaker->recordSuccess();
-                    } else {
-                        $this->circuitBreaker->recordFailure();
-                    }
-                } else {
-                    // Outcome could not be confirmed before we force-cancel the handle
-                    // below (slow 5xx / hang). Fail pessimistically so the breaker is
-                    // never blind to a stalled endpoint.
-                    $this->circuitBreaker->recordFailure();
-                }
+                $this->settleUnconfirmed($response);
             } catch (\Throwable) {
                 // Never throw during cleanup; treat an unreadable handle as a failure.
                 $this->circuitBreaker->recordFailure();
@@ -524,6 +533,56 @@ final class ResilientHttpDispatcher
                 }
             }
         }
+    }
+
+    /**
+     * Settle a handle that did NOT complete within the drain budget, recording the
+     * RIGHT breaker outcome instead of a blanket pessimistic failure.
+     *
+     * In CLOSED state we distinguish "alive but slow" from "dead": a healthy-but-slow
+     * collector (connected, or already returned 2xx/3xx headers) must NOT trip the
+     * breaker, or one slow request would shed ALL telemetry for the breaker timeout.
+     * In HALF_OPEN the handle is the recovery probe and MUST resolve to success/failure
+     * (no silent drop), or the state machine deadlocks. The caller cancels the handle.
+     */
+    private function settleUnconfirmed(ResponseInterface $response): void
+    {
+        // HALF_OPEN probe: it did not reach a settling chunk within budget → failure,
+        // so the breaker re-opens rather than hanging in HALF_OPEN forever.
+        if ($this->circuitBreaker->isHalfOpen()) {
+            $this->circuitBreaker->recordFailure();
+
+            return;
+        }
+
+        // CLOSED: classify by non-blocking getInfo (never blocks; never reads body).
+        $code = $response->getInfo('http_code');
+        if (\is_int($code) && $code >= 200 && $code < 400) {
+            // Server accepted the telemetry; the unread body is irrelevant.
+            $this->circuitBreaker->recordSuccess();
+
+            return;
+        }
+        if (\is_int($code) && $code >= 400) {
+            $this->circuitBreaker->recordFailure();
+
+            return;
+        }
+
+        // No HTTP status yet. Did the TCP connection establish? If so the collector is
+        // alive but slow — drop WITHOUT recording so latency alone never trips the breaker.
+        $connectTime = $response->getInfo('connect_time');
+        $primaryIp = $response->getInfo('primary_ip');
+        $connected = (\is_float($connectTime) && $connectTime > 0.0)
+            || (\is_int($connectTime) && $connectTime > 0)
+            || (\is_string($primaryIp) && '' !== $primaryIp);
+
+        if ($connected) {
+            return; // alive but slow → drop silently
+        }
+
+        // Never connected → genuinely dead/unreachable.
+        $this->circuitBreaker->recordFailure();
     }
 
     /**
