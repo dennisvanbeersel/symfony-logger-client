@@ -68,4 +68,29 @@ final class ConfigurationTest extends TestCase
         $this->expectException(InvalidConfigurationException::class);
         $processor->processConfiguration(new Configuration(), [['flush_budget' => 9.0]]);
     }
+
+    public function testExcludedChannelsDefault(): void
+    {
+        $processor = new Processor();
+        $config = $processor->processConfiguration(new Configuration(), []);
+
+        self::assertSame(['http_client', 'console', 'deprecation', 'doctrine'], $config['excluded_channels']);
+    }
+
+    public function testExcludedChannelsCanBeOverriddenToEmpty(): void
+    {
+        $processor = new Processor();
+        $config = $processor->processConfiguration(new Configuration(), [['excluded_channels' => []]]);
+
+        self::assertSame([], $config['excluded_channels']);
+    }
+
+    public function testTogglesDefaultTrue(): void
+    {
+        $processor = new Processor();
+        $config = $processor->processConfiguration(new Configuration(), []);
+
+        self::assertTrue($config['error_tracking_enabled']);
+        self::assertTrue($config['log_aggregation_enabled']);
+    }
 }

@@ -668,6 +668,32 @@ final class ApiClientTest extends TestCase
         self::assertLessThan(0.2, $elapsed, 'flush() with both breakers OPEN must not block');
     }
 
+    public function testSendLogSyncReturnsNullWhenUnconfigured(): void
+    {
+        $client = new ApiClient(
+            dsn: 'https://example.com/p1', apiKey: 'k', timeout: 2.0, retryAttempts: 0, async: true,
+            circuitBreaker: new CircuitBreaker(true, 5, 60, 1, new ArrayAdapter()),
+            logger: null,
+            // no logEndpoint/logToken → unconfigured
+        );
+        self::assertNull($client->sendLogSync(['message' => 'ping']));
+    }
+
+    public function testSendLogSyncReturns202WhenCollectorAccepts(): void
+    {
+        $http = new MockHttpClient(
+            new MockResponse('', ['http_code' => 202]),
+        );
+        $client = new ApiClient(
+            dsn: 'https://example.com/p1', apiKey: 'k', timeout: 2.0, retryAttempts: 0, async: true,
+            circuitBreaker: new CircuitBreaker(true, 5, 60, 1, new ArrayAdapter()),
+            logger: null, httpClient: $http,
+            logEndpoint: 'https://logs.example.com', logToken: 'sk_log_x',
+            logCircuitBreaker: new CircuitBreaker(true, 5, 60, 1, new ArrayAdapter()),
+        );
+        self::assertSame(202, $client->sendLogSync(['message' => 'ping']));
+    }
+
     public function testExposesLogBreakerStateSeparately(): void
     {
         $logBreaker = new CircuitBreaker(

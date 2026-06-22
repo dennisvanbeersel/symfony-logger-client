@@ -45,6 +45,8 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
         private readonly string $environment = 'production',
         private readonly int $batchSize = 50,
         private readonly int $maxBuffer = 1000,
+        private readonly bool $errorTrackingEnabled = true,
+        private readonly bool $logAggregationEnabled = true,
     ) {
         try {
             $this->minimumLevel = Level::fromName(ucfirst(strtolower($captureLevel)));
@@ -71,8 +73,7 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
      */
     protected function write(LogRecord $record): void
     {
-        // Disabled installs (or env-gated `enabled=false`) must never ship anything,
-        // even though the handler is auto-attached to Monolog via the bundle prepend().
+        // Master kill-switch wins over the sub-toggles.
         if (!$this->enabled) {
             return;
         }
@@ -81,14 +82,23 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
             $exception = $record->context['exception'] ?? null;
 
             if ($exception instanceof \Throwable) {
-                $this->apiClient->sendError($this->buildErrorPayload($record, $exception));
+                if ($this->errorTrackingEnabled) {
+                    $this->apiClient->sendError($this->buildErrorPayload($record, $exception));
 
+                    return;
+                }
+                // Error tracking off: fall through to log aggregation (the Throwable is
+                // stripped by buildLogEntry()/stripException()) if it is enabled; else drop.
+                if (!$this->logAggregationEnabled) {
+                    return;
+                }
+            } elseif (!$this->logAggregationEnabled) {
+                // Plain record, log aggregation disabled.
                 return;
             }
 
             $this->logBuffer[] = $this->buildLogEntry($record);
 
-            // Bound memory: drop the OLDEST entry beyond the hard cap.
             while (\count($this->logBuffer) > $this->maxBuffer) {
                 array_shift($this->logBuffer);
             }

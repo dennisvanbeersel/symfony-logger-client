@@ -41,7 +41,7 @@ services:
             $retryAttempts: '%application_logger.retry_attempts%'
             $async: '%application_logger.async%'
             $circuitBreaker: '@ApplicationLogger\Bundle\Service\CircuitBreaker'
-            $logger: '@?logger'
+            $logger: '@?monolog.logger.application_logger_internal'
             $debug: '%application_logger.debug%'
             # Inject host-app HTTP client so proxy/SSL/framework.http_client config applies.
             $httpClient: '@?http_client'
@@ -84,6 +84,8 @@ services:
             $breadcrumbCollector: '@ApplicationLogger\Bundle\Service\BreadcrumbCollector'
             $payloadFactory: '@ApplicationLogger\Bundle\Service\ErrorPayloadFactory'
             $debug: '%application_logger.debug%'
+            $enabled: '%application_logger.enabled%'
+            $errorTrackingEnabled: '%application_logger.error_tracking_enabled%'
         tags:
             - { name: kernel.event_subscriber }
 
@@ -97,7 +99,7 @@ services:
             $ignoredRoutes: '%application_logger.session_tracking.ignored_routes%'
             $ignoredPaths: '%application_logger.session_tracking.ignored_paths%'
             $scrubber: '@ApplicationLogger\Bundle\Service\DataScrubber'
-            $logger: '@?logger'
+            $logger: '@?monolog.logger.application_logger_internal'
         tags:
             - { name: kernel.event_subscriber }
 
@@ -113,6 +115,8 @@ services:
             $environment: '%application_logger.environment%'
             $batchSize: '%application_logger.log_batch_size%'
             $maxBuffer: '%application_logger.max_log_buffer%'
+            $errorTrackingEnabled: '%application_logger.error_tracking_enabled%'
+            $logAggregationEnabled: '%application_logger.log_aggregation_enabled%'
 
     # CSP Nonce Provider - resolves + escapes the CSP nonce for injected <script> tags
     ApplicationLogger\Bundle\Twig\CspNonceProvider:
@@ -125,7 +129,7 @@ services:
         arguments:
             $nonceProvider: '@ApplicationLogger\Bundle\Twig\CspNonceProvider'
             $security: '@?security.helper'
-            $logger: '@?logger'
+            $logger: '@?monolog.logger.application_logger_internal'
             # Optional: when AssetMapper is present, the SDK module is imported from its
             # resolved public URL so no host importmap entry is required (works on install).
             $assetMapper: '@?asset_mapper'
@@ -156,7 +160,7 @@ services:
                     max_buffer_size_mb: '%application_logger.session_replay.max_buffer_size_mb%'
                     expose_api: '%application_logger.session_replay.expose_api%'
             $scriptRenderer: '@ApplicationLogger\Bundle\Twig\ScriptRenderer'
-            $logger: '@?logger'
+            $logger: '@?monolog.logger.application_logger_internal'
             $requestStack: '@request_stack'
         tags:
             - { name: twig.extension }

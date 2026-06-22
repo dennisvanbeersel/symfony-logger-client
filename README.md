@@ -329,6 +329,29 @@ $this->logger->warning('Payment gateway latency elevated', [
 
 Each record is converted into a log entry with an RFC3339 timestamp, an RFC5424 severity keyword (`debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, `emergency`), the Monolog channel as the application name, the environment, and a scrubbed, flattened context map. Entries are sent to `POST <log_endpoint><log_path>` (or the `/batch` variant for batches); a successful ingestion returns `HTTP 202 Accepted`. If no `log_endpoint` / `log_token` is configured, log aggregation is silently skipped.
 
+### Smoke-test the log channel
+
+Verify collector credentials without booting Symfony:
+
+```bash
+# Single LogEntry
+curl -i -X POST "$LOG_ENDPOINT/v1/logs" \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: $LOG_TOKEN" \
+  -d '{"timestamp":"2026-06-22T10:00:00Z","severity":"info","message":"ping","app_name":"smoke-test","environment":"prod","context":{"source":"curl"}}'
+# → 202 {"accepted":1,"dropped":0}   (400 {"error":"invalid_json"} on a bad body)
+
+# Batch
+curl -i -X POST "$LOG_ENDPOINT/v1/logs/batch" \
+  -H "Content-Type: application/json" -H "X-Api-Key: $LOG_TOKEN" \
+  -d '{"logs":[{"timestamp":"2026-06-22T10:00:00Z","severity":"info","message":"ping","app_name":"smoke-test","environment":"prod","context":{}}]}'
+```
+
+Or, with the bundle installed: `php bin/console application-logger:test`.
+
+`LogEntry` fields: `timestamp` (RFC3339), `severity` (syslog keyword), `message`
+(≤8000), `app_name` (≤255), `environment`, `context` (map of string→string).
+
 ### JavaScript SDK
 
 The bundled SDK is shipped pre-built and integrated through AssetMapper automatically. With `javascript.auto_inject` enabled (the default), the SDK is injected into eligible HTML responses — main requests with a `text/html` content type, a status below 400, a `</body>` tag, and a body under 1 MiB. Error pages (4xx/5xx) are deliberately skipped.

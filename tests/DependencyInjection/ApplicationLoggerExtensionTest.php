@@ -7,6 +7,7 @@ namespace ApplicationLogger\Bundle\Tests\DependencyInjection;
 use ApplicationLogger\Bundle\DependencyInjection\ApplicationLoggerExtension;
 use ApplicationLogger\Bundle\DependencyInjection\Configuration;
 use PHPUnit\Framework\TestCase;
+use Symfony\Bundle\MonologBundle\DependencyInjection\MonologExtension;
 use Symfony\Component\Config\Definition\Processor;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 
@@ -42,6 +43,87 @@ final class ApplicationLoggerExtensionTest extends TestCase
             'services.yaml references %application_logger.flush_budget%, so the extension MUST register it',
         );
         self::assertSame(2.0, $container->getParameter('application_logger.flush_budget'));
+    }
+
+    public function testBuildChannelListWithDefaults(): void
+    {
+        self::assertSame(
+            ['!event', '!request', '!php', '!application_logger_internal', '!http_client', '!console', '!deprecation', '!doctrine'],
+            ApplicationLoggerExtension::buildChannelList(['http_client', 'console', 'deprecation', 'doctrine']),
+        );
+    }
+
+    public function testBuildChannelListEmptyExcludedYieldsMandatoryOnly(): void
+    {
+        self::assertSame(
+            ['!event', '!request', '!php', '!application_logger_internal'],
+            ApplicationLoggerExtension::buildChannelList([]),
+        );
+    }
+
+    public function testBuildChannelListStripsBangAndDedupes(): void
+    {
+        // A user who writes "!redis" or duplicates "event" must not produce "!!redis" or a dupe.
+        self::assertSame(
+            ['!event', '!request', '!php', '!application_logger_internal', '!redis'],
+            ApplicationLoggerExtension::buildChannelList(['!redis', 'event']),
+        );
+    }
+
+    public function testExcludedChannelsParameterIsRegistered(): void
+    {
+        $container = new ContainerBuilder();
+        $config = (new Processor())->processConfiguration(new Configuration(), []);
+        $method = new \ReflectionMethod(ApplicationLoggerExtension::class, 'registerConfigurationParameters');
+        $method->invoke(new ApplicationLoggerExtension(), $container, $config);
+
+        self::assertTrue($container->hasParameter('application_logger.excluded_channels'));
+        self::assertSame(['http_client', 'console', 'deprecation', 'doctrine'], $container->getParameter('application_logger.excluded_channels'));
+    }
+
+    public function testPrependMonologSetsDefaultChannelDenylistAndInternalChannel(): void
+    {
+        $container = new ContainerBuilder();
+        $container->registerExtension(new ApplicationLoggerExtension());
+        $container->registerExtension(new MonologExtension());
+
+        (new ApplicationLoggerExtension())->prepend($container);
+
+        $monolog = array_merge(...array_values($container->getExtensionConfig('monolog')) ?: [[]]);
+
+        self::assertSame(
+            ['!event', '!request', '!php', '!application_logger_internal', '!http_client', '!console', '!deprecation', '!doctrine'],
+            $monolog['handlers']['application_logger']['channels'],
+        );
+        self::assertContains('application_logger_internal', $monolog['channels'] ?? []);
+    }
+
+    public function testPrependMonologHonorsCustomExcludedChannels(): void
+    {
+        $container = new ContainerBuilder();
+        $container->registerExtension(new ApplicationLoggerExtension());
+        $container->registerExtension(new MonologExtension());
+        $container->prependExtensionConfig('application_logger', ['excluded_channels' => ['redis']]);
+
+        (new ApplicationLoggerExtension())->prepend($container);
+
+        $monolog = array_merge(...array_values($container->getExtensionConfig('monolog')) ?: [[]]);
+
+        self::assertSame(
+            ['!event', '!request', '!php', '!application_logger_internal', '!redis'],
+            $monolog['handlers']['application_logger']['channels'],
+        );
+    }
+
+    public function testToggleParametersAreRegistered(): void
+    {
+        $container = new ContainerBuilder();
+        $config = (new Processor())->processConfiguration(new Configuration(), []);
+        $method = new \ReflectionMethod(ApplicationLoggerExtension::class, 'registerConfigurationParameters');
+        $method->invoke(new ApplicationLoggerExtension(), $container, $config);
+
+        self::assertTrue($container->getParameter('application_logger.error_tracking_enabled'));
+        self::assertTrue($container->getParameter('application_logger.log_aggregation_enabled'));
     }
 
     /**

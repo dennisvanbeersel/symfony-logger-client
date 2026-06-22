@@ -465,6 +465,61 @@ class ApplicationLoggerExtensionTest extends TestCase
         $this->assertStringNotContainsString('exposeApi', $output);
     }
 
+    public function testInvalidJsConfigLogsAtWarningNotError(): void
+    {
+        $logger = new class implements \Psr\Log\LoggerInterface {
+            use \Psr\Log\LoggerTrait;
+            /** @var list<array{level: mixed, message: string}> */
+            public array $records = [];
+
+            public function log($level, string|\Stringable $message, array $context = []): void
+            {
+                $this->records[] = ['level' => $level, 'message' => (string) $message];
+            }
+        };
+
+        // enabled JS but missing dsn/api_key → validateConfiguration() fails → advisory.
+        $ext = new ApplicationLoggerExtension(
+            config: ['enabled' => true, 'dsn' => '', 'api_key' => ''],
+            scriptRenderer: new ScriptRenderer(new CspNonceProvider()),
+            logger: $logger,
+            requestStack: null,
+        );
+
+        $ext->renderFragments([]); // triggers the missing-fields advisory
+
+        self::assertNotEmpty($logger->records, 'advisory must be logged');
+        self::assertSame('warning', $logger->records[0]['level'], 'JS-config advisory must log at warning, not error');
+    }
+
+    public function testInvalidDsnFormatLogsAtWarningNotError(): void
+    {
+        $logger = new class implements \Psr\Log\LoggerInterface {
+            use \Psr\Log\LoggerTrait;
+            /** @var list<array{level: mixed, message: string}> */
+            public array $records = [];
+
+            public function log($level, string|\Stringable $message, array $context = []): void
+            {
+                $this->records[] = ['level' => $level, 'message' => (string) $message];
+            }
+        };
+
+        // enabled JS, non-empty dsn/api_key but dsn is not a valid URL →
+        // passes the missing-fields check and reaches the filter_var(FILTER_VALIDATE_URL) failure.
+        $ext = new ApplicationLoggerExtension(
+            config: ['enabled' => true, 'dsn' => 'not a url', 'api_key' => 'some-api-key'],
+            scriptRenderer: new ScriptRenderer(new CspNonceProvider()),
+            logger: $logger,
+            requestStack: null,
+        );
+
+        $ext->renderFragments([]); // triggers the invalid-DSN-format advisory
+
+        self::assertNotEmpty($logger->records, 'advisory must be logged');
+        self::assertSame('warning', $logger->records[0]['level'], 'invalid-DSN-format advisory must log at warning, not error');
+    }
+
     /**
      * Build the extension with a ScriptRenderer wired to the given (optional) security.
      *

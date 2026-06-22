@@ -29,6 +29,24 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
     }
 
     /**
+     * Compute the Monolog handler channel denylist. The mandatory set is always
+     * excluded (event/request/php carry uncaught-exception logs already shipped by
+     * ExceptionSubscriber; application_logger_internal is the bundle's own diagnostics
+     * sink). User-configured channel names are appended `!`-prefixed and deduped.
+     *
+     * @param list<string> $excluded channel NAMES (no leading `!`)
+     *
+     * @return list<string>
+     */
+    public static function buildChannelList(array $excluded): array
+    {
+        $mandatory = ['!event', '!request', '!php', '!application_logger_internal'];
+        $user = array_map(static fn (string $c): string => '!'.ltrim($c, '!'), $excluded);
+
+        return array_values(array_unique([...$mandatory, ...$user]));
+    }
+
+    /**
      * Self-wire the bundle's Monolog handler into the host's Monolog configuration.
      *
      * This is NOT gated on `enabled`: that value may be an unresolved env placeholder
@@ -41,17 +59,24 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
             return;
         }
 
+        // Read ONLY excluded_channels from the raw merged config. Do NOT call
+        // processConfiguration() here: at prepend time the env-placeholder machinery
+        // is not yet installed, so processing the full tree throws on the env-driven
+        // `enabled` (%env(bool:...)%) placeholder and breaks the host's cache:clear.
+        $raw = array_merge(...array_values($container->getExtensionConfig($this->getAlias())) ?: [[]]);
+        $excluded = (isset($raw['excluded_channels']) && \is_array($raw['excluded_channels']))
+            ? array_values(array_filter($raw['excluded_channels'], '\is_string'))
+            : ['http_client', 'console', 'deprecation', 'doctrine'];
+
         $container->prependExtensionConfig('monolog', [
+            // Dedicated channel for the bundle's OWN diagnostics; always excluded from
+            // the handler (below) so the bundle can never self-report into its pipeline.
+            'channels' => ['application_logger_internal'],
             'handlers' => [
                 'application_logger' => [
                     'type' => 'service',
                     'id' => \ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler::class,
-                    // Exclude the framework channels that carry UNCAUGHT-exception logs
-                    // (request/php): the ExceptionSubscriber already ships those, so
-                    // capturing them here too would double-record every uncaught error.
-                    // Explicit $logger->error(...) on the app channel (and non-exception
-                    // logs for log-aggregation) still flow through.
-                    'channels' => ['!event', '!request', '!php'],
+                    'channels' => self::buildChannelList($excluded),
                 ],
             ],
         ]);
@@ -105,6 +130,12 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
         // write(), and the Twig extension), which makes a disabled bundle fully inert.
         $loader = new YamlFileLoader($container, new FileLocator(\dirname(__DIR__, 2).'/config'));
         $loader->load('services.yaml');
+
+        // The console command is optional: only register it when symfony/console is
+        // installed in the host app (this is a redistributable bundle).
+        if (class_exists(\Symfony\Component\Console\Command\Command::class)) {
+            $loader->load('commands.yaml');
+        }
     }
 
     /**
@@ -140,6 +171,9 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
         $container->setParameter('application_logger.log_path', $config['log_path']);
         $container->setParameter('application_logger.log_batch_size', $config['log_batch_size']);
         $container->setParameter('application_logger.max_log_buffer', $config['max_log_buffer']);
+        $container->setParameter('application_logger.error_tracking_enabled', $config['error_tracking_enabled']);
+        $container->setParameter('application_logger.log_aggregation_enabled', $config['log_aggregation_enabled']);
+        $container->setParameter('application_logger.excluded_channels', $config['excluded_channels']);
 
         // Circuit breaker parameters
         $container->setParameter('application_logger.circuit_breaker.enabled', $config['circuit_breaker']['enabled']);

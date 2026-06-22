@@ -586,6 +586,58 @@ final class ResilientHttpDispatcher
     }
 
     /**
+     * Blocking send that returns the actual HTTP status (or null). Used by the
+     * connectivity probe (via `ApiClient::sendLogSync()`) — it must surface the real HTTP
+     * result, which the async fire-and-forget path and circuit-breaker state cannot. Breaker-gated and
+     * never throws. Returns null when disabled, the breaker is open, the payload is
+     * unencodable, or the transport fails.
+     *
+     * @param array<string, mixed> $payload
+     * @param array<string, string> $headers
+     */
+    public function postSync(string $url, array $payload, array $headers): ?int
+    {
+        if (!$this->enabled) {
+            return null;
+        }
+
+        try {
+            $jsonBody = json_encode($payload, \JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            $this->logFailure('Failed to JSON encode sync payload', $e);
+
+            return null;
+        }
+
+        if (!$this->circuitBreaker->allowRequest()) {
+            return null;
+        }
+
+        try {
+            $response = $this->httpClient->request('POST', $url, [
+                'headers' => $headers,
+                'body' => $jsonBody,
+                'timeout' => $this->timeout,
+                'max_duration' => $this->timeout,
+            ]);
+            $status = $response->getStatusCode(); // blocking — intentional for the probe
+
+            if ($status >= 200 && $status < 400) {
+                $this->circuitBreaker->recordSuccess();
+            } else {
+                $this->circuitBreaker->recordFailure();
+            }
+
+            return $status;
+        } catch (\Throwable $e) {
+            $this->circuitBreaker->recordFailure();
+            $this->logFailure('Sync transport error', $e);
+
+            return null;
+        }
+    }
+
+    /**
      * Expose the circuit-breaker state for monitoring (proxied through ApiClient).
      *
      * @return array{state: string, failureCount: int, openedAt: int|null, halfOpenAttempts: int}

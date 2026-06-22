@@ -1,0 +1,16 @@
+services:
+    _defaults:
+        autowire: false
+        autoconfigure: false
+        public: false
+
+    ApplicationLogger\Bundle\Command\TestConnectivityCommand:
+        arguments:
+            $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
+            $enabled: '%application_logger.enabled%'
+            $logEndpoint: '%application_logger.log_endpoint%'
+            $logToken: '%application_logger.log_token%'
+            $environment: '%application_logger.environment%'
+        tags:
+            # autoconfigure is off, so the console.command tag MUST be explicit.
+            - { name: console.command }

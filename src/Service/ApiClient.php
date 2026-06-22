@@ -232,6 +232,28 @@ class ApiClient
     }
 
     /**
+     * Synchronous single-log send used by the connectivity-test command. Returns the
+     * real HTTP status (202 = accepted), or null when log aggregation is unconfigured,
+     * the breaker is open, or the transport fails. Public, additive API.
+     *
+     * @param array<string, mixed> $logEntry
+     */
+    public function sendLogSync(array $logEntry): ?int
+    {
+        if (\in_array($this->logEndpoint, [null, ''], true) || \in_array($this->logToken, [null, ''], true)) {
+            return null;
+        }
+
+        $headers = [
+            'Content-Type' => 'application/json',
+            'X-Api-Key' => $this->logToken,
+            'User-Agent' => 'ApplicationLogger-Symfony-Bundle/1.0',
+        ];
+
+        return $this->logDispatcher->postSync($this->buildUrl($this->logEndpoint, $this->logPath), $logEntry, $headers);
+    }
+
+    /**
      * Create or update a session.
      *
      * @param array<string, mixed> $sessionData

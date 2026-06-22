@@ -50,7 +50,7 @@ final class ApplicationLoggerHandlerTest extends TestCase
         $this->handler = $this->createHandler($this->apiClient);
     }
 
-    private function createHandler(ApiClient $apiClient, string $captureLevel = 'error', int $batchSize = 1, bool $enabled = true): ApplicationLoggerHandler
+    private function createHandler(ApiClient $apiClient, string $captureLevel = 'error', int $batchSize = 1, bool $enabled = true, bool $errorTrackingEnabled = true, bool $logAggregationEnabled = true): ApplicationLoggerHandler
     {
         return new ApplicationLoggerHandler(
             $apiClient,
@@ -62,6 +62,8 @@ final class ApplicationLoggerHandlerTest extends TestCase
             environment: 'test',
             // batchSize 1 => flush each log record immediately for deterministic assertions.
             batchSize: $batchSize,
+            errorTrackingEnabled: $errorTrackingEnabled,
+            logAggregationEnabled: $logAggregationEnabled,
         );
     }
 
@@ -336,5 +338,68 @@ final class ApplicationLoggerHandlerTest extends TestCase
         $apiClient->expects($this->never())->method('sendLogs');
 
         $handler->handle($this->createLogRecord(Level::Error, 'boom', ['exception' => new \RuntimeException('x')]));
+    }
+
+    // ---- Toggle routing: error_tracking / log_aggregation sub-toggles ----
+
+    public function testErrorTrackingOffSendsExceptionRecordToLogsStripped(): void
+    {
+        // error_tracking off, log_aggregation on: an exception-bearing record must NOT go
+        // to sendError; it must be buffered as a log (stripped of the Throwable) and flushed.
+        $apiClient = $this->createMock(ApiClient::class);
+        $handler = $this->createHandler($apiClient, errorTrackingEnabled: false, logAggregationEnabled: true);
+
+        $apiClient->expects($this->never())
+            ->method('sendError');
+
+        $apiClient->expects($this->once())
+            ->method('sendLogs')
+            ->with($this->callback(function (array $batch) {
+                $this->assertCount(1, $batch, 'exception record falls through to logs');
+                $this->assertArrayNotHasKey('exception', $batch[0]['context'] ?? [], 'Throwable stripped from log context');
+
+                return true;
+            }));
+
+        $handler->handle($this->createLogRecord(Level::Error, 'boom', ['exception' => new \RuntimeException('boom')]));
+        $handler->flushLogs();
+    }
+
+    public function testLogAggregationOffDropsPlainRecord(): void
+    {
+        $apiClient = $this->createMock(ApiClient::class);
+        $handler = $this->createHandler($apiClient, errorTrackingEnabled: true, logAggregationEnabled: false);
+
+        $apiClient->expects($this->never())->method('sendError');
+        $apiClient->expects($this->never())->method('sendLogs');
+
+        $handler->handle($this->createLogRecord(Level::Error, 'hello'));
+        $handler->flushLogs();
+    }
+
+    public function testBothOffWithMasterOnDropsEverything(): void
+    {
+        $apiClient = $this->createMock(ApiClient::class);
+        $handler = $this->createHandler($apiClient, errorTrackingEnabled: false, logAggregationEnabled: false);
+
+        $apiClient->expects($this->never())->method('sendError');
+        $apiClient->expects($this->never())->method('sendLogs');
+
+        $handler->handle($this->createLogRecord(Level::Error, 'x', ['exception' => new \RuntimeException('x')]));
+        $handler->handle($this->createLogRecord(Level::Error, 'y'));
+        $handler->flushLogs();
+    }
+
+    public function testMasterOffWinsOverSubToggles(): void
+    {
+        $apiClient = $this->createMock(ApiClient::class);
+        $handler = $this->createHandler($apiClient, enabled: false, errorTrackingEnabled: true, logAggregationEnabled: true);
+
+        $apiClient->expects($this->never())->method('sendError');
+        $apiClient->expects($this->never())->method('sendLogs');
+
+        $handler->handle($this->createLogRecord(Level::Error, 'x', ['exception' => new \RuntimeException('x')]));
+        $handler->handle($this->createLogRecord(Level::Error, 'y'));
+        $handler->flushLogs();
     }
 }

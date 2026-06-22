@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ApiClient::getLogCircuitBreakerState()` to expose the log-aggregation breaker state
   independently of the error/session breaker.
 
+- `excluded_channels` config (default `['http_client','console','deprecation','doctrine']`) to control which Monolog channels are aggregated.
+- `error_tracking_enabled` / `log_aggregation_enabled` config toggles (default true) for logs-only / errors-only operation.
+- `application-logger:test` console command and `ApiClient::sendLogSync()` for collector connectivity smoke-testing.
+- Dedicated `application_logger_internal` Monolog channel for the bundle's own diagnostics (always excluded from aggregation).
+
 ### Changed
 - The post-response drain is now bounded by a true **wall-clock** deadline (previously
   the cap was a per-poll idle timeout that a trickling backend could exceed) and is
@@ -30,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI/`__destruct` drain cap changed from a hardcoded `min(timeout, 1.0)` to
   `min(timeout, flush_budget)` (default ⇒ up to 2.0s; more delivery time on CLI, which
   has no worker pool to saturate).
+- **Default channel exclusions widened** to also exclude `http_client`/`console`/`deprecation`/`doctrine`, stopping log self-amplification at `capture_level: info` in http_client-heavy apps. The bundle's own self-diagnostics now log on the internal channel (JS-config advisories downgraded from error to warning).
+
+### Upgrade notes
+- If you use `capture_level: info` with log aggregation and rely on aggregating
+  `http_client`/`console`/`deprecation`/`doctrine` channel records, set
+  `application_logger.excluded_channels` to fewer entries (e.g. `[]`).
 
 ## [0.3.0] - 2026-06-19
 

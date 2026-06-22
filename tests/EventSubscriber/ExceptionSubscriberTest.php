@@ -59,13 +59,28 @@ final class ExceptionSubscriberTest extends TestCase
             ['type' => 'navigation', 'message' => 'Navigated to /test'],
         ]);
 
-        $this->subscriber = new ExceptionSubscriber(
+        $this->subscriber = $this->makeSubscriber();
+    }
+
+    private function makeSubscriber(bool $enabled = true, bool $errorTrackingEnabled = true): ExceptionSubscriber
+    {
+        return new ExceptionSubscriber(
             $this->apiClient,
             $this->contextCollector,
             $this->breadcrumbCollector,
             new ErrorPayloadFactory($this->contextCollector, $this->breadcrumbCollector),
-            debug: false
+            debug: false,
+            enabled: $enabled,
+            errorTrackingEnabled: $errorTrackingEnabled,
         );
+    }
+
+    private function exceptionEvent(\Throwable $exception): ExceptionEvent
+    {
+        $request = Request::create('/test');
+        $request->setSession($this->session);
+
+        return new ExceptionEvent($this->createKernelStub(), $request, HttpKernelInterface::MAIN_REQUEST, $exception);
     }
 
     private function createKernelStub(): HttpKernelInterface
@@ -387,5 +402,19 @@ final class ExceptionSubscriberTest extends TestCase
             }));
 
         $this->subscriber->onKernelException($event);
+    }
+
+    public function testDoesNotCaptureWhenErrorTrackingDisabled(): void
+    {
+        $subscriber = $this->makeSubscriber(enabled: true, errorTrackingEnabled: false);
+        $this->apiClient->expects($this->never())->method('sendError');
+        $subscriber->onKernelException($this->exceptionEvent(new \RuntimeException('boom')));
+    }
+
+    public function testDoesNotCaptureWhenMasterDisabled(): void
+    {
+        $subscriber = $this->makeSubscriber(enabled: false, errorTrackingEnabled: true);
+        $this->apiClient->expects($this->never())->method('sendError');
+        $subscriber->onKernelException($this->exceptionEvent(new \RuntimeException('boom')));
     }
 }

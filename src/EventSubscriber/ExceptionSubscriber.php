@@ -34,6 +34,8 @@ final class ExceptionSubscriber implements EventSubscriberInterface
         private readonly BreadcrumbCollector $breadcrumbCollector,
         private readonly ErrorPayloadFactory $payloadFactory,
         private readonly bool $debug = false,
+        private readonly bool $enabled = true,
+        private readonly bool $errorTrackingEnabled = true,
     ) {
     }
 
@@ -53,6 +55,11 @@ final class ExceptionSubscriber implements EventSubscriberInterface
      */
     public function onKernelException(ExceptionEvent $event): void
     {
+        // Runtime gate (master `enabled` may be an env placeholder — AND here, not at compile).
+        if (!$this->enabled || !$this->errorTrackingEnabled) {
+            return;
+        }
+
         try {
             $exception = $event->getThrowable();
 

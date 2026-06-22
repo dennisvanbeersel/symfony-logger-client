@@ -133,6 +133,42 @@ final class ResilientHttpDispatcherTest extends TestCase
         $this->assertTrue($breaker->isOpen(), 'confirmed 5xx at drain must trip the breaker');
     }
 
+    public function testPostSyncReturnsStatusOn202(): void
+    {
+        $http = new \Symfony\Component\HttpClient\MockHttpClient(
+            new \Symfony\Component\HttpClient\Response\MockResponse('', ['http_code' => 202]),
+        );
+        $dispatcher = new ResilientHttpDispatcher(
+            timeout: 2.0, retryAttempts: 0, async: true,
+            circuitBreaker: new CircuitBreaker(enabled: true, failureThreshold: 3, timeout: 60, maxHalfOpenAttempts: 1, cache: new ArrayAdapter()),
+            logger: null, debug: false, httpClient: $http, enabled: true,
+        );
+
+        self::assertSame(202, $dispatcher->postSync('https://example.com/v1/logs', ['m' => 1], []));
+    }
+
+    public function testPostSyncReturnsStatusOn401AndRecordsFailure(): void
+    {
+        $http = new \Symfony\Component\HttpClient\MockHttpClient(
+            new \Symfony\Component\HttpClient\Response\MockResponse('', ['http_code' => 401]),
+        );
+        $breaker = new CircuitBreaker(enabled: true, failureThreshold: 3, timeout: 60, maxHalfOpenAttempts: 1, cache: new ArrayAdapter());
+        $dispatcher = new ResilientHttpDispatcher(2.0, 0, true, $breaker, null, false, $http, true);
+
+        self::assertSame(401, $dispatcher->postSync('https://example.com/v1/logs', ['m' => 1], []));
+        self::assertSame(1, $breaker->getState()['failureCount']);
+    }
+
+    public function testPostSyncReturnsNullOnTransportError(): void
+    {
+        $http = new \Symfony\Component\HttpClient\MockHttpClient(static function (): never {
+            throw new TransportException('refused');
+        });
+        $dispatcher = new ResilientHttpDispatcher(2.0, 0, true, new CircuitBreaker(true, 3, 60, 1, new ArrayAdapter()), null, false, $http, true);
+
+        self::assertNull($dispatcher->postSync('https://example.com/v1/logs', ['m' => 1], []));
+    }
+
     private function syncDispatcher(
         CircuitBreaker $breaker,
         HttpClientInterface $http,

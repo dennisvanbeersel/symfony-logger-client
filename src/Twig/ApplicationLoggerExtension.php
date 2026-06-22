@@ -96,7 +96,7 @@ class ApplicationLoggerExtension extends AbstractExtension
 
             // Validate required configuration
             if (!$this->validateConfiguration()) {
-                $this->logError('JavaScript SDK configuration is invalid - missing required fields');
+                $this->logWarning('JavaScript SDK configuration is invalid - missing required fields');
 
                 return $empty;
             }
@@ -220,7 +220,7 @@ class ApplicationLoggerExtension extends AbstractExtension
 
         // Validate DSN format (basic check)
         if (!filter_var($this->config['dsn'], \FILTER_VALIDATE_URL)) {
-            $this->logError('Invalid DSN format', ['dsn' => $this->config['dsn']]);
+            $this->logWarning('Invalid DSN format', ['dsn' => $this->config['dsn']]);
 
             return false;
         }
@@ -261,14 +261,21 @@ class ApplicationLoggerExtension extends AbstractExtension
     }
 
     /**
-     * Log an error message.
+     * Log a bundle self-diagnostic. Routed to the dedicated internal Monolog channel
+     * (excluded from the bundle's own handler) so it can never feed the pipeline.
      *
+     * @param array<string, mixed> $context
+     */
+    private function logWarning(string $message, array $context = []): void
+    {
+        $this->logger?->warning('ApplicationLogger JavaScript SDK: '.$message, $context);
+    }
+
+    /**
      * @param array<string, mixed> $context
      */
     private function logError(string $message, array $context = []): void
     {
-        if (null !== $this->logger) {
-            $this->logger->error('ApplicationLogger JavaScript SDK: '.$message, $context);
-        }
+        $this->logger?->error('ApplicationLogger JavaScript SDK: '.$message, $context);
     }
 }
