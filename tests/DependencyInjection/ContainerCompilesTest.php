@@ -115,6 +115,9 @@ final class ContainerCompilesTest extends TestCase
         return $container;
     }
 
+    /**
+     * @group legacy
+     */
     public function testContainerCompilesAndKeyServicesInstantiate(): void
     {
         $container = $this->buildContainer();

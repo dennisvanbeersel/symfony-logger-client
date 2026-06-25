@@ -11,6 +11,10 @@ services:
 
     # API Client - @deprecated compat facade over sdk-core Hub + SessionApiClient
     ApplicationLogger\Bundle\Service\ApiClient:
+        deprecated:
+            package: 'applogger/symfony-bundle'
+            version: '2.0'
+            message: 'The "%service_id%" service is deprecated since applogger/symfony-bundle 2.0. Inject SdkClientFactory/SessionApiClient directly.'
         arguments:
             $factory: '@ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory'
             $sessions: '@ApplicationLogger\Bundle\Service\Sdk\SessionApiClient'

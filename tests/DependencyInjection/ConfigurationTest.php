@@ -137,6 +137,8 @@ final class ConfigurationTest extends TestCase
     /**
      * A deprecated key like retry_attempts: 2 must still COMPILE (no "unrecognized option"
      * exception) — it just emits a deprecation notice.
+     *
+     * @group legacy
      */
     public function testDeprecatedRetryAttemptsStillCompiles(): void
     {

@@ -112,6 +112,13 @@ jobs:
           ${{ matrix.dependency-version == 'lowest' && '--prefer-lowest --prefer-stable' || '' }}
 
       - name: Run PHPUnit tests
+        env:
+          # Allow indirect deprecations from vendored code (PHP 8.4 implicit-nullable
+          # parameters in Symfony 6.4 packages) on the lowest-deps leg. Self-deprecations
+          # from intentional BC surfaces are silenced by @group legacy on those tests.
+          # This must be a real env var (not phpunit.xml <env>) because the Symfony
+          # PHPUnit bridge reads it at bootstrap time, before PhpHandler processes XML.
+          SYMFONY_DEPRECATIONS_HELPER: "max[indirect]=9999"
         run: vendor/bin/phpunit --coverage-text
 
   jest-tests:
