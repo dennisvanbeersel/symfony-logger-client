@@ -2,7 +2,7 @@
 #
 # Fresh-install verification harness for the AppLogger Symfony client bundle.
 #
-# Proves that the bundle (dennisvanbeersel/symfony-logger-client):
+# Proves that the bundle (applogger/symfony-bundle):
 #   1. Installs cleanly into a brand-new Symfony skeleton app (mirror/copy, not symlink).
 #   2. Wires its services with NO errors after the recipe is applied (cache:clear,
 #      debug:container, lint:container all succeed).
@@ -138,10 +138,10 @@ fi
 # the DSN env var the config is incomplete and cache:clear KO's. That is EXPECTED and
 # harmless: the package itself still mirrors into vendor/. We therefore judge success by
 # the package being present, then complete the recipe ourselves in Step 3.
-VENDOR_PKG="$APP/vendor/dennisvanbeersel/symfony-logger-client"
-composer require 'dennisvanbeersel/symfony-logger-client:*@dev' --no-interaction >/dev/null 2>&1 || true
+VENDOR_PKG="$APP/vendor/applogger/symfony-bundle"
+composer require 'applogger/symfony-bundle:*@dev' --no-interaction >/dev/null 2>&1 || true
 if [ -d "$VENDOR_PKG" ]; then
-  pass "composer require mirrored dennisvanbeersel/symfony-logger-client into vendor/"
+  pass "composer require mirrored applogger/symfony-bundle into vendor/"
 else
   fail "composer require did NOT install the bundle into vendor/"
   printf '\n==== SUMMARY ====\nPASS=%d FAIL=%d\n' "$PASS" "$FAIL"
@@ -221,9 +221,9 @@ else
     $envFile = $argv[2];
     $env = $m["env"] ?? [];
     $existing = is_file($envFile) ? file_get_contents($envFile) : "";
-    $block = "\n###> dennisvanbeersel/symfony-logger-client ###\n";
+    $block = "\n###> applogger/symfony-bundle ###\n";
     foreach ($env as $k => $v) { $block .= "$k=$v\n"; }
-    $block .= "###< dennisvanbeersel/symfony-logger-client ###\n";
+    $block .= "###< applogger/symfony-bundle ###\n";
     file_put_contents($envFile, $existing . $block);
   ' "$MANIFEST" "$APP/.env"
 

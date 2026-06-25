@@ -17,7 +17,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PACKAGE="dennisvanbeersel/symfony-logger-client"
+PACKAGE="applogger/symfony-bundle"
 VERSION="${1:-0.3}"
 
 OUT="$SCRIPT_DIR/contrib/$PACKAGE/$VERSION"

@@ -1,7 +1,7 @@
 # Fresh-install recipe verification
 
 `verify-fresh-install.sh` is a real, re-runnable end-to-end harness that proves the
-AppLogger Symfony client bundle (`dennisvanbeersel/symfony-logger-client`):
+AppLogger Symfony client bundle (`applogger/symfony-bundle`):
 
 1. **Installs cleanly** into a brand-new Symfony skeleton app via a `path` repository
    configured with **`symlink: false`** (a mirror/copy, mimicking a real Packagist
@@ -38,7 +38,7 @@ assertion fails. It does all its work in a `mktemp -d` directory and cleans up o
 |------|--------|
 | 1 | `composer create-project symfony/skeleton:^7.0` (falls back to `symfony new`). |
 | 1b | Brings the skeleton to a realistic web-app baseline: `symfony/runtime`, `symfony/http-client`, `symfony/asset-mapper`, `symfony/twig-bundle`, `twig/twig` — packages the bundle expects (it prepends an AssetMapper path and registers a Twig extension). |
-| 2 | Registers a `path` repo for the monorepo bundle with `options.symlink=false`, then `composer require dennisvanbeersel/symfony-logger-client:*@dev`. Asserts the package is a real **copy** in `vendor/`, not a symlink. |
+| 2 | Registers a `path` repo for the monorepo bundle with `options.symlink=false`, then `composer require applogger/symfony-bundle:*@dev`. Asserts the package is a real **copy** in `vendor/`, not a symlink. |
 | 3 | Applies the recipe. Prefers Flex auto-application; **replicates `recipe/manifest.json` faithfully** (parsed with PHP, not hardcoded) when Flex doesn't fully apply it — see note below. |
 | 3.5 | Adds a throwaway `/boom` route that throws, and points `APPLICATION_LOGGER_DSN` at the local listener. |
 | a–e | Asserts clean wiring and recipe artifacts (`cache:clear`, `debug:container`, `lint:container`, `bundles.php`, `config/packages/application_logger.yaml`, `.env` keys). |

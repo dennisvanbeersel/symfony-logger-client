@@ -2,10 +2,10 @@
 
 > Symfony bundle for the [AppLogger](https://applogger.eu) error tracking and application monitoring platform — automatic exception capture, log aggregation, a frontend JavaScript SDK, and non-blocking, resilient delivery.
 
-[![Packagist Version](https://img.shields.io/packagist/v/dennisvanbeersel/symfony-logger-client.svg?style=flat-square)](https://packagist.org/packages/dennisvanbeersel/symfony-logger-client)
-[![Total Downloads](https://img.shields.io/packagist/dt/dennisvanbeersel/symfony-logger-client.svg?style=flat-square)](https://packagist.org/packages/dennisvanbeersel/symfony-logger-client)
-[![PHP Version](https://img.shields.io/packagist/php-v/dennisvanbeersel/symfony-logger-client.svg?style=flat-square)](https://packagist.org/packages/dennisvanbeersel/symfony-logger-client)
-[![License](https://img.shields.io/packagist/l/dennisvanbeersel/symfony-logger-client.svg?style=flat-square)](https://github.com/dennisvanbeersel/symfony-logger-client/blob/main/LICENSE)
+[![Packagist Version](https://img.shields.io/packagist/v/applogger/symfony-bundle.svg?style=flat-square)](https://packagist.org/packages/applogger/symfony-bundle)
+[![Total Downloads](https://img.shields.io/packagist/dt/applogger/symfony-bundle.svg?style=flat-square)](https://packagist.org/packages/applogger/symfony-bundle)
+[![PHP Version](https://img.shields.io/packagist/php-v/applogger/symfony-bundle.svg?style=flat-square)](https://packagist.org/packages/applogger/symfony-bundle)
+[![License](https://img.shields.io/packagist/l/applogger/symfony-bundle.svg?style=flat-square)](https://github.com/dennisvanbeersel/symfony-logger-client/blob/main/LICENSE)
 
 ---
 
@@ -61,7 +61,7 @@ The Composer-enforced runtime requirements are:
 Install with Composer:
 
 ```bash
-composer require dennisvanbeersel/symfony-logger-client
+composer require applogger/symfony-bundle
 ```
 
 ### With Symfony Flex (recommended)

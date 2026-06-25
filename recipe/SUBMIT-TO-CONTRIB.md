@@ -6,7 +6,7 @@ reads recipe endpoints from the *consumer's* root `composer.json`
 `symfony/recipes` and `symfony/recipes-contrib`
 (`vendor/symfony/flex/src/Downloader.php:61`).
 
-So for `composer require dennisvanbeersel/symfony-logger-client` to auto-install the
+So for `composer require applogger/symfony-bundle` to auto-install the
 config scaffolding + `.env` vars + post-install help, the recipe must live in
 **symfony/recipes-contrib** (the only default endpoint open to third-party packages).
 
@@ -18,12 +18,12 @@ optional, a recipe-less install no longer breaks `cache:clear` — the bundle in
 clean and stays inert. The recipe is now **additive** (nice DX), not a correctness
 requirement.
 
-## Eligibility (as of v0.3)
+## Eligibility (as of v2.0)
 
 | Requirement | Status |
 |-------------|--------|
-| Listed on Packagist | ✅ [dennisvanbeersel/symfony-logger-client](https://packagist.org/packages/dennisvanbeersel/symfony-logger-client) |
-| Has a stable (non-dev) release | ✅ v0.3, MIT |
+| Listed on Packagist | ✅ [applogger/symfony-bundle](https://packagist.org/packages/applogger/symfony-bundle) |
+| Has a stable (non-dev) release | ✅ v2.0, MIT |
 | Recipe is useful to the community | ⚠️ low adoption (1 install, 0 stars) — contrib reviewers occasionally push back on packages with little traction |
 
 If the contrib PR stalls on the adoption point, fall back to a **private recipe
@@ -36,8 +36,8 @@ requires consumer opt-in. Layer B keeps installs working in the meantime.
 `build-contrib.sh` assembles the exact directory contrib expects:
 
 ```
-dennisvanbeersel/symfony-logger-client/0.3/manifest.json
-dennisvanbeersel/symfony-logger-client/0.3/config/packages/application_logger.yaml
+applogger/symfony-bundle/0.3/manifest.json
+applogger/symfony-bundle/0.3/config/packages/application_logger.yaml
 ```
 
 - The version directory `0.3` is the **lowest released version** the recipe applies to;
@@ -57,19 +57,19 @@ gh repo fork symfony/recipes-contrib --clone
 cd recipes-contrib
 
 # 3. Drop the payload at the repo root (preserving the vendor/package/version path)
-cp -R /path/to/libraries/symfony-bundle/recipe/contrib/dennisvanbeersel .
+cp -R /path/to/libraries/symfony-bundle/recipe/contrib/applogger .
 
 # 4. Validate locally with the contrib tooling
 composer install
 php src/Github.php   # or: vendor/bin/... per the contrib README's "Testing recipes"
 # Quick syntax check at minimum:
-php -r 'json_decode(file_get_contents("dennisvanbeersel/symfony-logger-client/0.3/manifest.json"), false, 512, JSON_THROW_ON_ERROR); echo "manifest OK\n";'
+php -r 'json_decode(file_get_contents("applogger/symfony-bundle/0.3/manifest.json"), false, 512, JSON_THROW_ON_ERROR); echo "manifest OK\n";'
 
 # 5. Open the PR
-git checkout -b add-symfony-logger-client
-git add dennisvanbeersel
-git commit -m "Add dennisvanbeersel/symfony-logger-client recipe"
-git push -u origin add-symfony-logger-client
+git checkout -b add-applogger-symfony-bundle
+git add applogger
+git commit -m "Add applogger/symfony-bundle recipe"
+git push -u origin add-applogger-symfony-bundle
 gh pr create --repo symfony/recipes-contrib --fill
 ```
 
@@ -83,7 +83,7 @@ install into a throwaway Symfony skeleton:
 
 ```bash
 SYMFONY_ENDPOINT=https://raw.githubusercontent.com/<you>/recipes-contrib/<branch>/index.json \
-  composer require dennisvanbeersel/symfony-logger-client
+  composer require applogger/symfony-bundle
 ```
 
 (Or run the existing harness `tests/recipe/verify-fresh-install.sh`, which already
@@ -91,7 +91,7 @@ replicates the manifest and asserts clean wiring + inert-until-enabled behavior.
 
 ## After it merges
 
-`composer require dennisvanbeersel/symfony-logger-client` will auto-apply the recipe:
+`composer require applogger/symfony-bundle` will auto-apply the recipe:
 copies `config/packages/application_logger.yaml`, appends the three `APPLICATION_LOGGER_*`
 env vars, and prints the post-install instructions. No `extra.symfony.endpoint` needed
 in the consumer project.

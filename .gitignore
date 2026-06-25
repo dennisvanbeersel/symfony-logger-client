@@ -35,3 +35,6 @@ yarn-error.log*
 
 # Generated recipes-contrib submission payload (rebuild via recipe/build-contrib.sh)
 /recipe/contrib/
+
+# Libraries do not commit a lock file (matches applogger/sdk-core); CI runs composer update.
+/composer.lock

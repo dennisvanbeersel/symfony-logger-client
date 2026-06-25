@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\Tests\DependencyInjection;
 
 use ApplicationLogger\Bundle\DependencyInjection\Configuration;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Definition\Processor;
@@ -157,9 +158,8 @@ final class ConfigurationTest extends TestCase
      *
      * The redaction marker '[REDACTED]' is the canonical value used by
      * ApplicationLogger\Sdk\DataScrubber::scrubInternal().
-     *
-     * @dataProvider defaultScrubFieldsProvider
      */
+    #[DataProvider('defaultScrubFieldsProvider')]
     public function testDefaultScrubFieldsRedactThroughSdkCoreScrubber(string $field): void
     {
         $defaultScrubFields = (new Processor())->processConfiguration(new Configuration(), [[]])['scrub_fields'];

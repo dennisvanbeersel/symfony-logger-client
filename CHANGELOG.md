@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-06-25
+
+### Changed
+
+- **Package renamed** from `dennisvanbeersel/symfony-logger-client` to `applogger/symfony-bundle`.
+  Update your `composer.json` require constraint accordingly:
+  ```bash
+  composer require applogger/symfony-bundle
+  ```
+- The bundle is now a thin Symfony adapter over `applogger/sdk-core: ^1.0`. Error
+  capture routes through the SDK Hub; log aggregation routes through LogClient;
+  session tracking is retained unchanged.
+- `ApiClient` is now a deprecated compatibility facade. It remains functional but
+  will be removed in a future major version. Inject the SDK Hub and LogClient
+  directly for new code.
+- Deprecated configuration keys (`log_path`, `log_batch_size`, `max_log_buffer`,
+  `endpoint_path`, `retry_attempts`, `async`, `circuit_breaker.enabled`) are
+  accepted but no-ops; the SDK core owns these concerns. Remove them from your
+  config to silence deprecation notices.
+
+### Upgrade notes
+
+- Change `composer require dennisvanbeersel/symfony-logger-client` to
+  `composer require applogger/symfony-bundle` in all `composer.json` files and
+  CI scripts.
+- No PHP namespace changes — `ApplicationLogger\Bundle\` is unchanged.
+- No config key changes beyond the deprecated no-ops listed above.
+
 ## [Unreleased]
 
 ### Added

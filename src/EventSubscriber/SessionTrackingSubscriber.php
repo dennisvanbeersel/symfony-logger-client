@@ -241,7 +241,10 @@ final class SessionTrackingSubscriber implements EventSubscriberInterface
      */
     private function createNewSession(SessionInterface $session): string
     {
-        $sessionId = Uuid::v4()->toString();
+        // toRfc4122() (not toString()): AbstractUid::toString() only exists since
+        // symfony/uid 7.0, but the bundle supports ^6.4. toRfc4122() yields the same
+        // canonical UUID string on 6.4/7.x/8.x.
+        $sessionId = Uuid::v4()->toRfc4122();
         $session->set(self::SESSION_KEY, $sessionId);
         $session->set(self::LAST_ACTIVITY_KEY, time());
 
