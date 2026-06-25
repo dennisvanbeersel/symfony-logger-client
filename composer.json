@@ -4,7 +4,13 @@
     "type": "symfony-bundle",
     "homepage": "https://applogger.eu",
     "license": "MIT",
-    "keywords": ["symfony", "error-tracking", "monitoring", "logging", "sentry"],
+    "keywords": [
+        "symfony",
+        "error-tracking",
+        "monitoring",
+        "logging",
+        "sentry"
+    ],
     "authors": [
         {
             "name": "Dennis Van Beersel",
@@ -17,11 +23,17 @@
     },
     "require": {
         "php": ">=8.2",
+        "applogger/sdk-core": "dev-master",
         "symfony/framework-bundle": "^6.4|^7.0|^8.0",
         "symfony/http-kernel": "^6.4|^7.0|^8.0",
         "symfony/monolog-bundle": "^3.0|^4.0",
         "symfony/http-client": "^6.4|^7.0|^8.0",
         "symfony/uid": "^6.4|^7.0|^8.0"
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
     },
     "require-dev": {
         "phpunit/phpunit": "^10.0|^11.0|^12.0",
@@ -33,7 +45,8 @@
         "symfony/security-bundle": "^6.4|^7.0|^8.0",
         "symfony/twig-bundle": "^6.4|^7.0|^8.0",
         "twig/twig": "^3.0",
-        "symfony/console": "^6.4|^7.0|^8.0"
+        "symfony/console": "^6.4|^7.0|^8.0",
+        "symfony/yaml": "^6.4|^7.0|^8.0"
     },
     "autoload": {
         "psr-4": {

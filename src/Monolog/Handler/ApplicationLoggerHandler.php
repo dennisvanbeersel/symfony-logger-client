@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace ApplicationLogger\Bundle\Monolog\Handler;
 
-use ApplicationLogger\Bundle\Service\ApiClient;
 use ApplicationLogger\Bundle\Service\ContextCollectorInterface;
-use ApplicationLogger\Bundle\Service\DataScrubber;
-use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
+use ApplicationLogger\Bundle\Service\Sdk\LoopbackGuard;
+use ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory;
+use ApplicationLogger\Sdk\DataScrubber;
+use ApplicationLogger\Sdk\Event;
+use ApplicationLogger\Sdk\Severity;
+use ApplicationLogger\Sdk\StackTraceParser;
 use Monolog\Handler\AbstractProcessingHandler;
 use Monolog\Level;
 use Monolog\LogRecord;
@@ -16,15 +19,14 @@ use Monolog\LogRecord;
  * Monolog Handler for Application Logger.
  *
  * Routes records to the correct pipeline:
- * - Records WITH an attached Throwable -> error pipeline (sendError) so they group,
+ * - Records WITH an attached Throwable -> error pipeline (Hub::captureEvent) so they group,
  *   fingerprint and surface on the error dashboard.
- * - Records WITHOUT an exception -> LOG AGGREGATION pipeline (sendLog) which ships
+ * - Records WITHOUT an exception -> LOG AGGREGATION pipeline (LogClient::log) which ships
  *   them to the Go log-collector (ClickHouse). This avoids the previous bug where
  *   every plain log message fingerprinted to a single ('LogMessage','unknown',1)
- *   ErrorGroup. When log aggregation is not configured, sendLog() no-ops.
+ *   ErrorGroup. When log aggregation is not configured, LogClient is null and the path no-ops.
  *
- * It also batches log-aggregation records and flushes them in a single HTTP request
- * to reduce per-message overhead, with a hard buffer cap to bound memory.
+ * Buffering is fully delegated to LogClient (sdk-core). The handler no longer buffers.
  *
  * RESILIENCE GUARANTEE: never throws to the caller; logging must never crash the app.
  */
@@ -32,19 +34,14 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
 {
     private readonly Level $minimumLevel;
 
-    /** @var array<int, array<string, mixed>> */
-    private array $logBuffer = [];
-
     public function __construct(
-        private readonly ApiClient $apiClient,
+        private readonly SdkClientFactory $factory,
         private readonly ContextCollectorInterface $contextCollector,
         private readonly DataScrubber $scrubber,
-        private readonly ErrorPayloadFactory $payloadFactory,
+        private readonly LoopbackGuard $loopback,
         private readonly bool $enabled = true,
         string $captureLevel = 'error',
         private readonly string $environment = 'production',
-        private readonly int $batchSize = 50,
-        private readonly int $maxBuffer = 1000,
         private readonly bool $errorTrackingEnabled = true,
         private readonly bool $logAggregationEnabled = true,
     ) {
@@ -69,7 +66,7 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
 
     /**
      * Write a single record. Exceptions go to the error pipeline; everything else
-     * is buffered for the log-aggregation pipeline.
+     * is delegated to LogClient for the log-aggregation pipeline.
      */
     protected function write(LogRecord $record): void
     {
@@ -79,16 +76,20 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
         }
 
         try {
+            if ($this->loopback->isIngestRequest()) {
+                return; // loopback gates BOTH paths
+            }
+
             $exception = $record->context['exception'] ?? null;
 
             if ($exception instanceof \Throwable) {
                 if ($this->errorTrackingEnabled) {
-                    $this->apiClient->sendError($this->buildErrorPayload($record, $exception));
+                    $this->captureErrorEvent($record, $exception);
 
                     return;
                 }
                 // Error tracking off: fall through to log aggregation (the Throwable is
-                // stripped by buildLogEntry()/stripException()) if it is enabled; else drop.
+                // stripped by emitLog()/stripException()) if it is enabled; else drop.
                 if (!$this->logAggregationEnabled) {
                     return;
                 }
@@ -97,15 +98,7 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
                 return;
             }
 
-            $this->logBuffer[] = $this->buildLogEntry($record);
-
-            while (\count($this->logBuffer) > $this->maxBuffer) {
-                array_shift($this->logBuffer);
-            }
-
-            if (\count($this->logBuffer) >= $this->batchSize) {
-                $this->flushLogs();
-            }
+            $this->emitLog($record);
         } catch (\Throwable) {
             // Silently fail - logging errors must never crash the application.
         }
@@ -127,88 +120,85 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
     }
 
     /**
-     * Flush buffered log-aggregation records to the collector in one (batched) request.
+     * Flush buffered log-aggregation records via the LogClient.
      */
     public function flushLogs(): void
     {
-        if ([] === $this->logBuffer) {
-            return;
-        }
-
-        $batch = $this->logBuffer;
-        $this->logBuffer = [];
-
-        // sendLogs() never throws and no-ops when log aggregation is unconfigured.
-        $this->apiClient->sendLogs($batch);
-    }
-
-    /**
-     * Build the error-pipeline payload for a record that carries a Throwable.
-     *
-     * @return array<string, mixed>
-     */
-    private function buildErrorPayload(LogRecord $record, \Throwable $exception): array
-    {
         try {
-            $context = $this->contextCollector->collectContext();
-
-            // The common ~20-field mapping lives in ErrorPayloadFactory; the handler
-            // overrides the fields it derives from the LogRecord rather than the
-            // Throwable (message/level/timestamp/context/tags) plus its line floor.
-            return $this->payloadFactory->fromThrowable($exception, $context, [
-                'message' => $this->payloadFactory->truncateValue($record->message, 1000),
-                'line' => max(1, $exception->getLine()),
-                'level' => $this->mapLevel($record->level),
-                'timestamp' => $record->datetime->format(\DateTimeImmutable::ATOM),
-                'environment' => $context['environment'] ?? $this->environment,
-                'context' => $this->scrubber->scrub($this->stripException($record->context)),
-                'tags' => [
-                    'channel' => $record->channel,
-                    'monolog_level' => $record->level->name,
-                ],
-            ]);
+            $this->factory->getHub()->getLogClient()?->flush();
         } catch (\Throwable) {
-            return $this->payloadFactory->minimalFallback($exception, [
-                'message' => $this->payloadFactory->truncateValue($record->message, 1000),
-                'file' => 'unknown',
-                'line' => 1,
-                'level' => $this->mapLevel($record->level),
-                'timestamp' => $record->datetime->format(\DateTimeImmutable::ATOM),
-            ]);
+            // ignore
         }
     }
 
     /**
-     * Build a collector LogEntry from a non-exception record.
-     *
-     * Matches the Go collector HTTP contract (internal/http handlers.go LogEntry):
-     * timestamp(RFC3339), severity(string), message, app_name, environment,
-     * context(map<string,string>). Sensitive context fields are scrubbed recursively
-     * and the map is flattened/stringified because the collector context is
-     * map<string,string>.
-     *
-     * @return array<string, mixed>
+     * Build and capture an sdk-core Event for a record that carries a Throwable.
+     * captureEvent does NOT auto-collect context or parse a stack trace, so we
+     * enrich both here from the LogRecord data.
      */
-    private function buildLogEntry(LogRecord $record): array
+    private function captureErrorEvent(LogRecord $record, \Throwable $exception): void
     {
-        $context = [];
         try {
-            $scrubbed = $this->scrubber->scrub($this->stripException($record->context));
-            $context = $this->flattenContext($scrubbed);
-            // Preserve the originating channel for filtering/grouping in ClickHouse.
-            $context['channel'] = $record->channel;
+            $context = array_merge(
+                $this->contextCollector->collectContext(),
+                $this->stripException($record->context),
+            );
+
+            $event = new Event(
+                type: $exception::class,
+                message: $this->truncate($record->message, 1000),
+                file: $exception->getFile() ?: 'unknown',
+                line: max(1, $exception->getLine()),
+                level: Severity::fromName($this->mapLevel($record->level)),
+                environment: \is_string($context['environment'] ?? null) ? $context['environment'] : $this->environment,
+                release: \is_string($context['release'] ?? null) ? $context['release'] : null,
+                timestamp: $record->datetime,
+                tags: ['channel' => $record->channel, 'monolog_level' => $record->level->name],
+                context: $context,
+                stackTrace: (new StackTraceParser())->parse($exception),
+            );
+
+            $this->factory->getHub()->captureEvent($event);
         } catch (\Throwable) {
-            $context = [];
+            // degraded: ship minimal event so the error isn't lost
+            try {
+                $this->factory->getHub()->captureEvent(new Event(
+                    type: $exception::class,
+                    message: $this->truncate($record->message, 1000),
+                    file: 'unknown',
+                    line: 1,
+                    level: Severity::fromName($this->mapLevel($record->level)),
+                    environment: $this->environment,
+                    release: null,
+                    timestamp: $record->datetime,
+                    tags: ['channel' => $record->channel, 'monolog_level' => $record->level->name],
+                ));
+            } catch (\Throwable) {
+                // give up silently
+            }
+        }
+    }
+
+    /**
+     * Delegate a non-exception record to LogClient for log aggregation.
+     * Pre-scrubs and flattens the context (collector contract: map<string,string>).
+     */
+    private function emitLog(LogRecord $record): void
+    {
+        $logClient = $this->factory->getHub()->getLogClient();
+        if (null === $logClient) {
+            return; // log aggregation unconfigured → no-op
         }
 
-        return [
-            'timestamp' => $record->datetime->format(\DateTimeImmutable::ATOM),
-            'severity' => $this->mapSeverity($record->level),
-            'message' => $this->payloadFactory->truncateValue($record->message, 8000),
-            'app_name' => $this->payloadFactory->truncateValue($record->channel, 255),
-            'environment' => $this->environment,
-            'context' => $context,
-        ];
+        $scrubbed = $this->scrubber->scrub($this->stripException($record->context));
+        $ctx = $this->flattenContext($scrubbed);
+        $ctx['channel'] = $record->channel;
+
+        $logClient->log(
+            $this->mapSeverity($record->level),
+            $this->truncate($record->message, 8000),
+            $ctx,
+        );
     }
 
     /**
@@ -224,10 +214,10 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
         foreach ($data as $key => $value) {
             $k = (string) $key;
             if (\is_scalar($value) || null === $value) {
-                $out[$k] = $this->payloadFactory->truncateValue($this->stringify($value), 4000);
+                $out[$k] = $this->truncate($this->stringify($value), 4000);
             } else {
                 try {
-                    $out[$k] = $this->payloadFactory->truncateValue((string) json_encode($value), 4000);
+                    $out[$k] = $this->truncate((string) json_encode($value), 4000);
                 } catch (\Throwable) {
                     $out[$k] = '[unserializable]';
                 }
@@ -259,6 +249,26 @@ final class ApplicationLoggerHandler extends AbstractProcessingHandler
         unset($context['exception']);
 
         return $context;
+    }
+
+    /**
+     * Truncate a string to at most $max bytes, appending '…' when cut.
+     *
+     * Uses mb_strcut() so the cut always falls on a valid UTF-8 character
+     * boundary — a raw substr() cut can split a multibyte character and emit
+     * an invalid byte sequence, which causes json_encode(JSON_THROW_ON_ERROR)
+     * to drop the entire event in sdk-core's HttpTransport.
+     *
+     * The suffix '…' is 3 bytes in UTF-8, so the budget for the actual content
+     * is $max - 3 bytes.
+     */
+    private function truncate(string $value, int $max): string
+    {
+        if (\strlen($value) <= $max) {
+            return $value;
+        }
+
+        return mb_strcut($value, 0, $max - 3, 'UTF-8').'…';
     }
 
     /**

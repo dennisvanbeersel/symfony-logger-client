@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\Tests\Service;
 
 use ApplicationLogger\Bundle\Service\ContextCollector;
-use ApplicationLogger\Bundle\Service\DataScrubber;
+use ApplicationLogger\Sdk\DataScrubber;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;

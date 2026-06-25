@@ -93,4 +93,104 @@ final class ConfigurationTest extends TestCase
         self::assertTrue($config['error_tracking_enabled']);
         self::assertTrue($config['log_aggregation_enabled']);
     }
+
+    public function testLoopbackPathsDefaultsToFivePrefixes(): void
+    {
+        $processor = new Processor();
+        $config = $processor->processConfiguration(new Configuration(), []);
+
+        self::assertSame(
+            ['/api/v1/errors', '/api/v1/js-errors', '/api/v1/sessions', '/api/v1/logs', '/api/errors'],
+            $config['loopback_paths'],
+        );
+    }
+
+    public function testSessionHashSaltDefaultsToNull(): void
+    {
+        $processor = new Processor();
+        $config = $processor->processConfiguration(new Configuration(), []);
+
+        self::assertNull($config['session_hash_salt']);
+    }
+
+    public function testLoopbackPathsCanBeOverridden(): void
+    {
+        $processor = new Processor();
+        $config = $processor->processConfiguration(new Configuration(), [[
+            'loopback_paths' => ['/custom/ingest'],
+        ]]);
+
+        self::assertSame(['/custom/ingest'], $config['loopback_paths']);
+    }
+
+    public function testSessionHashSaltCanBeSet(): void
+    {
+        $processor = new Processor();
+        $config = $processor->processConfiguration(new Configuration(), [[
+            'session_hash_salt' => 'my-custom-salt',
+        ]]);
+
+        self::assertSame('my-custom-salt', $config['session_hash_salt']);
+    }
+
+    /**
+     * A deprecated key like retry_attempts: 2 must still COMPILE (no "unrecognized option"
+     * exception) — it just emits a deprecation notice.
+     */
+    public function testDeprecatedRetryAttemptsStillCompiles(): void
+    {
+        $processor = new Processor();
+
+        // Must not throw an InvalidConfigurationException
+        $config = @$processor->processConfiguration(new Configuration(), [[
+            'retry_attempts' => 2,
+        ]]);
+
+        self::assertSame(2, $config['retry_attempts']);
+    }
+
+    /**
+     * GDPR coverage: the bundle's shipped default scrub_fields MUST produce redaction
+     * when passed through sdk-core's DataScrubber. This test locks in that the bundle's
+     * default configuration actually scrubs sensitive values — a regression here would
+     * be a GDPR violation in every clean install.
+     *
+     * The redaction marker '[REDACTED]' is the canonical value used by
+     * ApplicationLogger\Sdk\DataScrubber::scrubInternal().
+     *
+     * @dataProvider defaultScrubFieldsProvider
+     */
+    public function testDefaultScrubFieldsRedactThroughSdkCoreScrubber(string $field): void
+    {
+        $defaultScrubFields = (new Processor())->processConfiguration(new Configuration(), [[]])['scrub_fields'];
+
+        $scrubber = new \ApplicationLogger\Sdk\DataScrubber($defaultScrubFields);
+
+        $result = $scrubber->scrub([$field => 'sensitive-value-that-must-not-leak']);
+
+        self::assertSame('[REDACTED]', $result[$field], \sprintf(
+            'Default scrub field "%s" must be redacted by sdk-core DataScrubber, but value was passed through.',
+            $field,
+        ));
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function defaultScrubFieldsProvider(): array
+    {
+        return [
+            'password' => ['password'],
+            'token' => ['token'],
+            'api_key' => ['api_key'],
+            'secret' => ['secret'],
+            'authorization' => ['authorization'],
+            'credit_card' => ['credit_card'],
+            'creditcard' => ['creditcard'],
+            'card_number' => ['card_number'],
+            'cvv' => ['cvv'],
+            'ssn' => ['ssn'],
+            'iban' => ['iban'],
+        ];
+    }
 }

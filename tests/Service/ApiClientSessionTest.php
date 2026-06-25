@@ -5,146 +5,110 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\Tests\Service;
 
 use ApplicationLogger\Bundle\Service\ApiClient;
-use ApplicationLogger\Bundle\Service\CircuitBreaker;
+use ApplicationLogger\Bundle\Service\ContextCollectorInterface;
+use ApplicationLogger\Bundle\Service\Sdk\BundleContextCollector;
+use ApplicationLogger\Bundle\Service\Sdk\LoopbackGuard;
+use ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory;
+use ApplicationLogger\Bundle\Service\Sdk\SessionApiClient;
+use ApplicationLogger\Sdk\CircuitBreaker;
+use ApplicationLogger\Sdk\Clock\SystemClock;
 use PHPUnit\Framework\TestCase;
-use Psr\Log\NullLogger;
 use Symfony\Component\Cache\Adapter\ArrayAdapter;
+use Symfony\Component\HttpClient\MockHttpClient;
+use Symfony\Component\HttpFoundation\RequestStack;
 
 /**
- * Unit tests for ApiClient session tracking methods.
+ * Unit tests for ApiClient session tracking methods (facade delegation).
  *
- * These methods are fire-and-forget (never throw), so we test that they execute without errors.
+ * Session methods delegate to SessionApiClient. With an empty DSN + disabled
+ * client all calls are inert — the methods must never throw (resilience contract).
  */
 final class ApiClientSessionTest extends TestCase
 {
-    private CircuitBreaker $circuitBreaker;
     private ApiClient $apiClient;
 
     protected function setUp(): void
     {
-        // Create circuit breaker with proper parameters
-        $cache = new ArrayAdapter();
-        $this->circuitBreaker = new CircuitBreaker(
-            enabled: true,
-            failureThreshold: 5,
-            timeout: 60,
-            maxHalfOpenAttempts: 3,
-            cache: $cache
+        $inner = $this->createMock(ContextCollectorInterface::class);
+        $inner->method('collectContext')->willReturn([]);
+
+        $factory = new SdkClientFactory(
+            [
+                'dsn' => '',
+                'api_key' => '',
+                'environment' => 'test',
+                'release' => null,
+                'enabled' => false,
+                'scrub_fields' => [],
+                'max_breadcrumbs' => 50,
+                'timeout' => 2.0,
+                'flush_budget' => 2.0,
+                'circuit_breaker' => ['failure_threshold' => 5, 'timeout' => 60, 'half_open_attempts' => 1],
+                'log_endpoint' => null,
+                'log_token' => null,
+                'session_hash_salt' => null,
+                'app_name' => 'test',
+                'cache_dir' => sys_get_temp_dir().'/applogger-session-test-'.uniqid('', true),
+            ],
+            new BundleContextCollector($inner),
+            new LoopbackGuard(new RequestStack(), []),
         );
 
-        // Create ApiClient with proper constructor parameters
-        $this->apiClient = new ApiClient(
-            dsn: 'https://localhost:9999/test-project-id', // Valid DSN format
-            apiKey: 'test-api-key',
-            timeout: 0.5, // Minimum allowed timeout
-            retryAttempts: 0, // No retries for speed
-            async: false, // Synchronous for testing
-            circuitBreaker: $this->circuitBreaker,
-            logger: new NullLogger(),
-            debug: false
+        $sessions = new SessionApiClient(
+            dsn: '',
+            apiKey: '',
+            httpClient: new MockHttpClient(),
+            loopback: new LoopbackGuard(new RequestStack(), []),
+            breaker: new CircuitBreaker(new ArrayAdapter(), new SystemClock()),
+            enabled: false,
         );
+
+        $this->apiClient = new ApiClient($factory, $sessions);
     }
 
     public function testCreateSessionDoesNotThrow(): void
     {
-        $sessionData = [
+        $this->apiClient->createSession([
             'session_id' => 'test-session-123',
             'started_at' => '2024-10-26T12:00:00+00:00',
             'platform' => 'web',
-            'browser' => 'Chrome 120',
-            'user_agent' => 'Mozilla/5.0',
-        ];
-
-        // Should not throw exception even with invalid DSN
-        $this->apiClient->createSession($sessionData);
-
-        $this->addToAssertionCount(1); // If we get here, test passed
+        ]);
+        $this->addToAssertionCount(1);
     }
 
     public function testAddSessionEventDoesNotThrow(): void
     {
-        $sessionId = 'test-session-123';
-        $eventData = [
+        $this->apiClient->addSessionEvent('test-session-123', [
             'type' => 'PAGE_VIEW',
             'url' => 'https://example.com/page',
-            'timestamp' => '2024-10-26T12:00:00+00:00',
-        ];
-
-        // Should not throw exception
-        $this->apiClient->addSessionEvent($sessionId, $eventData);
-
+        ]);
         $this->addToAssertionCount(1);
     }
 
     public function testEndSessionDoesNotThrow(): void
     {
-        $sessionId = 'test-session-123';
-        $endedAt = new \DateTimeImmutable('2024-10-26T13:00:00+00:00');
-
-        // Should not throw exception
-        $this->apiClient->endSession($sessionId, $endedAt);
-
+        $this->apiClient->endSession('test-session-123', new \DateTimeImmutable('2024-10-26T13:00:00+00:00'));
         $this->addToAssertionCount(1);
     }
 
     public function testEndSessionWithoutTimestampDoesNotThrow(): void
     {
-        $sessionId = 'test-session-123';
-
-        // Should not throw exception (will use current time)
-        $this->apiClient->endSession($sessionId);
-
-        $this->addToAssertionCount(1);
-    }
-
-    public function testCircuitBreakerPreventsCallsWhenOpen(): void
-    {
-        // Open the circuit breaker by recording failures
-        for ($i = 0; $i < 5; ++$i) {
-            $this->circuitBreaker->recordFailure();
-        }
-
-        $this->assertTrue($this->circuitBreaker->isOpen());
-
-        // These calls should return early without making HTTP requests
-        $this->apiClient->createSession([
-            'session_id' => 'test-session',
-            'started_at' => (new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM),
-        ]);
-
-        $this->apiClient->addSessionEvent('test', ['type' => 'CLICK']);
-        $this->apiClient->endSession('test');
-
-        // If we get here, the circuit breaker is working (no exceptions thrown)
+        $this->apiClient->endSession('test-session-123');
         $this->addToAssertionCount(1);
     }
 
     public function testCreateSessionAddsDefaultTimestamp(): void
     {
-        $sessionData = [
-            'session_id' => 'test-session-123',
-            'platform' => 'web',
-            // No started_at - should be added automatically
-        ];
-
-        // Should not throw - timestamp will be added
-        $this->apiClient->createSession($sessionData);
-
+        $this->apiClient->createSession(['session_id' => 'test-session-123', 'platform' => 'web']);
         $this->addToAssertionCount(1);
     }
 
     public function testAddSessionEventAddsDefaultTimestamp(): void
     {
-        $sessionId = 'test-session-123';
-        $eventData = [
+        $this->apiClient->addSessionEvent('test-session-123', [
             'type' => 'PAGE_VIEW',
             'url' => 'https://example.com',
-            // No timestamp - should be added automatically
-        ];
-
-        // Should not throw - timestamp will be added
-        $this->apiClient->addSessionEvent($sessionId, $eventData);
-
+        ]);
         $this->addToAssertionCount(1);
     }
 
@@ -152,13 +116,11 @@ final class ApiClientSessionTest extends TestCase
     {
         $sessionId = 'multi-test-session';
 
-        // Create session
         $this->apiClient->createSession([
             'session_id' => $sessionId,
-            'started_at' => (new \DateTimeImmutable())->format(\DateTimeImmutable::ATOM),
+            'started_at' => (new \DateTimeImmutable())->format(\DateTimeInterface::ATOM),
         ]);
 
-        // Add multiple events
         for ($i = 0; $i < 5; ++$i) {
             $this->apiClient->addSessionEvent($sessionId, [
                 'type' => 'PAGE_VIEW',
@@ -166,10 +128,58 @@ final class ApiClientSessionTest extends TestCase
             ]);
         }
 
-        // End session
         $this->apiClient->endSession($sessionId);
+        $this->addToAssertionCount(1);
+    }
 
-        // If we get here, all calls succeeded
+    public function testCircuitBreakerPreventsCallsWithoutThrowing(): void
+    {
+        // Even with a real tripped breaker, facade session calls must not throw.
+        $breaker = new CircuitBreaker(
+            cache: new ArrayAdapter(),
+            clock: new SystemClock(),
+            failureThreshold: 1,
+        );
+        $breaker->recordFailure(); // trip to OPEN
+
+        $sessions = new SessionApiClient(
+            dsn: 'https://localhost:9999/proj',
+            apiKey: 'pk',
+            httpClient: new MockHttpClient(),
+            loopback: new LoopbackGuard(new RequestStack(), []),
+            breaker: $breaker,
+            enabled: true,
+        );
+
+        $inner = $this->createMock(ContextCollectorInterface::class);
+        $inner->method('collectContext')->willReturn([]);
+        $factory = new SdkClientFactory(
+            [
+                'dsn' => '',
+                'api_key' => '',
+                'environment' => 'test',
+                'release' => null,
+                'enabled' => false,
+                'scrub_fields' => [],
+                'max_breadcrumbs' => 50,
+                'timeout' => 2.0,
+                'flush_budget' => 2.0,
+                'circuit_breaker' => ['failure_threshold' => 5, 'timeout' => 60, 'half_open_attempts' => 1],
+                'log_endpoint' => null,
+                'log_token' => null,
+                'session_hash_salt' => null,
+                'app_name' => 'test',
+                'cache_dir' => sys_get_temp_dir().'/applogger-session-breaker-'.uniqid('', true),
+            ],
+            new BundleContextCollector($inner),
+            new LoopbackGuard(new RequestStack(), []),
+        );
+
+        $client = new ApiClient($factory, $sessions);
+        $client->createSession(['session_id' => 'test-session']);
+        $client->addSessionEvent('test', ['type' => 'CLICK']);
+        $client->endSession('test');
+
         $this->addToAssertionCount(1);
     }
 }

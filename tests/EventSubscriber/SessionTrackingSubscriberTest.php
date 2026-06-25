@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\Tests\EventSubscriber;
 
 use ApplicationLogger\Bundle\EventSubscriber\SessionTrackingSubscriber;
-use ApplicationLogger\Bundle\Service\ApiClient;
-use ApplicationLogger\Bundle\Service\DataScrubber;
+use ApplicationLogger\Bundle\Service\Sdk\SessionClientInterface;
+use ApplicationLogger\Sdk\DataScrubber;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
@@ -20,18 +20,18 @@ use Symfony\Component\HttpKernel\KernelEvents;
 
 final class SessionTrackingSubscriberTest extends TestCase
 {
-    private MockObject&ApiClient $apiClient;
+    private MockObject&SessionClientInterface $sessionClient;
     private Session $session;
     private SessionTrackingSubscriber $subscriber;
 
     protected function setUp(): void
     {
-        $this->apiClient = $this->createMock(ApiClient::class);
+        $this->sessionClient = $this->createMock(SessionClientInterface::class);
         $this->session = new Session(new MockArraySessionStorage());
         $this->session->start(); // Start the session
 
         $this->subscriber = new SessionTrackingSubscriber(
-            $this->apiClient,
+            $this->sessionClient,
             true,
             true,
             1800,
@@ -93,8 +93,8 @@ final class SessionTrackingSubscriberTest extends TestCase
         $kernel = $this->createKernelStub();
 
         // No API calls yet on the request event.
-        $this->apiClient->expects($this->once())->method('createSession');
-        $this->apiClient->expects($this->once())->method('addSessionEvent');
+        $this->sessionClient->expects($this->once())->method('createSession');
+        $this->sessionClient->expects($this->once())->method('addSessionEvent');
 
         $this->subscriber->onKernelRequest(
             new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST)
@@ -114,9 +114,9 @@ final class SessionTrackingSubscriberTest extends TestCase
     {
         // A terminate with no collected intent (e.g. an ignored/sessionless request)
         // must not POST anything and must never throw.
-        $this->apiClient->expects($this->never())->method('createSession');
-        $this->apiClient->expects($this->never())->method('addSessionEvent');
-        $this->apiClient->expects($this->never())->method('endSession');
+        $this->sessionClient->expects($this->never())->method('createSession');
+        $this->sessionClient->expects($this->never())->method('addSessionEvent');
+        $this->sessionClient->expects($this->never())->method('endSession');
 
         $kernel = $this->createKernelStub();
         $request = Request::create('/api/ignored');
@@ -133,7 +133,7 @@ final class SessionTrackingSubscriberTest extends TestCase
         $request->setSession($this->session);
 
         // Expect session creation API call
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('createSession')
             ->with($this->callback(function (array $data) {
                 $this->assertArrayHasKey('session_id', $data);
@@ -145,7 +145,7 @@ final class SessionTrackingSubscriberTest extends TestCase
             }));
 
         // Expect page view event
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('addSessionEvent');
 
         $this->dispatchLifecycle($request);
@@ -166,8 +166,8 @@ final class SessionTrackingSubscriberTest extends TestCase
         $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
 
         // Should not call API
-        $this->apiClient->expects($this->never())->method('createSession');
-        $this->apiClient->expects($this->never())->method('addSessionEvent');
+        $this->sessionClient->expects($this->never())->method('createSession');
+        $this->sessionClient->expects($this->never())->method('addSessionEvent');
 
         $this->subscriber->onKernelRequest($event);
     }
@@ -181,8 +181,8 @@ final class SessionTrackingSubscriberTest extends TestCase
         $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
 
         // Should not call API
-        $this->apiClient->expects($this->never())->method('createSession');
-        $this->apiClient->expects($this->never())->method('addSessionEvent');
+        $this->sessionClient->expects($this->never())->method('createSession');
+        $this->sessionClient->expects($this->never())->method('addSessionEvent');
 
         $this->subscriber->onKernelRequest($event);
     }
@@ -198,11 +198,11 @@ final class SessionTrackingSubscriberTest extends TestCase
         $request->setSession($this->session);
 
         // Should create/update session (always called)
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('createSession');
 
         // Should add page view event
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('addSessionEvent')
             ->with(
                 $existingSessionId,
@@ -230,16 +230,16 @@ final class SessionTrackingSubscriberTest extends TestCase
         $request->setSession($this->session);
 
         // Should end old session
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('endSession')
             ->with('old-session-id');
 
         // Should create new session
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('createSession');
 
         // Should add page view event
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('addSessionEvent');
 
         $this->dispatchLifecycle($request);
@@ -253,7 +253,7 @@ final class SessionTrackingSubscriberTest extends TestCase
     {
         // Create subscriber with disabled tracking
         $subscriber = new SessionTrackingSubscriber(
-            $this->apiClient,
+            $this->sessionClient,
             false,
             true,
             1800,
@@ -269,7 +269,7 @@ final class SessionTrackingSubscriberTest extends TestCase
         $event = new RequestEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST);
 
         // Should not make any API calls when tracking is disabled.
-        $this->apiClient->expects($this->never())->method($this->anything());
+        $this->sessionClient->expects($this->never())->method($this->anything());
 
         $subscriber->onKernelRequest($event);
     }
@@ -280,7 +280,7 @@ final class SessionTrackingSubscriberTest extends TestCase
         $request->setSession($this->session);
         $request->headers->set('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)');
 
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('createSession')
             ->with($this->callback(function (array $data) {
                 $this->assertArrayHasKey('user_agent', $data);
@@ -289,7 +289,7 @@ final class SessionTrackingSubscriberTest extends TestCase
                 return true;
             }));
 
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('addSessionEvent');
 
         $this->dispatchLifecycle($request);
@@ -302,9 +302,9 @@ final class SessionTrackingSubscriberTest extends TestCase
         $request = Request::create('/dashboard?token=secret123&page=2');
         $request->setSession($this->session);
 
-        $this->apiClient->expects($this->once())->method('createSession');
+        $this->sessionClient->expects($this->once())->method('createSession');
 
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('addSessionEvent')
             ->with(
                 $this->anything(),
@@ -329,7 +329,7 @@ final class SessionTrackingSubscriberTest extends TestCase
         $request = Request::create('/test');
         $request->setSession($this->session);
 
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('createSession')
             ->with($this->callback(function (array $data) {
                 $sessionId = $data['session_id'];
@@ -340,7 +340,7 @@ final class SessionTrackingSubscriberTest extends TestCase
                 return true;
             }));
 
-        $this->apiClient->expects($this->once())
+        $this->sessionClient->expects($this->once())
             ->method('addSessionEvent');
 
         $this->dispatchLifecycle($request);

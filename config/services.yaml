@@ -4,62 +4,21 @@ services:
         autoconfigure: false
         public: false
 
-    # Data Scrubber - shared GDPR scrubbing + IP anonymization utility
-    ApplicationLogger\Bundle\Service\DataScrubber:
+    # Data Scrubber - shared GDPR scrubbing + IP anonymization (sdk-core superset)
+    ApplicationLogger\Sdk\DataScrubber:
         arguments:
             $scrubFields: '%application_logger.scrub_fields%'
 
-    # Circuit Breaker - prevents repeated calls to a failing service (error/session path)
-    ApplicationLogger\Bundle\Service\CircuitBreaker:
-        arguments:
-            $enabled: '%application_logger.circuit_breaker.enabled%'
-            $failureThreshold: '%application_logger.circuit_breaker.failure_threshold%'
-            $timeout: '%application_logger.circuit_breaker.timeout%'
-            $maxHalfOpenAttempts: '%application_logger.circuit_breaker.half_open_attempts%'
-            $cache: '@cache.app'
-
-    # Dedicated Circuit Breaker for the LOG-aggregation path. A distinct cache key gives
-    # it state INDEPENDENT of the error/session breaker, so a failing/slow log collector
-    # trips its own breaker (shedding load) instead of being masked by healthy platform
-    # traffic resetting a shared breaker.
-    application_logger.circuit_breaker.log:
-        class: ApplicationLogger\Bundle\Service\CircuitBreaker
-        arguments:
-            $enabled: '%application_logger.circuit_breaker.enabled%'
-            $failureThreshold: '%application_logger.circuit_breaker.failure_threshold%'
-            $timeout: '%application_logger.circuit_breaker.timeout%'
-            $maxHalfOpenAttempts: '%application_logger.circuit_breaker.half_open_attempts%'
-            $cache: '@cache.app'
-            $cacheKey: 'application_logger.circuit_breaker.log'
-
-    # API Client - sends errors AND logs to platform with resilience features
+    # API Client - @deprecated compat facade over sdk-core Hub + SessionApiClient
     ApplicationLogger\Bundle\Service\ApiClient:
         arguments:
-            $dsn: '%application_logger.dsn%'
-            $apiKey: '%application_logger.api_key%'
-            $timeout: '%application_logger.timeout%'
-            $retryAttempts: '%application_logger.retry_attempts%'
-            $async: '%application_logger.async%'
-            $circuitBreaker: '@ApplicationLogger\Bundle\Service\CircuitBreaker'
-            $logger: '@?monolog.logger.application_logger_internal'
-            $debug: '%application_logger.debug%'
-            # Inject host-app HTTP client so proxy/SSL/framework.http_client config applies.
-            $httpClient: '@?http_client'
-            $errorPath: '%application_logger.endpoint_path%'
-            $logEndpoint: '%application_logger.log_endpoint%'
-            $logToken: '%application_logger.log_token%'
-            $logPath: '%application_logger.log_path%'
-            # Runtime kill-switch: no outbound telemetry when disabled (handles env-gated
-            # enabled that can't be resolved at container compile time).
-            $enabled: '%application_logger.enabled%'
-            # Independent breaker for the log path (see service above).
-            $logCircuitBreaker: '@application_logger.circuit_breaker.log'
-            $flushBudget: '%application_logger.flush_budget%'
+            $factory: '@ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory'
+            $sessions: '@ApplicationLogger\Bundle\Service\Sdk\SessionApiClient'
 
     # Context Collector - gathers request/user/server context
     ApplicationLogger\Bundle\Service\ContextCollector:
         arguments:
-            $scrubber: '@ApplicationLogger\Bundle\Service\DataScrubber'
+            $scrubber: '@ApplicationLogger\Sdk\DataScrubber'
             $release: '%application_logger.release%'
             $environment: '%application_logger.environment%'
             $requestStack: '@request_stack'
@@ -69,52 +28,89 @@ services:
         arguments:
             $maxBreadcrumbs: '%application_logger.max_breadcrumbs%'
 
-    # Error Payload Factory - shared error-pipeline payload builder (DRY: used by
-    # both ExceptionSubscriber and the Monolog handler so the field set stays in sync).
-    ApplicationLogger\Bundle\Service\ErrorPayloadFactory:
-        arguments:
-            $contextCollector: '@ApplicationLogger\Bundle\Service\ContextCollector'
-            $breadcrumbCollector: '@ApplicationLogger\Bundle\Service\BreadcrumbCollector'
+    # sdk-core clock + circuit breaker for the session pipeline.
+    # SessionApiClient type-hints ApplicationLogger\Sdk\CircuitBreaker (sdk-core), so we
+    # must register the sdk-core breaker separately and inject it — NOT the bundle breaker.
+    ApplicationLogger\Sdk\Clock\SystemClock: ~
 
-    # Exception Subscriber - captures uncaught exceptions
+    ApplicationLogger\Sdk\CircuitBreaker:
+        arguments:
+            $cache: '@cache.app'
+            $clock: '@ApplicationLogger\Sdk\Clock\SystemClock'
+            $failureThreshold: '%application_logger.circuit_breaker.failure_threshold%'
+            $openSeconds: '%application_logger.circuit_breaker.timeout%'
+            $cacheKey: 'applogger.session.breaker'
+
+    # sdk-core shared services — wired here so ExceptionSubscriber (Task 7) and future
+    # rewires (Tasks 8/9) all share one factory instance.
+
+    ApplicationLogger\Bundle\Service\Sdk\BundleContextCollector:
+        arguments:
+            $inner: '@ApplicationLogger\Bundle\Service\ContextCollector'
+
+    ApplicationLogger\Bundle\Service\Sdk\LoopbackGuard:
+        arguments:
+            $requestStack: '@request_stack'
+            $ingestPaths: '%application_logger.loopback_paths%'
+
+    ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory:
+        arguments:
+            $config: '%application_logger.sdk_config%'
+            $context: '@ApplicationLogger\Bundle\Service\Sdk\BundleContextCollector'
+            $loopback: '@ApplicationLogger\Bundle\Service\Sdk\LoopbackGuard'
+            $logger: '@?monolog.logger.application_logger_internal'
+
+    # Worker-mode PII guard: reset the per-request Scope at REQUEST. No args.
+    ApplicationLogger\Bundle\EventSubscriber\ScopeResetSubscriber:
+        tags:
+            - { name: kernel.event_subscriber }
+
+    # Exception Subscriber - captures uncaught exceptions via sdk-core Hub
     ApplicationLogger\Bundle\EventSubscriber\ExceptionSubscriber:
         arguments:
-            $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
+            $factory: '@ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory'
             $contextCollector: '@ApplicationLogger\Bundle\Service\ContextCollector'
-            $breadcrumbCollector: '@ApplicationLogger\Bundle\Service\BreadcrumbCollector'
-            $payloadFactory: '@ApplicationLogger\Bundle\Service\ErrorPayloadFactory'
             $debug: '%application_logger.debug%'
             $enabled: '%application_logger.enabled%'
             $errorTrackingEnabled: '%application_logger.error_tracking_enabled%'
         tags:
             - { name: kernel.event_subscriber }
 
+    # Session API Client - slim bundle-owned session transport (create/addEvent/endSession/flush)
+    ApplicationLogger\Bundle\Service\Sdk\SessionApiClient:
+        arguments:
+            $dsn: '%application_logger.dsn%'
+            $apiKey: '%application_logger.api_key%'
+            $httpClient: '@http_client'
+            $loopback: '@ApplicationLogger\Bundle\Service\Sdk\LoopbackGuard'
+            $breaker: '@ApplicationLogger\Sdk\CircuitBreaker'
+            $enabled: '%application_logger.enabled%'
+            $timeout: '%application_logger.timeout%'
+
     # Session Tracking Subscriber - automatically tracks user sessions
     ApplicationLogger\Bundle\EventSubscriber\SessionTrackingSubscriber:
         arguments:
-            $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
+            $sessionClient: '@ApplicationLogger\Bundle\Service\Sdk\SessionApiClient'
             $enabled: '%application_logger.session_tracking.enabled%'
             $trackPageViews: '%application_logger.session_tracking.track_page_views%'
             $idleTimeout: '%application_logger.session_tracking.idle_timeout%'
             $ignoredRoutes: '%application_logger.session_tracking.ignored_routes%'
             $ignoredPaths: '%application_logger.session_tracking.ignored_paths%'
-            $scrubber: '@ApplicationLogger\Bundle\Service\DataScrubber'
+            $scrubber: '@ApplicationLogger\Sdk\DataScrubber'
             $logger: '@?monolog.logger.application_logger_internal'
         tags:
             - { name: kernel.event_subscriber }
 
-    # Monolog Handler - routes exceptions to errors, plain logs to log aggregation
+    # Monolog Handler - routes exceptions to errors (Hub::captureEvent), plain logs to log aggregation (LogClient)
     ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler:
         arguments:
-            $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
+            $factory: '@ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory'
             $contextCollector: '@ApplicationLogger\Bundle\Service\ContextCollector'
-            $scrubber: '@ApplicationLogger\Bundle\Service\DataScrubber'
-            $payloadFactory: '@ApplicationLogger\Bundle\Service\ErrorPayloadFactory'
+            $scrubber: '@ApplicationLogger\Sdk\DataScrubber'
+            $loopback: '@ApplicationLogger\Bundle\Service\Sdk\LoopbackGuard'
             $enabled: '%application_logger.enabled%'
             $captureLevel: '%application_logger.capture_level%'
             $environment: '%application_logger.environment%'
-            $batchSize: '%application_logger.log_batch_size%'
-            $maxBuffer: '%application_logger.max_log_buffer%'
             $errorTrackingEnabled: '%application_logger.error_tracking_enabled%'
             $logAggregationEnabled: '%application_logger.log_aggregation_enabled%'
 
@@ -171,11 +167,8 @@ services:
     # ever blocking the user-visible response.
     ApplicationLogger\Bundle\EventSubscriber\FlushTelemetrySubscriber:
         arguments:
-            $apiClient: '@ApplicationLogger\Bundle\Service\ApiClient'
-            # Flush the buffered log-aggregation records at kernel.terminate (post-response),
-            # so the log path is breaker-gated and drained at a controlled point rather than
-            # at PHP shutdown where the cache pool may already be gone.
-            $logHandler: '@?ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler'
+            $factory: '@ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory'
+            $sessions: '@ApplicationLogger\Bundle\Service\Sdk\SessionApiClient'
         tags:
             - { name: kernel.event_subscriber }
 

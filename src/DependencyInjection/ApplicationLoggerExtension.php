@@ -126,8 +126,8 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
         // and prependMonolog() registers a Monolog handler that references the
         // ApplicationLoggerHandler service — gating the service load on `enabled` here
         // would leave that reference dangling and break the container. The real gate is
-        // the RUNTIME kill-switch (ResilientHttpDispatcher::post(), the Monolog handler
-        // write(), and the Twig extension), which makes a disabled bundle fully inert.
+        // the RUNTIME kill-switch (sdk-core transport, the Monolog handler write(), and
+        // the Twig extension), which makes a disabled bundle fully inert.
         $loader = new YamlFileLoader($container, new FileLocator(\dirname(__DIR__, 2).'/config'));
         $loader->load('services.yaml');
 
@@ -200,6 +200,45 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
         $container->setParameter('application_logger.session_replay.session_timeout_minutes', $config['session_replay']['session_timeout_minutes']);
         $container->setParameter('application_logger.session_replay.max_buffer_size_mb', $config['session_replay']['max_buffer_size_mb']);
         $container->setParameter('application_logger.session_replay.expose_api', $config['session_replay']['expose_api']);
+
+        // SDK-core wiring parameters
+        $container->setParameter('application_logger.loopback_paths', $config['loopback_paths']);
+        $container->setParameter('application_logger.session_hash_salt', $config['session_hash_salt']);
+
+        // Assembled sdk_config passed to SdkClientFactory. Keys = exactly what
+        // SdkClientFactory::build() reads (verified against lines ~61-106).
+        // cache_dir and app_name are sourced from kernel params (not bundle config).
+        // Defensive fallbacks for test containers that omit kernel.* params.
+        $cacheDir = $container->hasParameter('kernel.cache_dir')
+            ? (string) $container->getParameter('kernel.cache_dir')
+            : sys_get_temp_dir().'/applogger';
+        $appName = $container->hasParameter('kernel.project_dir')
+            ? basename((string) $container->getParameter('kernel.project_dir'))
+            : 'app';
+        $container->setParameter('application_logger.sdk_config', [
+            'dsn' => $config['dsn'],
+            'api_key' => $config['api_key'],
+            'enabled' => $config['enabled'],
+            'scrub_fields' => $config['scrub_fields'], // FULL resolved bundle list — do not narrow
+            // sdk-core's circuit breaker is always-on (no enable toggle); the legacy
+            // `circuit_breaker.enabled` config still gates the deprecated ApiClient path
+            // until Task 11 retires it, so the node stays live — it is just not forwarded here.
+            'circuit_breaker' => [
+                'failure_threshold' => $config['circuit_breaker']['failure_threshold'],
+                'timeout' => $config['circuit_breaker']['timeout'],
+                'half_open_attempts' => $config['circuit_breaker']['half_open_attempts'],
+            ],
+            'environment' => $config['environment'],
+            'release' => $config['release'],
+            'max_breadcrumbs' => $config['max_breadcrumbs'],
+            'timeout' => $config['timeout'],
+            'flush_budget' => $config['flush_budget'],
+            'session_hash_salt' => $config['session_hash_salt'],
+            'cache_dir' => $cacheDir,
+            'log_endpoint' => ('' !== (string) $config['log_endpoint']) ? $config['log_endpoint'] : null,
+            'log_token' => ('' !== (string) $config['log_token']) ? $config['log_token'] : null,
+            'app_name' => $appName,
+        ]);
 
         // JavaScript SDK parameters
         $container->setParameter('application_logger.javascript.enabled', $config['javascript']['enabled']);

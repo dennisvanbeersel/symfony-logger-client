@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace ApplicationLogger\Bundle\EventSubscriber;
 
-use ApplicationLogger\Bundle\Service\ApiClient;
-use ApplicationLogger\Bundle\Service\DataScrubber;
+use ApplicationLogger\Bundle\Service\Sdk\SessionClientInterface;
+use ApplicationLogger\Sdk\DataScrubber;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\Session\SessionInterface;
@@ -53,7 +53,7 @@ final class SessionTrackingSubscriber implements EventSubscriberInterface
      * @param array<string> $ignoredPaths
      */
     public function __construct(
-        private readonly ApiClient $apiClient,
+        private readonly SessionClientInterface $sessionClient,
         private readonly bool $enabled,
         private readonly bool $trackPageViews,
         private readonly int $idleTimeout,
@@ -203,13 +203,13 @@ final class SessionTrackingSubscriber implements EventSubscriberInterface
         // Preserve the original ordering: end old session, then create new, then page view.
         try {
             if (isset($pending['endSessionId'])) {
-                $this->apiClient->endSession($pending['endSessionId']);
+                $this->sessionClient->endSession($pending['endSessionId']);
             }
             if (isset($pending['createSession'])) {
-                $this->apiClient->createSession($pending['createSession']);
+                $this->sessionClient->createSession($pending['createSession']);
             }
             if (isset($pending['pageView'])) {
-                $this->apiClient->addSessionEvent(
+                $this->sessionClient->addSessionEvent(
                     $pending['pageView']['sessionId'],
                     $pending['pageView']['event'],
                 );

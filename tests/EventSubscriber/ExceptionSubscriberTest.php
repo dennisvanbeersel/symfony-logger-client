@@ -5,16 +5,23 @@ declare(strict_types=1);
 namespace ApplicationLogger\Bundle\Tests\EventSubscriber;
 
 use ApplicationLogger\Bundle\EventSubscriber\ExceptionSubscriber;
-use ApplicationLogger\Bundle\Service\ApiClient;
-use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
 use ApplicationLogger\Bundle\Service\ContextCollectorInterface;
-use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
+use ApplicationLogger\Bundle\Service\Sdk\BundleContextCollector;
+use ApplicationLogger\Bundle\Service\Sdk\LoopbackGuard;
+use ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory;
+use ApplicationLogger\Sdk\Client;
+use ApplicationLogger\Sdk\Clock\SystemClock;
+use ApplicationLogger\Sdk\DataScrubber;
+use ApplicationLogger\Sdk\Hub;
+use ApplicationLogger\Sdk\Options;
+use ApplicationLogger\Sdk\Scope;
+use ApplicationLogger\Sdk\StackTraceParser;
+use ApplicationLogger\Sdk\Transport\FileTransport;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpFoundation\Response;
-use Symfony\Component\HttpFoundation\Session\Session;
-use Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage;
 use Symfony\Component\HttpKernel\Event\ExceptionEvent;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\HttpKernelInterface;
@@ -22,65 +29,124 @@ use Symfony\Component\HttpKernel\KernelEvents;
 
 final class ExceptionSubscriberTest extends TestCase
 {
-    private MockObject&ApiClient $apiClient;
     private MockObject&ContextCollectorInterface $contextCollector;
-    private MockObject&BreadcrumbCollector $breadcrumbCollector;
+    private string $transportFile;
+    private FileTransport $transport;
+    private Hub $hub;
+    private SdkClientFactory $factory;
     private ExceptionSubscriber $subscriber;
-    private Session $session;
 
     protected function setUp(): void
     {
-        $this->apiClient = $this->createMock(ApiClient::class);
+        Hub::reset();
+
         $this->contextCollector = $this->createMock(ContextCollectorInterface::class);
-        $this->breadcrumbCollector = $this->createMock(BreadcrumbCollector::class);
-        $this->session = new Session(new MockArraySessionStorage());
-        $this->session->start();
+        $this->contextCollector->method('collectUser')->willReturn(['id' => 42, 'email' => 'test@example.com']);
 
-        // Mock context collector to return test data
-        $this->contextCollector->method('collectContext')->willReturn([
-            'environment' => 'test',
-            'release' => '1.0.0',
-            'request' => [
-                'url' => 'https://example.com/test',
-                'method' => 'GET',
-                'env' => [
-                    'REMOTE_ADDR' => '192.168.1.0',
-                    'HTTP_USER_AGENT' => 'Mozilla/5.0 Test Browser',
-                ],
-            ],
-            'server' => [
-                'server_name' => 'test-server',
-                'php_version' => PHP_VERSION,
-            ],
-        ]);
+        $this->transportFile = sys_get_temp_dir().'/applogger-test-'.uniqid('', true).'.ndjson';
+        $this->transport = new FileTransport($this->transportFile);
 
-        // Mock breadcrumb collector
-        $this->breadcrumbCollector->method('get')->willReturn([
-            ['type' => 'navigation', 'message' => 'Navigated to /test'],
-        ]);
+        $this->hub = $this->buildFileHub($this->transport);
+        $this->factory = $this->buildFactory($this->hub);
 
-        $this->subscriber = $this->makeSubscriber();
+        $this->subscriber = new ExceptionSubscriber($this->factory, $this->contextCollector);
     }
 
-    private function makeSubscriber(bool $enabled = true, bool $errorTrackingEnabled = true): ExceptionSubscriber
+    protected function tearDown(): void
     {
-        return new ExceptionSubscriber(
-            $this->apiClient,
-            $this->contextCollector,
-            $this->breadcrumbCollector,
-            new ErrorPayloadFactory($this->contextCollector, $this->breadcrumbCollector),
-            debug: false,
-            enabled: $enabled,
-            errorTrackingEnabled: $errorTrackingEnabled,
-        );
+        Hub::reset();
+        if (is_file($this->transportFile)) {
+            unlink($this->transportFile);
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // helpers
+    // ---------------------------------------------------------------------------
+
+    /**
+     * Build a real sdk-core Hub backed by a FileTransport so captured events
+     * can be inspected without a network call.
+     */
+    private function buildFileHub(FileTransport $transport): Hub
+    {
+        $inner = $this->createMock(ContextCollectorInterface::class);
+        $inner->method('collectContext')->willReturn([]);
+        $ctx = new BundleContextCollector($inner);
+
+        $opts = Options::fromArray([
+            'dsn' => 'https://applogger.eu/0xTEST',
+            'api_key' => 'pk_test',
+            'environment' => 'test',
+            'release' => null,
+            'enabled' => true,
+            'scrub_fields' => [],
+            'max_breadcrumbs' => 50,
+            'timeout' => 2.0,
+            'flush_budget' => 2.0,
+            'circuit_breaker' => ['failure_threshold' => 5, 'timeout' => 60, 'half_open_attempts' => 1],
+            'log_endpoint' => null,
+            'log_token' => null,
+            'session_hash_salt' => null,
+            'app_name' => 'test-app',
+            'cache_dir' => sys_get_temp_dir().'/applogger-test-hub-'.uniqid('', true),
+        ]);
+
+        $scrubber = new DataScrubber([], []);
+        $client = new Client($opts, $transport, new SystemClock(), $scrubber, new StackTraceParser(), $ctx);
+
+        return new Hub($client, new Scope($opts->maxBreadcrumbs));
+    }
+
+    /**
+     * Build a real SdkClientFactory pre-loaded with the given Hub.
+     * SdkClientFactory::getHub() returns $this->hub if non-null (skips build()),
+     * so we inject the Hub via reflection before any getHub() call.
+     * SdkClientFactory is final — subclassing is not possible.
+     */
+    private function buildFactory(Hub $hub): SdkClientFactory
+    {
+        $inner = $this->createMock(ContextCollectorInterface::class);
+        $inner->method('collectContext')->willReturn([]);
+        $ctx = new BundleContextCollector($inner);
+
+        $config = [
+            'dsn' => '',
+            'api_key' => '',
+            'environment' => 'test',
+            'release' => null,
+            'enabled' => true,
+            'scrub_fields' => [],
+            'max_breadcrumbs' => 50,
+            'timeout' => 2.0,
+            'flush_budget' => 2.0,
+            'circuit_breaker' => ['failure_threshold' => 5, 'timeout' => 60, 'half_open_attempts' => 1],
+            'log_endpoint' => null,
+            'log_token' => null,
+            'session_hash_salt' => null,
+            'app_name' => 'test',
+            'cache_dir' => sys_get_temp_dir().'/applogger-test-factory-'.uniqid('', true),
+        ];
+
+        $factory = new SdkClientFactory($config, $ctx, new LoopbackGuard(new RequestStack(), []));
+
+        // Pre-load the test Hub into the factory's private $hub property so that
+        // getHub() returns it immediately without calling build() (which would produce
+        // a NullTransport Hub since dsn is empty above).
+        $ref = new \ReflectionProperty(SdkClientFactory::class, 'hub');
+        $ref->setValue($factory, $hub);
+
+        return $factory;
     }
 
     private function exceptionEvent(\Throwable $exception): ExceptionEvent
     {
-        $request = Request::create('/test');
-        $request->setSession($this->session);
-
-        return new ExceptionEvent($this->createKernelStub(), $request, HttpKernelInterface::MAIN_REQUEST, $exception);
+        return new ExceptionEvent(
+            $this->createKernelStub(),
+            Request::create('/test'),
+            HttpKernelInterface::MAIN_REQUEST,
+            $exception,
+        );
     }
 
     private function createKernelStub(): HttpKernelInterface
@@ -93,328 +159,150 @@ final class ExceptionSubscriberTest extends TestCase
         };
     }
 
+    // ---------------------------------------------------------------------------
+    // tests
+    // ---------------------------------------------------------------------------
+
     public function testGetSubscribedEvents(): void
     {
         $events = ExceptionSubscriber::getSubscribedEvents();
 
         $this->assertArrayHasKey(KernelEvents::EXCEPTION, $events);
-        // Should have low priority (-100) to run after other handlers
         $this->assertEquals(['onKernelException', -100], $events[KernelEvents::EXCEPTION]);
     }
 
-    public function testOnKernelExceptionSendsErrorToApi(): void
+    public function testCapturesExceptionIntoHub(): void
     {
         $exception = new \RuntimeException('Test error message');
-        $request = Request::create('/test');
-        $request->setSession($this->session);
 
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
+        $this->subscriber->onKernelException($this->exceptionEvent($exception));
 
-        // Expect API call with correct payload structure
-        $this->apiClient->expects($this->once())
-            ->method('sendError')
-            ->with($this->callback(function (array $payload) {
-                // Required fields must be present (flat structure)
-                $this->assertArrayHasKey('type', $payload);
-                $this->assertArrayHasKey('message', $payload);
-                $this->assertArrayHasKey('file', $payload);
-                $this->assertArrayHasKey('line', $payload);
-                $this->assertArrayHasKey('stack_trace', $payload);
-
-                // Verify field values
-                $this->assertEquals('RuntimeException', $payload['type']);
-                $this->assertEquals('Test error message', $payload['message']);
-                $this->assertIsString($payload['file']);
-                $this->assertIsInt($payload['line']);
-                $this->assertIsArray($payload['stack_trace']);
-
-                return true;
-            }));
-
-        $this->subscriber->onKernelException($event);
+        $events = $this->transport->capturedEvents();
+        $this->assertCount(1, $events, 'Expected exactly one captured event');
+        $this->assertEquals('RuntimeException', $events[0]['type']);
+        $this->assertEquals('Test error message', $events[0]['message']);
+        $this->assertEquals('error', $events[0]['level']);
     }
 
-    public function testPayloadIncludesContextData(): void
+    public function testCapturedEventHasExceptionClassTag(): void
     {
-        $exception = new \RuntimeException('Test error');
-        $request = Request::create('/test');
-        $request->setSession($this->session);
+        $exception = new \InvalidArgumentException('bad arg');
 
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
+        $this->subscriber->onKernelException($this->exceptionEvent($exception));
 
-        $this->apiClient->expects($this->once())
-            ->method('sendError')
-            ->with($this->callback(function (array $payload) {
-                // Optional fields from context
-                $this->assertEquals('test', $payload['environment']);
-                $this->assertEquals('1.0.0', $payload['release']);
-                $this->assertEquals('test-server', $payload['server_name']);
-                $this->assertEquals('https://example.com/test', $payload['url']);
-                $this->assertEquals('GET', $payload['http_method']);
-                $this->assertEquals('192.168.1.0', $payload['ip_address']);
-                $this->assertEquals('Mozilla/5.0 Test Browser', $payload['user_agent']);
-
-                return true;
-            }));
-
-        $this->subscriber->onKernelException($event);
+        $events = $this->transport->capturedEvents();
+        $this->assertCount(1, $events);
+        $this->assertArrayHasKey('tags', $events[0]);
+        $this->assertEquals(\InvalidArgumentException::class, $events[0]['tags']['exception_class'] ?? null);
     }
 
-    public function testPayloadIncludesBreadcrumbs(): void
-    {
-        $exception = new \RuntimeException('Test error');
-        $request = Request::create('/test');
-        $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
-
-        $this->apiClient->expects($this->once())
-            ->method('sendError')
-            ->with($this->callback(function (array $payload) {
-                $this->assertArrayHasKey('breadcrumbs', $payload);
-                $this->assertIsArray($payload['breadcrumbs']);
-                $this->assertCount(1, $payload['breadcrumbs']);
-                $this->assertEquals('navigation', $payload['breadcrumbs'][0]['type']);
-
-                return true;
-            }));
-
-        $this->subscriber->onKernelException($event);
-    }
-
-    public function testHttpExceptionExtractsStatusCode(): void
+    public function testHttpExceptionTagsStatusCode(): void
     {
         $exception = new NotFoundHttpException('Page not found');
-        $request = Request::create('/not-found');
-        $request->setSession($this->session);
 
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
+        $this->subscriber->onKernelException($this->exceptionEvent($exception));
 
-        $this->apiClient->expects($this->once())
-            ->method('sendError')
-            ->with($this->callback(function (array $payload) {
-                $this->assertArrayHasKey('http_status_code', $payload);
-                $this->assertEquals(404, $payload['http_status_code']);
-
-                return true;
-            }));
-
-        $this->subscriber->onKernelException($event);
+        $events = $this->transport->capturedEvents();
+        $this->assertCount(1, $events);
+        $this->assertEquals('404', $events[0]['tags']['http_status_code'] ?? null);
     }
 
-    public function testNonHttpExceptionDefaults500StatusCode(): void
+    public function testNonHttpExceptionTagsStatusCode500(): void
     {
         $exception = new \RuntimeException('Internal error');
-        $request = Request::create('/error');
-        $request->setSession($this->session);
 
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
+        $this->subscriber->onKernelException($this->exceptionEvent($exception));
 
-        $this->apiClient->expects($this->once())
-            ->method('sendError')
-            ->with($this->callback(function (array $payload) {
-                $this->assertArrayHasKey('http_status_code', $payload);
-                $this->assertEquals(500, $payload['http_status_code']);
-
-                return true;
-            }));
-
-        $this->subscriber->onKernelException($event);
-    }
-
-    public function testStackTraceIsReversed(): void
-    {
-        $exception = new \RuntimeException('Test error');
-        $request = Request::create('/test');
-        $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
-
-        $this->apiClient->expects($this->once())
-            ->method('sendError')
-            ->with($this->callback(function (array $payload) {
-                $this->assertArrayHasKey('stack_trace', $payload);
-                $this->assertIsArray($payload['stack_trace']);
-
-                // Stack trace should be a flat array of frames
-                if (\count($payload['stack_trace']) > 0) {
-                    $firstFrame = $payload['stack_trace'][0];
-                    $this->assertArrayHasKey('file', $firstFrame);
-                    $this->assertArrayHasKey('line', $firstFrame);
-                    $this->assertArrayHasKey('function', $firstFrame);
-                    $this->assertArrayHasKey('in_app', $firstFrame);
-                }
-
-                return true;
-            }));
-
-        $this->subscriber->onKernelException($event);
-    }
-
-    public function testAddsBreadcrumbAfterCapture(): void
-    {
-        $exception = new \RuntimeException('Test error message');
-        $request = Request::create('/test');
-        $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
-
-        // Expect breadcrumb to be added after capture
-        $this->breadcrumbCollector->expects($this->once())
-            ->method('add')
-            ->with($this->callback(function (array $breadcrumb) {
-                $this->assertEquals('error', $breadcrumb['type']);
-                $this->assertEquals('exception', $breadcrumb['category']);
-                $this->assertStringContainsString('Test error message', $breadcrumb['message']);
-
-                return true;
-            }));
-
-        $this->subscriber->onKernelException($event);
-    }
-
-    public function testResilienceOnApiFailure(): void
-    {
-        $exception = new \RuntimeException('Test error');
-        $request = Request::create('/test');
-        $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
-
-        // Simulate API failure
-        $this->apiClient->expects($this->any())
-            ->method('sendError')
-            ->willThrowException(new \RuntimeException('API unavailable'));
-
-        // Should not throw - resilience guarantee
-        $this->subscriber->onKernelException($event);
-
-        // Test passes if we reach here without exception (resilience guarantee)
-        $this->addToAssertionCount(1);
-    }
-
-    public function testIncludesSessionHashWhenAvailable(): void
-    {
-        // Create a new mock that includes getSessionHash
-        $contextCollector = $this->createMock(ContextCollectorInterface::class);
-        $contextCollector->method('collectContext')->willReturn([
-            'environment' => 'test',
-            'release' => '1.0.0',
-            'request' => [
-                'url' => 'https://example.com/test',
-                'method' => 'GET',
-                'env' => [
-                    'REMOTE_ADDR' => '192.168.1.0',
-                    'HTTP_USER_AGENT' => 'Mozilla/5.0 Test Browser',
-                ],
-            ],
-            'server' => [
-                'server_name' => 'test-server',
-                'php_version' => PHP_VERSION,
-            ],
-        ]);
-        // Mock getSessionHash to return a valid SHA-256 hash
-        $expectedHash = hash('sha256', 'test-session-id');
-        $contextCollector->method('getSessionHash')->willReturn($expectedHash);
-
-        $subscriber = new ExceptionSubscriber(
-            $this->apiClient,
-            $contextCollector,
-            $this->breadcrumbCollector,
-            new ErrorPayloadFactory($contextCollector, $this->breadcrumbCollector),
-            debug: false
-        );
-
-        $exception = new \RuntimeException('Test error');
-        $request = Request::create('/test');
-        $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
-
-        $this->apiClient->expects($this->once())
-            ->method('sendError')
-            ->with($this->callback(function (array $payload) use ($expectedHash) {
-                $this->assertArrayHasKey('session_hash', $payload);
-                // Session hash should be SHA-256 (64 hex chars)
-                $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/', $payload['session_hash']);
-                $this->assertEquals($expectedHash, $payload['session_hash']);
-
-                return true;
-            }));
-
-        $subscriber->onKernelException($event);
-    }
-
-    public function testPayloadHasCorrectLevelAndSource(): void
-    {
-        $exception = new \RuntimeException('Test error');
-        $request = Request::create('/test');
-        $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
-
-        $this->apiClient->expects($this->once())
-            ->method('sendError')
-            ->with($this->callback(function (array $payload) {
-                $this->assertEquals('error', $payload['level']);
-                $this->assertEquals('backend', $payload['source']);
-
-                return true;
-            }));
-
-        $this->subscriber->onKernelException($event);
-    }
-
-    public function testTimestampIsIso8601String(): void
-    {
-        $exception = new \RuntimeException('Test error');
-        $request = Request::create('/test');
-        $request->setSession($this->session);
-
-        $kernel = $this->createKernelStub();
-        $event = new ExceptionEvent($kernel, $request, HttpKernelInterface::MAIN_REQUEST, $exception);
-
-        $this->apiClient->expects($this->once())
-            ->method('sendError')
-            ->with($this->callback(function (array $payload) {
-                $this->assertArrayHasKey('timestamp', $payload);
-                $this->assertIsString($payload['timestamp']);
-                // Verify ISO 8601 format (ATOM)
-                $this->assertMatchesRegularExpression(
-                    '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/',
-                    $payload['timestamp']
-                );
-                // Verify it can be parsed as a valid date
-                $date = new \DateTimeImmutable($payload['timestamp']);
-                $this->assertInstanceOf(\DateTimeImmutable::class, $date);
-
-                return true;
-            }));
-
-        $this->subscriber->onKernelException($event);
-    }
-
-    public function testDoesNotCaptureWhenErrorTrackingDisabled(): void
-    {
-        $subscriber = $this->makeSubscriber(enabled: true, errorTrackingEnabled: false);
-        $this->apiClient->expects($this->never())->method('sendError');
-        $subscriber->onKernelException($this->exceptionEvent(new \RuntimeException('boom')));
+        $events = $this->transport->capturedEvents();
+        $this->assertCount(1, $events);
+        $this->assertEquals('500', $events[0]['tags']['http_status_code'] ?? null);
     }
 
     public function testDoesNotCaptureWhenMasterDisabled(): void
     {
-        $subscriber = $this->makeSubscriber(enabled: false, errorTrackingEnabled: true);
-        $this->apiClient->expects($this->never())->method('sendError');
+        $subscriber = new ExceptionSubscriber(
+            $this->factory,
+            $this->contextCollector,
+            false,
+            false, // enabled = false
+            true,
+        );
+
         $subscriber->onKernelException($this->exceptionEvent(new \RuntimeException('boom')));
+
+        $this->assertCount(0, $this->transport->capturedEvents());
+    }
+
+    public function testDoesNotCaptureWhenErrorTrackingDisabled(): void
+    {
+        $subscriber = new ExceptionSubscriber(
+            $this->factory,
+            $this->contextCollector,
+            false,
+            true,
+            false, // errorTrackingEnabled = false
+        );
+
+        $subscriber->onKernelException($this->exceptionEvent(new \RuntimeException('boom')));
+
+        $this->assertCount(0, $this->transport->capturedEvents());
+    }
+
+    public function testNeverThrowsOnInternalFailure(): void
+    {
+        // Build a factory whose private $hub is a hub whose captureException throws.
+        // We achieve this by building a normal factory but NOT pre-loading the hub,
+        // so getHub() tries to build() — which with empty dsn/api_key returns a valid
+        // NullTransport hub. Instead, let's set the hub to an anonymous Hub subclass.
+        // Since Hub is final we can't subclass it either. The cleanest approach:
+        // set $hub = null on the factory so build() is called; build() with empty dsn
+        // returns a NullTransport hub that won't throw. To test resilience, mock
+        // the inner ContextCollector to throw inside collectUser().
+        $throwingCollector = $this->createMock(ContextCollectorInterface::class);
+        $throwingCollector->method('collectUser')
+            ->willThrowException(new \RuntimeException('collector failure'));
+
+        $subscriber = new ExceptionSubscriber(
+            $this->factory,
+            $throwingCollector,
+        );
+
+        // Must not throw — resilience guarantee
+        $subscriber->onKernelException($this->exceptionEvent(new \RuntimeException('original')));
+
+        $this->addToAssertionCount(1);
+        $this->assertCount(0, $this->transport->capturedEvents(), 'Capture must not proceed when collectUser throws');
+    }
+
+    public function testSetsUserOnScopeWhenCollectorReturnsArray(): void
+    {
+        $this->subscriber->onKernelException($this->exceptionEvent(new \RuntimeException('user context test')));
+
+        $events = $this->transport->capturedEvents();
+        $this->assertCount(1, $events);
+        // User set on Scope flows into event->context['user'] via Scope::applyTo()
+        $this->assertArrayHasKey('context', $events[0]);
+        $this->assertArrayHasKey('user', $events[0]['context']);
+        $this->assertEquals(42, $events[0]['context']['user']['id'] ?? null);
+    }
+
+    public function testDoesNotSetUserWhenCollectorReturnsNull(): void
+    {
+        $nullUserCollector = $this->createMock(ContextCollectorInterface::class);
+        $nullUserCollector->method('collectUser')->willReturn(null);
+        $nullUserCollector->method('collectContext')->willReturn([]);
+
+        $subscriber = new ExceptionSubscriber($this->factory, $nullUserCollector);
+
+        $subscriber->onKernelException($this->exceptionEvent(new \RuntimeException('no user')));
+
+        $events = $this->transport->capturedEvents();
+        $this->assertCount(1, $events);
+        // When collectUser() returns null the subscriber does NOT call $scope->setUser(),
+        // so the Scope never merges user data. Any 'user' key in context comes only from
+        // the BundleContextCollector (Client-level enrichment) — not from the Scope.
+        // Assert the scope did not inject a concrete user id.
+        $contextUser = $events[0]['context']['user'] ?? null;
+        $this->assertNull($contextUser, 'Scope must not inject a user when collectUser() returns null');
     }
 }

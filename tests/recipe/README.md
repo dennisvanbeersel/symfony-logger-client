@@ -58,7 +58,7 @@ assertion fails. It does all its work in a `mktemp -d` directory and cleans up o
 - **The bundle's services are registered even when disabled.** `enabled` is an env
   placeholder (`%env(bool:APPLICATION_LOGGER_ENABLED)%`) that can't be resolved at
   container-compile time, so it reads as truthy then and the services compile in. The
-  real gate is at **runtime** inside `ResilientHttpDispatcher::post()` (`if (!$this->enabled) return;`),
+  real gate is at **runtime** inside the sdk-core transport layer (`ApplicationLoggerHandler::write()` no-ops when the bundle is disabled),
   which is exactly what assertion **f** exercises over a real network listener.
 
 - **Opt-in delivery timing.** The bundle ships async/fire-and-forget error sending. Under

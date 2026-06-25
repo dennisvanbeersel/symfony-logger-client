@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace ApplicationLogger\Bundle\EventSubscriber;
 
-use ApplicationLogger\Bundle\Monolog\Handler\ApplicationLoggerHandler;
-use ApplicationLogger\Bundle\Service\ApiClient;
+use ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory;
+use ApplicationLogger\Bundle\Service\Sdk\SessionClientInterface;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpKernel\Event\TerminateEvent;
 use Symfony\Component\HttpKernel\KernelEvents;
@@ -16,27 +16,26 @@ use Symfony\Component\HttpKernel\KernelEvents;
  *
  * THE PROBLEM THIS SOLVES
  * -----------------------
- * In async mode, {@see ResilientHttpDispatcher::post()} initiates a fire-and-forget
- * POST and performs ONE zero-timeout poll (`stream($response, 0.0)`). If the
- * response is still in flight after that poll, it is retained in `$pendingResponses`
- * and the cURL transfer is expected to progress on subsequent polls. In a
- * per-request SAPI (PHP-FPM, PHP built-in server, FrankenPHP non-worker mode),
- * nothing polls the transfer again before end-of-request, so `__destruct()` runs
- * `cancel()` — aborting the POST before it is transmitted and silently losing the
- * telemetry event.
+ * In async mode, the sdk-core transport initiates a fire-and-forget POST and
+ * performs ONE zero-timeout poll. If the response is still in flight after that
+ * poll, it is retained and the cURL transfer is expected to progress on subsequent
+ * polls. In a per-request SAPI (PHP-FPM, PHP built-in server, FrankenPHP
+ * non-worker mode), nothing polls the transfer again before end-of-request, so
+ * the handle is cancelled — aborting the POST before it is transmitted and
+ * silently losing the telemetry event.
  *
  * THE FIX
  * -------
  * `kernel.terminate` fires AFTER Symfony has sent the response to the client
  * (via `fastcgi_finish_request()` in FPM, or an equivalent runtime flush in
  * FrankenPHP and the built-in server). Blocking briefly here to drain the pending
- * cURL handles does NOT delay the user-visible response. This subscriber calls
- * `ApiClient::flush()` → `ResilientHttpDispatcher::flushAndComplete()`, which loops
- * `stream()` until every in-flight handle reaches `isLast()` or the configured
- * timeout expires, recording a circuit-breaker outcome either way.
+ * cURL handles does NOT delay the user-visible response. This subscriber flushes
+ * all three telemetry pipelines — logs (LogClient), errors (Client), and sessions
+ * (SessionApiClient) — each in its own independent try/catch so one failing flush
+ * never skips the others.
  *
  * CLI commands and Messenger consumers have no `kernel.terminate` event; they rely
- * on the bounded `__destruct()` call instead (see `ResilientHttpDispatcher`).
+ * on the bounded `__destruct()` call instead (sdk-core transport handles this).
  *
  * PRIORITY
  * --------
@@ -47,8 +46,8 @@ use Symfony\Component\HttpKernel\KernelEvents;
 final readonly class FlushTelemetrySubscriber implements EventSubscriberInterface
 {
     public function __construct(
-        private ApiClient $apiClient,
-        private ?ApplicationLoggerHandler $logHandler = null,
+        private SdkClientFactory $factory,
+        private SessionClientInterface $sessions,
     ) {
     }
 
@@ -62,37 +61,37 @@ final readonly class FlushTelemetrySubscriber implements EventSubscriberInterfac
     /**
      * Called after the response has been sent. Blocking here is safe because the
      * user no longer waits for this process.
+     *
+     * Independent best-effort flushes — one failing must never skip the others,
+     * and none may throw into the host (Rule #1). Logs first (match prior intent),
+     * then errors, then sessions. getHub() builds lazily and may throw → guard it;
+     * sessions flush even if the Hub is unavailable (SessionApiClient is Hub-independent).
      */
     public function onKernelTerminate(TerminateEvent $_event): void
     {
-        // INDEPENDENT try/catch per flush: a throw from the log-handler flush must NOT
-        // skip the apiClient flush (which drains in-flight error/session POSTs). Wrapping
-        // both in one try/catch meant an early failure in flushLogs() silently dropped
-        // the pending error transfers. Each flush is best-effort and self-contained;
-        // either failing never affects the host app (CRITICAL: never throw into the host).
-
-        // Flush buffered log-aggregation records FIRST, at this controlled post-response
-        // point, so the log path gets the same deferred, circuit-breaker-gated,
-        // bounded-timeout delivery as the error path.
-        //
-        // Previously the handler only flushed its buffer in __destruct (PHP shutdown).
-        // That ran AFTER kernel.terminate, when the cache pool may already be torn down —
-        // so circuit-breaker failures recorded for a slow/unreachable collector did NOT
-        // persist, the breaker never opened, and every request that shipped logs kept
-        // paying the full per-flush timeout. Draining here (cache still live) lets the
-        // breaker shed load, and on real FPM/FrankenPHP this runs after the response is
-        // flushed.
+        $hub = null;
         try {
-            $this->logHandler?->flushLogs();
+            $hub = $this->factory->getHub();
         } catch (\Throwable) {
-            // Best-effort; never let a log-flush error affect the host or block the
-            // apiClient flush below.
+            // Hub build failed; log/error flushes skipped but session flush still runs.
         }
 
         try {
-            $this->apiClient->flush();
+            $hub?->getLogClient()?->flush();
         } catch (\Throwable) {
-            // Best-effort; never let an error/session-flush error affect the host.
+            // Best-effort; never let a log-flush error affect the host or block subsequent flushes.
+        }
+
+        try {
+            $hub?->getClient()->flush();
+        } catch (\Throwable) {
+            // Best-effort; never let an error-flush error affect the host or block sessions.
+        }
+
+        try {
+            $this->sessions->flush();
+        } catch (\Throwable) {
+            // Best-effort; never let a session-flush error affect the host.
         }
     }
 }

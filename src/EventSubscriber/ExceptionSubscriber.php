@@ -4,10 +4,8 @@ declare(strict_types=1);
 
 namespace ApplicationLogger\Bundle\EventSubscriber;
 
-use ApplicationLogger\Bundle\Service\ApiClient;
-use ApplicationLogger\Bundle\Service\BreadcrumbCollector;
 use ApplicationLogger\Bundle\Service\ContextCollectorInterface;
-use ApplicationLogger\Bundle\Service\ErrorPayloadFactory;
+use ApplicationLogger\Bundle\Service\Sdk\SdkClientFactory;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpKernel\Event\ExceptionEvent;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
@@ -16,7 +14,10 @@ use Symfony\Component\HttpKernel\KernelEvents;
 /**
  * Exception Event Subscriber.
  *
- * Captures exceptions and sends them to Application Logger.
+ * Captures exceptions and forwards them to the sdk-core Hub via SdkClientFactory.
+ * Enriches the per-request Scope with user context and exception tags before capture.
+ * Full request/server context flows automatically via BundleContextCollector inside
+ * sdk-core's Client.
  *
  * CRITICAL RESILIENCE GUARANTEE:
  * This subscriber is wrapped in try-catch to ensure it NEVER affects
@@ -29,10 +30,8 @@ use Symfony\Component\HttpKernel\KernelEvents;
 final class ExceptionSubscriber implements EventSubscriberInterface
 {
     public function __construct(
-        private readonly ApiClient $apiClient,
+        private readonly SdkClientFactory $factory,
         private readonly ContextCollectorInterface $contextCollector,
-        private readonly BreadcrumbCollector $breadcrumbCollector,
-        private readonly ErrorPayloadFactory $payloadFactory,
         private readonly bool $debug = false,
         private readonly bool $enabled = true,
         private readonly bool $errorTrackingEnabled = true,
@@ -50,8 +49,8 @@ final class ExceptionSubscriber implements EventSubscriberInterface
     /**
      * Handle kernel exception event.
      *
-     * This method is wrapped in try-catch to ensure logging errors
-     * never interfere with exception handling.
+     * Enriches the sdk-core Scope with user context and exception tags,
+     * then delegates capture to the Hub. Never throws into the host app.
      */
     public function onKernelException(ExceptionEvent $event): void
     {
@@ -61,86 +60,28 @@ final class ExceptionSubscriber implements EventSubscriberInterface
         }
 
         try {
+            $hub = $this->factory->getHub();
             $exception = $event->getThrowable();
+            $scope = $hub->getScope();
 
-            // Build error payload
-            $payload = $this->buildPayload($exception);
-
-            // Send to API (async, fire-and-forget)
-            $this->apiClient->sendError($payload);
-
-            // Add breadcrumb about the exception being sent
-            $this->breadcrumbCollector->add([
-                'type' => 'error',
-                'category' => 'exception',
-                'message' => \sprintf('Exception captured: %s', $exception->getMessage()),
-                'level' => 'error',
-            ]);
-        } catch (\Throwable $e) {
-            // CRITICAL: Never let logging errors affect exception handling
-            // Silently fail - the original exception must be processed normally
-
-            if ($this->debug) {
-                // Only log in debug mode to avoid noise
-                error_log(\sprintf(
-                    'ApplicationLogger: Failed to capture exception: %s',
-                    $e->getMessage()
-                ));
+            $user = $this->contextCollector->collectUser();
+            if (\is_array($user)) {
+                $scope->setUser($user);
             }
 
-            // Do NOT re-throw - just let it fail silently
+            $scope->setTag('exception_class', $exception::class);
+            $scope->setTag(
+                'http_status_code',
+                (string) ($exception instanceof HttpExceptionInterface ? $exception->getStatusCode() : 500),
+            );
+
+            $hub->captureException($exception);
+        } catch (\Throwable $e) {
+            // CRITICAL: Never let logging errors affect exception handling.
+            // Silently fail — the original exception must be processed normally.
+            if ($this->debug) {
+                error_log('ApplicationLogger: Failed to capture exception: '.$e->getMessage());
+            }
         }
-    }
-
-    /**
-     * Build error payload from exception.
-     *
-     * Returns payload matching exact API format with snake_case field names.
-     * See ErrorIngestDto for complete field specifications. The common ~20-field
-     * mapping (including http_method) lives in ErrorPayloadFactory; this method
-     * only supplies the subscriber-specific fields (http_status_code + exception tags).
-     *
-     * @return array<string, mixed>
-     */
-    private function buildPayload(\Throwable $exception): array
-    {
-        try {
-            $context = $this->contextCollector->collectContext();
-
-            // Extract HTTP status code from exception
-            $httpStatusCode = $this->extractHttpStatusCode($exception);
-
-            return $this->payloadFactory->fromThrowable($exception, $context, [
-                'http_status_code' => $httpStatusCode,
-                'tags' => [
-                    'exception_class' => \get_class($exception),
-                    'exception_code' => (string) $exception->getCode(),
-                ],
-            ]);
-        } catch (\Throwable) {
-            // If payload building fails, return minimal payload.
-            return $this->payloadFactory->minimalFallback($exception, [
-                'http_status_code' => 500, // Default to 500 for uncaught exceptions
-            ]);
-        }
-    }
-
-    /**
-     * Extract HTTP status code from exception.
-     *
-     * Checks if exception implements HttpExceptionInterface to get status code.
-     * Falls back to 500 for uncaught exceptions (internal server error).
-     *
-     * @return int HTTP status code (100-599)
-     */
-    private function extractHttpStatusCode(\Throwable $exception): int
-    {
-        // Check if exception has HTTP status code
-        if ($exception instanceof HttpExceptionInterface) {
-            return $exception->getStatusCode();
-        }
-
-        // Default to 500 Internal Server Error for uncaught exceptions
-        return 500;
     }
 }

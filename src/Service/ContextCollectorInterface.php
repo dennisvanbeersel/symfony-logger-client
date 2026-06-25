@@ -6,9 +6,8 @@ namespace ApplicationLogger\Bundle\Service;
 
 /**
  * Seam for {@see ContextCollector} so the concrete collector can be `final` while
- * its collaborators (ExceptionSubscriber, ApplicationLoggerHandler,
- * ErrorPayloadFactory) and their unit tests depend on an interface they can mock,
- * rather than mocking a final class.
+ * its collaborators (ExceptionSubscriber, ApplicationLoggerHandler) and their unit
+ * tests depend on an interface they can mock, rather than mocking a final class.
  *
  * RESILIENCE: every implementation method is total — it returns a safe default
  * (empty array / null) on any internal failure and never throws into the host app.

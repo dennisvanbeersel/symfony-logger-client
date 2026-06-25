@@ -126,6 +126,27 @@ final class ApplicationLoggerExtensionTest extends TestCase
         self::assertTrue($container->getParameter('application_logger.log_aggregation_enabled'));
     }
 
+    public function testLoopbackPathsParameterIsRegistered(): void
+    {
+        $container = new ContainerBuilder();
+        $this->registerParameters($container);
+
+        self::assertTrue($container->hasParameter('application_logger.loopback_paths'));
+        self::assertSame(
+            ['/api/v1/errors', '/api/v1/js-errors', '/api/v1/sessions', '/api/v1/logs', '/api/errors'],
+            $container->getParameter('application_logger.loopback_paths'),
+        );
+    }
+
+    public function testSessionHashSaltParameterIsRegistered(): void
+    {
+        $container = new ContainerBuilder();
+        $this->registerParameters($container);
+
+        self::assertTrue($container->hasParameter('application_logger.session_hash_salt'));
+        self::assertNull($container->getParameter('application_logger.session_hash_salt'));
+    }
+
     /**
      * Every `%application_logger.*%` placeholder referenced in services.yaml must
      * resolve to a registered parameter. This cross-check catches a future config

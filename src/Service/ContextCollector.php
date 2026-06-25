@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ApplicationLogger\Bundle\Service;
 
+use ApplicationLogger\Sdk\DataScrubber;
 use Symfony\Component\HttpFoundation\RequestStack;
 
 /**
@@ -40,9 +41,9 @@ final class ContextCollector implements ContextCollectorInterface
             'server' => $this->collectServer(),
             'environment' => $this->environment,
             'release' => $this->release,
-            // Precompute the session hash ONCE here so ErrorPayloadFactory can read it
-            // from the context instead of re-running getSessionHash() (a second
-            // RequestStack + session lookup) for every error it builds.
+            // Precompute the session hash ONCE here so consumers (e.g. ExceptionSubscriber)
+            // can read it from the context instead of re-running getSessionHash() (a second
+            // RequestStack + session lookup) for every error they build.
             'session_hash' => $this->getSessionHash(),
         ];
     }
