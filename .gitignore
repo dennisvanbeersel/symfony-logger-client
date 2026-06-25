@@ -24,9 +24,8 @@ Thumbs.db
 # Linting
 /.php-cs-fixer.cache
 
-# Composer
-# Note: composer.lock is committed for library development but ignored in production
-# composer.lock
+# Composer — a library must not commit its lock file (matches applogger/sdk-core); CI runs composer update.
+/composer.lock
 
 # npm
 npm-debug.log*
@@ -35,6 +34,3 @@ yarn-error.log*
 
 # Generated recipes-contrib submission payload (rebuild via recipe/build-contrib.sh)
 /recipe/contrib/
-
-# Libraries do not commit a lock file (matches applogger/sdk-core); CI runs composer update.
-/composer.lock
