@@ -725,7 +725,7 @@ When making changes, maintain backward compatibility:
 - **Config options**: Add new options with sensible defaults
 - **Service signatures**: Add optional parameters at the end
 - **Twig functions**: Don't change existing function signatures
-- **JS API**: `window.ApplicationLogger.*` methods should be stable
+- **JS API**: `window.appLogger.*` methods should be stable. The auto-injected init script (`ScriptRenderer`/`init.html.twig`) imports the SDK as an ES module and assigns the ready instance to **`window.appLogger`** (lowercase) — that is the runtime global users call (`captureException`, `addBreadcrumb`, `setUser`, `sessionReplay`, …). `ApplicationLogger` is only the rollup UMD export *name* (used when loading `logger.umd.js` directly via `<script>` as `new window.ApplicationLogger(...)`); the bundle's own ESM injection never sets `window.ApplicationLogger`. Docs/examples for the bundle must use `window.appLogger`.
 
 If breaking changes are required, increment the major version.
 

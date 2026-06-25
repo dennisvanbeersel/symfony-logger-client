@@ -369,21 +369,21 @@ If you prefer to place the SDK yourself (and Twig is available), disable `auto_i
 </html>
 ```
 
-At runtime the SDK is exposed as `window.ApplicationLogger`. It automatically captures `window` `error` events, unhandled promise rejections, failed fetch/HTTP requests, and `console.error()` breadcrumbs. When `expose_api` is enabled (the default), you can also report manually:
+At runtime the SDK is exposed as `window.appLogger`. It automatically captures `window` `error` events, unhandled promise rejections, failed fetch/HTTP requests, and `console.error()` breadcrumbs. When `expose_api` is enabled (the default), you can also report manually:
 
 ```javascript
 // Capture an exception
-window.ApplicationLogger.captureException(new Error('Manual report'), {
+window.appLogger.captureException(new Error('Manual report'), {
   tags: { feature: 'checkout' },
 });
 
 // Capture a message
-window.ApplicationLogger.captureMessage('User completed onboarding', 'info');
+window.appLogger.captureMessage('User completed onboarding', 'info');
 
 // Enrich context
-window.ApplicationLogger.setUser({ id: '123' });
-window.ApplicationLogger.setTags({ plan: 'pro' });
-window.ApplicationLogger.addBreadcrumb({ category: 'ui', message: 'Opened modal' });
+window.appLogger.setUser({ id: '123' });
+window.appLogger.setTags({ plan: 'pro' });
+window.appLogger.addBreadcrumb({ category: 'ui', message: 'Opened modal' });
 ```
 
 The SDK is resilient on the client side too: a sessionStorage-backed circuit breaker (default threshold 5, 60s open window), a localStorage offline queue (default 50 events, 24h max age), token-bucket rate limiting (default burst of 10, refilling at 1 token/second), and deduplication (default 5s window). On page close it uses the Beacon API to flush queued events. Breadcrumbs are capped at 50 by default.
@@ -397,9 +397,9 @@ Session tracking (`session_tracking.enabled`) must be on for replay to function.
 > **Important — default state:** Replay is an opt-in feature. The JavaScript SDK itself defaults `sessionReplayEnabled` to `false`, while the bundle's PHP `session_replay.enabled` config node defaults to `true`; the effective value forwarded to the SDK is whatever the PHP configuration / Twig integration provides. Treat replay as **opt-in and error-triggered**, and explicitly confirm `session_replay.enabled` in your configuration to match your intended behavior. When `expose_api` is `true`, replay can also be toggled at runtime:
 
 ```javascript
-window.ApplicationLogger.sessionReplay.enable();
-window.ApplicationLogger.sessionReplay.disable();
-window.ApplicationLogger.sessionReplay.isEnabled();
+window.appLogger.sessionReplay.enable();
+window.appLogger.sessionReplay.disable();
+window.appLogger.sessionReplay.isEnabled();
 ```
 
 ### The non-blocking, never-throws guarantee
