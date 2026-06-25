@@ -5,7 +5,7 @@
 [![Packagist Version](https://img.shields.io/packagist/v/applogger/symfony-bundle.svg?style=flat-square)](https://packagist.org/packages/applogger/symfony-bundle)
 [![Total Downloads](https://img.shields.io/packagist/dt/applogger/symfony-bundle.svg?style=flat-square)](https://packagist.org/packages/applogger/symfony-bundle)
 [![PHP Version](https://img.shields.io/packagist/php-v/applogger/symfony-bundle.svg?style=flat-square)](https://packagist.org/packages/applogger/symfony-bundle)
-[![License](https://img.shields.io/packagist/l/applogger/symfony-bundle.svg?style=flat-square)](https://github.com/dennisvanbeersel/symfony-logger-client/blob/main/LICENSE)
+[![License](https://img.shields.io/packagist/l/applogger/symfony-bundle.svg?style=flat-square)](https://github.com/dennisvanbeersel/symfony-logger-client/blob/master/LICENSE)
 
 ---
 
@@ -45,7 +45,7 @@ The Composer-enforced runtime requirements are:
 
 | Requirement | Constraint |
 |-------------|------------|
-| PHP | `>=8.2` |
+| PHP | `>=8.3` |
 | `symfony/framework-bundle` | `^6.4 \|\| ^7.0 \|\| ^8.0` |
 | `symfony/http-kernel` | `^6.4 \|\| ^7.0 \|\| ^8.0` |
 | `symfony/monolog-bundle` | `^3.0 \|\| ^4.0` |
@@ -124,6 +124,8 @@ The recipe also defaults `release` to `%env(default::APP_VERSION)%`, `environmen
 
 The configuration root key is `application_logger`. The DSN and API key are the only values required to start sending; everything else has a sensible default.
 
+> **v2.0 note:** The bundle is now a thin Symfony adapter over [`applogger/sdk-core`](https://packagist.org/packages/applogger/sdk-core). Error capture routes through the SDK Hub; log aggregation routes through LogClient. Several configuration keys that were previously active (`endpoint_path`, `log_path`, `log_batch_size`, `max_log_buffer`, `retry_attempts`, `async`, `circuit_breaker.enabled`) are now **deprecated no-ops** — they are accepted without error but have no effect, and will be removed in a future major version. Remove them from your config to silence deprecation notices.
+
 ### DSN and authentication
 
 The DSN identifies your project endpoint and has the form:
@@ -156,7 +158,9 @@ Inertness rules:
 | `enabled` | bool | `true` | Global error-tracking enable. |
 | `release` | string | `null` | Version / release identifier. |
 | `environment` | string | `'production'` | Environment name reported with telemetry. |
-| `endpoint_path` | string | `/api/v1/errors` | Error ingestion path. |
+| `error_tracking_enabled` | bool | `true` | Capture and ship exceptions/errors. Set `false` to run log-aggregation only. |
+| `log_aggregation_enabled` | bool | `true` | Buffer and ship non-exception log records. Set `false` to run error-tracking only. |
+| `endpoint_path` | string | `/api/v1/errors` | _(Deprecated in v2.0 — no-op; the SDK core owns this.)_ |
 
 ### Log aggregation
 
@@ -164,24 +168,28 @@ Inertness rules:
 |--------|------|---------|-------------|
 | `log_endpoint` | string | `null` | Collector base URL, e.g. `https://<slug>.logs.applogger.eu`. `null` = aggregation off. |
 | `log_token` | string | `null` | Log token (`sk_log_…`), sent as `X-Api-Key` to the collector. |
-| `log_path` | string | `/v1/logs` | Single-log endpoint path (batch endpoint is `<log_path>/batch`). |
-| `log_batch_size` | int | `50` | Records per batch (min 1, max 1000). |
-| `max_log_buffer` | int | `1000` | Max buffered records before oldest are dropped (min 1, max 10000). |
+| `excluded_channels` | array | `['http_client','console','deprecation','doctrine']` | Monolog channels excluded from log aggregation (beyond the always-excluded framework channels). Set to `[]` to aggregate all channels. |
+| `log_path` | string | `/v1/logs` | _(Deprecated in v2.0 — no-op; the SDK core owns this.)_ |
+| `log_batch_size` | int | `50` | _(Deprecated in v2.0 — no-op; the SDK core owns this.)_ |
+| `max_log_buffer` | int | `1000` | _(Deprecated in v2.0 — no-op; the SDK core owns this.)_ |
 
 ### Performance & resilience
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `timeout` | float | `2.0` | Request timeout in seconds (min 0.5, max 5.0). |
-| `retry_attempts` | int | `0` | Sync-mode retries (min 0, max 3). `0` = fail fast (recommended). |
-| `async` | bool | `true` | Fire-and-forget transport. |
+| `flush_budget` | float | `2.0` | Wall-clock cap (s) on the post-response telemetry drain. Effective cap = `min(timeout, flush_budget)`. Lower to `0.5` to harden FrankenPHP worker pools against a slow collector. |
 | `debug` | bool | `false` | Internal PHP debug logging. |
+| `retry_attempts` | int | `0` | _(Deprecated in v2.0 — no-op; the SDK core owns this.)_ |
+| `async` | bool | `true` | _(Deprecated in v2.0 — no-op; the SDK core owns this.)_ |
 
 ### Circuit breaker (`circuit_breaker`)
 
+The circuit breaker is owned by `applogger/sdk-core` in v2.0 and is always-on. The `enabled` key is accepted but has no effect.
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | bool | `true` | Enable the circuit breaker. |
+| `enabled` | bool | `true` | _(Deprecated in v2.0 — no-op; the SDK core's circuit breaker is always-on.)_ |
 | `failure_threshold` | int | `5` | Failures before the circuit opens (min 1). |
 | `timeout` | int | `60` | Seconds the circuit stays open (min 10, max 300). |
 | `half_open_attempts` | int | `1` | Trial requests allowed while half-open (min 1). |
@@ -244,13 +252,11 @@ application_logger:
     environment: '%kernel.environment%'
     release: '%env(default::APP_VERSION)%'
 
-    # Resilience
+    # Resilience (timeout and flush_budget; async/retry_attempts are v2.0 no-ops)
     timeout: 2.0
-    async: true
-    retry_attempts: 0
+    # flush_budget: 0.5  # Uncomment to harden FrankenPHP worker pools
 
     circuit_breaker:
-        enabled: true
         failure_threshold: 5
         timeout: 60
 
@@ -258,11 +264,9 @@ application_logger:
     capture_level: error
     max_breadcrumbs: 50
 
-    # Log aggregation (optional)
+    # Log aggregation (optional — omit log_endpoint/log_token to disable)
     log_endpoint: '%env(default::APPLICATION_LOGGER_LOG_ENDPOINT)%'
     log_token: '%env(default::APPLICATION_LOGGER_LOG_TOKEN)%'
-    log_batch_size: 50
-    max_log_buffer: 1000
 
     # Frontend SDK
     javascript:
@@ -484,6 +488,6 @@ If you discover a security vulnerability, please report it responsibly rather th
 
 ## License
 
-Released under the [MIT License](https://github.com/dennisvanbeersel/symfony-logger-client/blob/main/LICENSE).
+Released under the [MIT License](https://github.com/dennisvanbeersel/symfony-logger-client/blob/master/LICENSE).
 
 Authored by Dennis Van Beersel — [applogger.eu](https://applogger.eu).

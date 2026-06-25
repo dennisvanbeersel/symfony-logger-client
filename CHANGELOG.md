@@ -122,5 +122,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session hashing using SHA-256 for privacy-preserving session tracking
 - Circuit breaker prevents cascade failures
 
-[Unreleased]: https://github.com/dennisvanbeersel/application-logger-bundle/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/dennisvanbeersel/application-logger-bundle/releases/tag/v0.3.0
+[Unreleased]: https://github.com/dennisvanbeersel/symfony-logger-client/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/dennisvanbeersel/symfony-logger-client/compare/v0.3.0...v2.0.0
+[0.3.0]: https://github.com/dennisvanbeersel/symfony-logger-client/releases/tag/v0.3.0

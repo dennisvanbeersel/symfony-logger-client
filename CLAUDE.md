@@ -4,15 +4,19 @@ This file provides guidance to Claude Code when working with the AppLogger Symfo
 
 ## Overview
 
+**Composer package:** `applogger/symfony-bundle` — the Symfony client bundle for the AppLogger error tracking and application monitoring platform.
+
 This is a **client library** for the AppLogger error tracking platform. It enables Symfony applications to automatically capture and send errors to [applogger.eu](https://applogger.eu).
+
+**v2.0 architecture:** The bundle is a thin Symfony adapter over `applogger/sdk-core`. Error capture routes through the SDK Hub; log aggregation routes through LogClient. The bundle handles Symfony-specific wiring (event subscribers, Monolog handler, Twig extension, DI) and delegates all transport/circuit-breaker/resilience concerns to the SDK core.
 
 **Key Principle**: This bundle runs inside customer applications. **Never impact the host application's performance or stability.**
 
 ### What This Bundle Does
 
-- Captures PHP exceptions and Monolog errors (error tracking pipeline)
+- Captures PHP exceptions and Monolog errors (error tracking pipeline), delegating to `applogger/sdk-core` Hub
 - Ships non-exception Monolog records to **log aggregation** (ClickHouse via the
-  Go log-collector) — a distinct, optional feature from error tracking
+  Go log-collector) — a distinct, optional feature from error tracking, delegating to LogClient
 - Provides a JavaScript SDK for frontend error tracking
 - Sends errors/logs to AppLogger with resilience patterns (non-blocking, completed
   after the response via `kernel.terminate`)
@@ -21,7 +25,7 @@ This is a **client library** for the AppLogger error tracking platform. It enabl
 
 ### Technology Stack
 
-- **PHP 8.2+** with strict types
+- **PHP 8.3+** with strict types
 - **Symfony 6.4 / 7.x / 8.x** bundle architecture (`^6.4|^7.0|^8.0`)
 - **JavaScript ES6+** SDK (bundled, not separate npm package)
 - **Rollup** for JS build (ESM + UMD outputs)
@@ -613,14 +617,18 @@ Key facts:
 
 ## Configuration Schema
 
-The bundle configuration is defined in `src/DependencyInjection/Configuration.php`:
+The bundle configuration is defined in `src/DependencyInjection/Configuration.php`. Key design points:
+
+- `dsn` and `api_key` default to `''` (empty string, **not required**). An empty value keeps the bundle inert; this is intentional so a skipped Flex recipe never breaks `cache:clear`.
+- Several keys deprecated in v2.0 (`endpoint_path`, `log_path`, `log_batch_size`, `max_log_buffer`, `retry_attempts`, `async`, `circuit_breaker.enabled`) are accepted but no-op; the SDK core owns those concerns.
+- `capture_level` is a plain `scalarNode` (not `enumNode`) to allow `%env()%` placeholders. Invalid literals fall back to `error` at runtime rather than throwing.
 
 ```php
 $rootNode
     ->children()
         ->scalarNode('dsn')
-            ->isRequired()
-            ->info('AppLogger DSN (https://public_key@host/project_id)')
+            ->defaultValue('')          // Empty = inert (NOT required)
+            ->info('AppLogger DSN (https://host/project-id). Empty = bundle stays inert.')
         ->end()
         ->booleanNode('enabled')
             ->defaultTrue()
@@ -635,17 +643,17 @@ $rootNode
             ->defaultValue(2.0)
             ->min(0.05)
             ->max(2.0)
-            ->info('Wall-clock cap (s) on the post-response telemetry drain; effective cap = min(timeout, flush_budget). Default 2.0 = previous behavior; lower it to harden FrankenPHP worker pools.')
+            ->info('Wall-clock cap (s) on the post-response drain; min(timeout, flush_budget).')
         ->end()
         ->arrayNode('circuit_breaker')
             ->addDefaultsIfNotSet()
             ->children()
-                ->booleanNode('enabled')->defaultTrue()->end()
+                ->booleanNode('enabled')->defaultTrue()->end()  // Deprecated no-op in v2.0
                 ->integerNode('failure_threshold')->defaultValue(5)->end()
                 ->integerNode('timeout')->defaultValue(60)->end()
             ->end()
         ->end()
-        // ... more options
+        // ... more options — see Configuration.php for the complete schema
     ->end();
 ```
 
@@ -717,7 +725,7 @@ When making changes, maintain backward compatibility:
 - **Config options**: Add new options with sensible defaults
 - **Service signatures**: Add optional parameters at the end
 - **Twig functions**: Don't change existing function signatures
-- **JS API**: `window.appLogger.*` methods should be stable
+- **JS API**: `window.ApplicationLogger.*` methods should be stable
 
 If breaking changes are required, increment the major version.
 

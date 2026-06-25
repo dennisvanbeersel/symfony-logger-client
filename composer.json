@@ -22,7 +22,7 @@
         "source": "https://github.com/dennisvanbeersel/symfony-logger-client"
     },
     "require": {
-        "php": ">=8.2",
+        "php": ">=8.3",
         "applogger/sdk-core": "^1.0",
         "monolog/monolog": "^3.0",
         "symfony/framework-bundle": "^6.4|^7.0|^8.0",
