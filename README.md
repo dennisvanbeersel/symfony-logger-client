@@ -483,7 +483,7 @@ The AppLogger platform itself is EU-hosted with EU data residency. As with any m
 
 - **Website & sign-up:** https://applogger.eu
 - **Package repository & issues:** https://github.com/dennisvanbeersel/symfony-logger-client
-- **Platform documentation** (API, architecture, security): https://github.com/dennisvanbeersel/application-logger
+- **Documentation & guides** (API, setup, security): https://applogger.eu
 
 ---
 
