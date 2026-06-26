@@ -171,4 +171,30 @@ final class ApplicationLoggerExtensionTest extends TestCase
 
         self::assertSame([], $missing, 'services.yaml references parameters the extension never registers: '.implode(', ', $missing));
     }
+
+    public function testPublishableKeyParameterIsRegistered(): void
+    {
+        $container = new ContainerBuilder();
+        $config = (new Processor())->processConfiguration(new Configuration(), [['publishable_key' => 'pk_test_deadbeef']]);
+        $method = new \ReflectionMethod(ApplicationLoggerExtension::class, 'registerConfigurationParameters');
+        $method->invoke(new ApplicationLoggerExtension(), $container, $config);
+
+        self::assertTrue($container->hasParameter('application_logger.publishable_key'));
+        self::assertSame('pk_test_deadbeef', $container->getParameter('application_logger.publishable_key'));
+    }
+
+    public function testServerApiKeyParameterIsUntouched(): void
+    {
+        $container = new ContainerBuilder();
+        $config = (new Processor())->processConfiguration(new Configuration(), [['api_key' => 'sk_secret', 'publishable_key' => 'pk_test_x']]);
+        $method = new \ReflectionMethod(ApplicationLoggerExtension::class, 'registerConfigurationParameters');
+        $method->invoke(new ApplicationLoggerExtension(), $container, $config);
+
+        self::assertSame('sk_secret', $container->getParameter('application_logger.api_key'));
+
+        // The server sdk_config still carries the secret api_key, unchanged.
+        $sdkConfig = $container->getParameter('application_logger.sdk_config');
+        self::assertSame('sk_secret', $sdkConfig['api_key']);
+        self::assertArrayNotHasKey('publishable_key', $sdkConfig);
+    }
 }

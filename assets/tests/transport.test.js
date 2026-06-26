@@ -182,7 +182,7 @@ describe('Transport', () => {
         // Create transport with valid config
         transport = new Transport({
             dsn: 'https://localhost:8111/test-project-id',
-            apiKey: 'test-api-key',
+            publishableKey: 'pk_test_testkey0000000000000000000000000000000000000000',
             debug: false,
         });
 
@@ -204,8 +204,8 @@ describe('Transport', () => {
             expect(transport.dsn.protocol).toBe('https');
             expect(transport.dsn.host).toBe('localhost:8111');
             expect(transport.dsn.projectId).toBe('test-project-id');
-            // JSSDK-01: canonical ingestion route (matches platform + PHP bundle).
-            expect(transport.dsn.endpoint).toBe('https://localhost:8111/api/v1/errors');
+            // Spec 2026-06-25 §4.3/§6.4-C: browser errors go to js-errors with ?pk=.
+            expect(transport.dsn.endpoint).toBe('https://localhost:8111/api/v1/js-errors?pk=pk_test_testkey0000000000000000000000000000000000000000');
         });
 
         test('throws error for missing DSN', () => {
@@ -232,13 +232,13 @@ describe('Transport', () => {
             }).toThrow('Invalid DSN format');
         });
 
-        test('stores API key separately from DSN', () => {
+        test('stores publishable key separately from DSN', () => {
             const t = new Transport({
                 dsn: 'https://example.com/project-123',
-                apiKey: 'secret-key',
+                publishableKey: 'pk_test_secret-key',
             });
 
-            expect(t.apiKey).toBe('secret-key');
+            expect(t.publishableKey).toBe('pk_test_secret-key');
         });
     });
 
@@ -266,7 +266,7 @@ describe('Transport', () => {
                 expect.objectContaining({
                     method: 'POST',
                     headers: expect.objectContaining({
-                        'X-Api-Key': 'test-api-key',
+                        'X-Publishable-Key': 'pk_test_testkey0000000000000000000000000000000000000000',
                     }),
                 }),
             );
@@ -365,12 +365,12 @@ describe('Transport', () => {
             await transport.sendToApi(payload);
 
             expect(mockFetch).toHaveBeenCalledWith(
-                'https://localhost:8111/api/v1/errors',
+                'https://localhost:8111/api/v1/js-errors?pk=pk_test_testkey0000000000000000000000000000000000000000',
                 expect.objectContaining({
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'X-Api-Key': 'test-api-key',
+                        'X-Publishable-Key': 'pk_test_testkey0000000000000000000000000000000000000000',
                         'User-Agent': 'ApplicationLogger-JS-SDK/1.0',
                     },
                     body: JSON.stringify(payload),
@@ -1041,7 +1041,11 @@ describe('Transport', () => {
             transport.flushWithBeacon();
 
             expect(beaconCalls.length).toBe(1);
+            // JS-RUNTIME-01: queued items are flat error payloads, so the unload
+            // beacon must target the js-errors INGEST endpoint (which accepts them),
+            // NOT recovery-session (which 400-drops anything without sessionId+events).
             expect(beaconCalls[0].url).toBe(transport.dsn.endpoint);
+            expect(beaconCalls[0].url).toContain('/api/v1/js-errors');
         });
 
         test('clears queue after successful beacon send', () => {
@@ -1056,7 +1060,7 @@ describe('Transport', () => {
             expect(transport.storageQueue.size()).toBe(0);
         });
 
-        test('beacon sends queued errors as flat payloads with body apiKey (JS-4: bounded, no loss)', (done) => {
+        test('beacon sends queued errors as flat payloads to js-errors ?pk= (JS-4 / JS-RUNTIME-01: bounded, no loss)', (done) => {
             const beaconCalls = [];
             global.navigator.sendBeacon = (url, data) => {
                 beaconCalls.push({ url, data });
@@ -1075,18 +1079,25 @@ describe('Transport', () => {
             expect(beaconCalls.length).toBe(10);
             expect(transport.queue.length).toBe(5);
 
+            // JS-RUNTIME-01: beacon goes to the js-errors ingest endpoint, which
+            // resolves the project from the ?pk= query param (sendBeacon can't set
+            // the X-Publishable-Key header). NOT recovery-session.
+            expect(beaconCalls[0].url).toBe(transport.dsn.endpoint);
+            expect(beaconCalls[0].url).toContain('/api/v1/js-errors');
+            expect(beaconCalls[0].url).toContain('pk=pk_test_testkey0000000000000000000000000000000000000000');
+
             // Verify payload was sent (Blob exists)
             const blob = beaconCalls[0].data;
             expect(blob).toBeInstanceOf(Blob);
 
-            // sendBeacon cannot set headers, so auth must be in the body (mirrors
-            // sendRecoverySession) and each beacon must be a single flat error the
-            // ingest endpoint accepts (NOT a {dsn, errors:[]} envelope).
+            // Each beacon is a single FLAT error the ingest endpoint accepts (NOT a
+            // {dsn, errors:[]} envelope); no auth/secret is injected into the body.
             const reader = new FileReader();
             reader.onload = () => {
                 const payload = JSON.parse(reader.result);
                 expect(payload.errors).toBeUndefined();
-                expect(payload.apiKey).toBe('test-api-key');
+                expect(payload.publishableKey).toBeUndefined();
+                expect(payload.apiKey).toBeUndefined();
                 expect(payload.message).toBe('Error 0'); // oldest-first transmission
                 done();
             };
@@ -1118,7 +1129,7 @@ describe('Transport', () => {
             await transport.sendSessionEvent('session-123', { event: 'pageview' });
 
             expect(mockFetch).toHaveBeenCalledWith(
-                'https://localhost:8111/api/v1/sessions/session-123/events',
+                'https://localhost:8111/api/v1/sessions/session-123/events?pk=pk_test_testkey0000000000000000000000000000000000000000',
                 expect.objectContaining({
                     method: 'POST',
                 }),
@@ -1139,7 +1150,7 @@ describe('Transport', () => {
             await transport.sendReplayClicks('session-123', clicks);
 
             expect(mockFetch).toHaveBeenCalledWith(
-                'https://localhost:8111/api/v1/sessions/session-123/replay',
+                'https://localhost:8111/api/v1/sessions/session-123/replay?pk=pk_test_testkey0000000000000000000000000000000000000000',
                 expect.objectContaining({
                     method: 'POST',
                     body: JSON.stringify({ clicks }),
@@ -1182,10 +1193,10 @@ describe('Transport', () => {
             const result = await transport.sendRecoverySession(recoveryPayload);
 
             expect(mockFetch).toHaveBeenCalledWith(
-                'https://localhost:8111/api/v1/errors/recovery-session',
+                'https://localhost:8111/api/v1/errors/recovery-session?pk=pk_test_testkey0000000000000000000000000000000000000000',
                 expect.objectContaining({
                     method: 'POST',
-                    headers: expect.objectContaining({ 'X-Api-Key': 'test-api-key' }),
+                    headers: expect.objectContaining({ 'X-Publishable-Key': 'pk_test_testkey0000000000000000000000000000000000000000' }),
                     body: JSON.stringify(recoveryPayload),
                 }),
             );
@@ -1211,7 +1222,7 @@ describe('Transport', () => {
             const result = await transport.sendRecoverySession(recoveryPayload, true);
 
             expect(beaconCalls).toHaveLength(1);
-            expect(beaconCalls[0].url).toBe('https://localhost:8111/api/v1/errors/recovery-session');
+            expect(beaconCalls[0].url).toBe('https://localhost:8111/api/v1/errors/recovery-session?pk=pk_test_testkey0000000000000000000000000000000000000000');
             expect(result).toEqual({ success: true, method: 'beacon' });
             expect(mockFetch).not.toHaveBeenCalled();
         });
@@ -1365,8 +1376,8 @@ describe('Transport', () => {
                     expect(blobText).not.toContain('leak');
                     expect(blobText).toContain('token=[REDACTED]');
                     expect(blobText).toContain('api_key=[REDACTED]');
-                    // API key still carried in the beacon body for auth.
-                    expect(blobText).toContain('test-api-key');
+                    // Publishable key still carried in the beacon body for auth.
+                    expect(blobText).toContain('pk_test_testkey0000000000000000000000000000000000000000');
                     done();
                 };
                 reader.onerror = () => done(new Error('Failed to read blob'));

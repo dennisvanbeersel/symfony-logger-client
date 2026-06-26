@@ -3,9 +3,14 @@ application_logger:
     # Format: https://host/project-id (without API key)
     dsn: '%env(APPLICATION_LOGGER_DSN)%'
 
-    # API Key for authentication (set in .env)
-    # Sent as X-Api-Key header with each request
+    # Secret API Key for server-side authentication (set in .env)
+    # Sent as X-Api-Key header from PHP — keep this secret, never expose to the browser.
     api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
+
+    # Publishable Key for browser-side JS error tracking (set in .env)
+    # Obtain from your project's Settings page. Safe to embed in HTML (write-only, pk_…).
+    # Required for browser JS error ingest; the bundle auto-injects the SDK when set.
+    publishable_key: '%env(APPLICATION_LOGGER_PUBLISHABLE_KEY)%'
 
     # Application version for release tracking
     release: '%env(default::APP_VERSION)%'

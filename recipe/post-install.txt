@@ -10,15 +10,28 @@
   1. Add your credentials to .env.local:
 
      APPLICATION_LOGGER_DSN=https://your-host.com/your-project-id
-     APPLICATION_LOGGER_API_KEY=your-real-api-key
+     APPLICATION_LOGGER_API_KEY=your-real-api-key      # server-side only — keep secret
+     APPLICATION_LOGGER_PUBLISHABLE_KEY=pk_live_...    # browser JS errors — safe to embed
+
+     Get DSN + API key from your project's Settings page.
+     Get the Publishable Key from Settings > Publishable Keys (format: pk_live_...).
 
   2. Flip the switch to start sending in .env.local:
 
      APPLICATION_LOGGER_ENABLED=true
 
-  3. PHP error tracking, the JavaScript SDK and log aggregation activate ONLY
-     once APPLICATION_LOGGER_ENABLED=true. Until then the bundle stays inert
+  3. Setting APPLICATION_LOGGER_ENABLED=true activates the server-side PHP error
+     tracking and log aggregation pipelines. Until then the bundle stays inert
      and sends nothing.
+
+     The browser JavaScript SDK needs BOTH APPLICATION_LOGGER_ENABLED=true AND
+     APPLICATION_LOGGER_PUBLISHABLE_KEY set — without the publishable key the JS
+     SDK has nothing to authenticate with and is not injected.
+
+  Key distinction:
+     - DSN + API key  → server-side PHP/bundle; sent as X-Api-Key; keep secret.
+     - Publishable key → browser JS error ingest (/api/v1/js-errors); safe to embed
+       in HTML; never put the secret API key in browser-facing code.
 
   Optional: customize config/packages/application_logger.yaml
      - Configure scrub_fields for PII protection

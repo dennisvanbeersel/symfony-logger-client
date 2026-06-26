@@ -327,6 +327,22 @@ else
   fail "e2) .env missing DSN / API_KEY placeholders"
 fi
 
+# e3. the publishable-key credential must be scaffolded too — both the .env
+#     placeholder (from the manifest env block) and the wired config key (from
+#     the copy-from-recipe config). Without these the browser/JS SDK has no
+#     browser-safe credential to send with (the secret API key must never reach
+#     the browser), so a recipe that drops the publishable key is a regression.
+if grep -q "^APPLICATION_LOGGER_PUBLISHABLE_KEY=" "$APP/.env"; then
+  pass "e3a) .env contains APPLICATION_LOGGER_PUBLISHABLE_KEY placeholder"
+else
+  fail "e3a) .env missing APPLICATION_LOGGER_PUBLISHABLE_KEY placeholder"
+fi
+if grep -Eq "^[[:space:]]*publishable_key:" "$APP/config/packages/application_logger.yaml"; then
+  pass "e3b) application_logger.yaml wires the publishable_key config key"
+else
+  fail "e3b) application_logger.yaml missing the publishable_key config key"
+fi
+
 # ---------------------------------------------------------------------------
 # Boot the app's web server (prod env so exceptions are handled, not dumped by
 # the dev profiler — and the ExceptionSubscriber fires on the kernel.exception).

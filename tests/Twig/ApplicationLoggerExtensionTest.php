@@ -34,6 +34,29 @@ class ApplicationLoggerExtensionTest extends TestCase
         $this->assertSame('application_logger_init', $functions[0]->getName());
     }
 
+    public function testGetGlobalsContainsPublishableKey(): void
+    {
+        $config = $this->getDefaultConfig();
+        $extension = $this->makeExtension($config);
+
+        $globals = $extension->getGlobals();
+
+        $this->assertArrayHasKey('app_logger_publishable_key', $globals);
+        $this->assertSame('pk_test_publishable', $globals['app_logger_publishable_key']);
+    }
+
+    public function testGetGlobalsPublishableKeyDefaultsToEmptyString(): void
+    {
+        $config = $this->getDefaultConfig();
+        unset($config['publishable_key']);
+        $extension = $this->makeExtension($config);
+
+        $globals = $extension->getGlobals();
+
+        $this->assertArrayHasKey('app_logger_publishable_key', $globals);
+        $this->assertSame('', $globals['app_logger_publishable_key']);
+    }
+
     public function testRenderInitReturnsEmptyStringWhenDisabled(): void
     {
         $config = $this->getDefaultConfig();
@@ -61,8 +84,12 @@ class ApplicationLoggerExtensionTest extends TestCase
         // Should contain DSN
         $this->assertStringContainsString('"dsn":"https://test-host.com/test-project"', $output);
 
-        // Should contain API key
-        $this->assertStringContainsString('"apiKey":"test-api-key"', $output);
+        // MF-7: the secret apiKey must NEVER appear in the browser config; the
+        // world-readable publishableKey must.
+        $this->assertStringContainsString('"publishableKey":"pk_test_publishable"', $output);
+        $this->assertStringNotContainsString('"apiKey"', $output);
+        // Regression guard: if api_key were ever re-added to getDefaultConfig(), this would catch it.
+        $this->assertStringNotContainsString('test-api-key', $output);
 
         // Should contain environment
         $this->assertStringContainsString('"environment":"test"', $output);
@@ -362,15 +389,42 @@ class ApplicationLoggerExtensionTest extends TestCase
         $this->assertSame('', $output);
     }
 
-    public function testRenderInitReturnsEmptyStringWhenApiKeyMissing(): void
+    public function testRenderInitReturnsEmptyStringWhenPublishableKeyMissing(): void
     {
         $config = $this->getDefaultConfig();
-        unset($config['api_key']); // Remove API key
+        unset($config['publishable_key']); // Remove publishable key
 
         $extension = $this->makeExtension($config);
         $output = $extension->renderInit();
 
         $this->assertSame('', $output);
+    }
+
+    public function testRenderInitHardStripsSecretEvenIfPresentInConfig(): void
+    {
+        // Defense-in-depth: even if a misconfiguration leaves api_key/log_token in the
+        // Twig $config, the hard-strip backstop must remove it before json_encode.
+        // All four spellings stripped by the backstop loop are exercised here:
+        // snake_case (api_key, log_token) AND camelCase (apiKey, logToken).
+        $config = $this->getDefaultConfig();
+        $config['api_key'] = 'sk_should_never_render';
+        $config['log_token'] = 'sk_log_should_never_render';
+        $config['apiKey'] = 'sk_camel_api_should_never_render';
+        $config['logToken'] = 'sk_camel_log_should_never_render';
+
+        $extension = $this->makeExtension($config);
+        $output = $extension->renderInit();
+
+        $this->assertStringNotContainsString('sk_should_never_render', $output);
+        $this->assertStringNotContainsString('sk_log_should_never_render', $output);
+        $this->assertStringNotContainsString('sk_camel_api_should_never_render', $output);
+        $this->assertStringNotContainsString('sk_camel_log_should_never_render', $output);
+        $this->assertStringNotContainsString('"apiKey"', $output);
+        $this->assertStringNotContainsString('"api_key"', $output);
+        $this->assertStringNotContainsString('"log_token"', $output);
+        $this->assertStringNotContainsString('"logToken"', $output);
+        // The publishable key still renders.
+        $this->assertStringContainsString('"publishableKey":"pk_test_publishable"', $output);
     }
 
     public function testRenderInitReturnsEmptyStringWhenDsnIsInvalid(): void
@@ -469,18 +523,18 @@ class ApplicationLoggerExtensionTest extends TestCase
     {
         $logger = new class implements \Psr\Log\LoggerInterface {
             use \Psr\Log\LoggerTrait;
-            /** @var list<array{level: mixed, message: string}> */
+            /** @var list<array{level: string, message: string}> */
             public array $records = [];
 
             public function log($level, string|\Stringable $message, array $context = []): void
             {
-                $this->records[] = ['level' => $level, 'message' => (string) $message];
+                $this->records[] = ['level' => (string) $level, 'message' => (string) $message];
             }
         };
 
-        // enabled JS but missing dsn/api_key → validateConfiguration() fails → advisory.
+        // enabled JS but missing dsn/publishable_key → validateConfiguration() fails → advisory.
         $ext = new ApplicationLoggerExtension(
-            config: ['enabled' => true, 'dsn' => '', 'api_key' => ''],
+            config: ['enabled' => true, 'dsn' => '', 'publishable_key' => ''],
             scriptRenderer: new ScriptRenderer(new CspNonceProvider()),
             logger: $logger,
             requestStack: null,
@@ -492,23 +546,99 @@ class ApplicationLoggerExtensionTest extends TestCase
         self::assertSame('warning', $logger->records[0]['level'], 'JS-config advisory must log at warning, not error');
     }
 
+    // --- master_enabled kill-switch tests ---
+
+    public function testRenderFragmentsReturnsEmptyWhenMasterDisabled(): void
+    {
+        // application_logger.enabled=false must suppress the manual
+        // {{ application_logger_init() }} path — identical to what
+        // JavaScriptInjectionSubscriber does for auto-injection.
+        $config = $this->getDefaultConfig();
+        $config['master_enabled'] = false;
+
+        $extension = $this->makeExtension($config);
+        $fragments = $extension->renderFragments();
+
+        $this->assertSame('', $fragments['headStart'], 'headStart must be empty when master disabled');
+        $this->assertSame('', $fragments['headEnd'], 'headEnd must be empty when master disabled');
+        $this->assertSame('', $fragments['bodyEnd'], 'bodyEnd must be empty when master disabled');
+    }
+
+    public function testRenderInitReturnsEmptyStringWhenMasterDisabled(): void
+    {
+        $config = $this->getDefaultConfig();
+        $config['master_enabled'] = false;
+
+        $extension = $this->makeExtension($config);
+
+        $this->assertSame('', $extension->renderInit(), 'renderInit() must return empty string when master disabled');
+    }
+
+    public function testRenderFragmentsRendersNormallyWhenMasterEnabled(): void
+    {
+        // Positive control: master_enabled=true must not suppress output.
+        $config = $this->getDefaultConfig();
+        $config['master_enabled'] = true;
+
+        $extension = $this->makeExtension($config);
+        $output = $extension->renderInit();
+
+        $this->assertStringContainsString('<script', $output, 'renderInit() must produce a script tag when master enabled');
+        $this->assertStringContainsString('"dsn"', $output);
+    }
+
+    public function testRenderFragmentsDefaultsTrueWhenMasterEnabledKeyAbsent(): void
+    {
+        // BC: configs built before master_enabled was added must still render.
+        $config = $this->getDefaultConfig();
+        // Deliberately no 'master_enabled' key.
+
+        $extension = $this->makeExtension($config);
+        $output = $extension->renderInit();
+
+        $this->assertStringContainsString('<script', $output, 'renderInit() must render when master_enabled is absent (default true)');
+    }
+
+    public function testGetGlobalsReturnsEmptyPublishableKeyWhenMasterDisabled(): void
+    {
+        $config = $this->getDefaultConfig();
+        $config['master_enabled'] = false;
+
+        $extension = $this->makeExtension($config);
+        $globals = $extension->getGlobals();
+
+        $this->assertArrayHasKey('app_logger_publishable_key', $globals);
+        $this->assertSame('', $globals['app_logger_publishable_key'], 'publishable key must be suppressed when master disabled');
+    }
+
+    public function testGetGlobalsReturnsPublishableKeyWhenMasterEnabled(): void
+    {
+        $config = $this->getDefaultConfig();
+        $config['master_enabled'] = true;
+
+        $extension = $this->makeExtension($config);
+        $globals = $extension->getGlobals();
+
+        $this->assertSame('pk_test_publishable', $globals['app_logger_publishable_key']);
+    }
+
     public function testInvalidDsnFormatLogsAtWarningNotError(): void
     {
         $logger = new class implements \Psr\Log\LoggerInterface {
             use \Psr\Log\LoggerTrait;
-            /** @var list<array{level: mixed, message: string}> */
+            /** @var list<array{level: string, message: string}> */
             public array $records = [];
 
             public function log($level, string|\Stringable $message, array $context = []): void
             {
-                $this->records[] = ['level' => $level, 'message' => (string) $message];
+                $this->records[] = ['level' => (string) $level, 'message' => (string) $message];
             }
         };
 
-        // enabled JS, non-empty dsn/api_key but dsn is not a valid URL →
+        // enabled JS, non-empty dsn/publishable_key but dsn is not a valid URL →
         // passes the missing-fields check and reaches the filter_var(FILTER_VALIDATE_URL) failure.
         $ext = new ApplicationLoggerExtension(
-            config: ['enabled' => true, 'dsn' => 'not a url', 'api_key' => 'some-api-key'],
+            config: ['enabled' => true, 'dsn' => 'not a url', 'publishable_key' => 'pk_test_x'],
             scriptRenderer: new ScriptRenderer(new CspNonceProvider()),
             logger: $logger,
             requestStack: null,
@@ -545,7 +675,7 @@ class ApplicationLoggerExtensionTest extends TestCase
         return [
             'enabled' => true,
             'dsn' => 'https://test-host.com/test-project',
-            'api_key' => 'test-api-key',
+            'publishable_key' => 'pk_test_publishable',
             'environment' => 'test',
             'release' => 'v1.0.0',
             'debug' => false,

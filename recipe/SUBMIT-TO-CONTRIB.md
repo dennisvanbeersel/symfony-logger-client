@@ -33,24 +33,34 @@ requires consumer opt-in. Layer B keeps installs working in the meantime.
 
 ## What gets submitted
 
-`build-contrib.sh` assembles the exact directory contrib expects:
+`build-contrib.sh` assembles the exact directory contrib expects — **two** version
+dirs:
 
 ```
-applogger/symfony-bundle/0.3/manifest.json
+applogger/symfony-bundle/0.3/manifest.json   # base recipe, NO publishable_key
 applogger/symfony-bundle/0.3/config/packages/application_logger.yaml
+applogger/symfony-bundle/2.1/manifest.json   # full recipe, WITH publishable_key
+applogger/symfony-bundle/2.1/config/packages/application_logger.yaml
 ```
 
-- The version directory `0.3` is the **lowest released version** the recipe applies to;
-  Flex applies it to `0.3` and every version above. Bump it only for a
-  breaking recipe change (then keep the old version dir too).
+- A version directory is the **lowest released version** that payload applies to;
+  Flex applies it to that version and every version above, until a higher version
+  dir takes over.
+- **Why two dirs:** the canonical config carries `publishable_key:`, a node that
+  only exists in the **2.1.0** Configuration. Applying it to 0.3–2.0.x installs
+  would make `cache:clear` fail on an unrecognized option. So the `0.3` payload has
+  `publishable_key` (and its env var) stripped and applies to `0.3 … 2.0.x`; the
+  `2.1` payload carries `publishable_key` and applies to `2.1.0` and above. The
+  build script derives the `0.3` payload from the canonical files automatically.
 - `manifest.json` is already in Flex format: `bundles`, `copy-from-recipe`, `env`,
   `post-install-output`.
 
 ## Steps
 
 ```bash
-# 1. Regenerate the payload from the canonical recipe/ files
-bash recipe/build-contrib.sh 0.3        # writes recipe/contrib/...
+# 1. Regenerate the payload from the canonical recipe/ files (emits BOTH the
+#    0.3 base and the 2.1 publishable_key payloads).
+bash recipe/build-contrib.sh 2.1        # writes recipe/contrib/...
 
 # 2. Fork + clone symfony/recipes-contrib
 gh repo fork symfony/recipes-contrib --clone
@@ -62,8 +72,9 @@ cp -R /path/to/libraries/symfony-bundle/recipe/contrib/applogger .
 # 4. Validate locally with the contrib tooling
 composer install
 php src/Github.php   # or: vendor/bin/... per the contrib README's "Testing recipes"
-# Quick syntax check at minimum:
-php -r 'json_decode(file_get_contents("applogger/symfony-bundle/0.3/manifest.json"), false, 512, JSON_THROW_ON_ERROR); echo "manifest OK\n";'
+# Quick syntax check at minimum (both version dirs):
+php -r 'json_decode(file_get_contents("applogger/symfony-bundle/2.1/manifest.json"), false, 512, JSON_THROW_ON_ERROR); echo "2.1 manifest OK\n";'
+php -r 'json_decode(file_get_contents("applogger/symfony-bundle/0.3/manifest.json"), false, 512, JSON_THROW_ON_ERROR); echo "0.3 manifest OK\n";'
 
 # 5. Open the PR
 git checkout -b add-applogger-symfony-bundle

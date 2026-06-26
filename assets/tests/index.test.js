@@ -2,7 +2,7 @@
  * Unit tests for the ApplicationLogger entry point (index.js)
  *
  * Covers:
- * - Constructor validation (dsn / apiKey required)
+ * - Constructor validation (dsn + publishableKey required; apiKey is no longer accepted)
  * - Default config merge (scrubFields defaults, environment)
  * - sessionReplay API gating via exposeApi
  * - disable() clearing the buffer save interval (SPA memory-leak guard)
@@ -14,7 +14,7 @@ import ApplicationLogger from '../src/index.js';
 
 const VALID_CONFIG = {
     dsn: 'https://localhost:8111/test-project-id',
-    apiKey: 'test-api-key',
+    publishableKey: 'pk_test_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6',
 };
 
 describe('ApplicationLogger (index.js)', () => {
@@ -24,11 +24,19 @@ describe('ApplicationLogger (index.js)', () => {
         });
 
         test('throws when dsn is missing', () => {
-            expect(() => new ApplicationLogger({ apiKey: 'key' })).toThrow(/DSN is required/);
+            expect(() => new ApplicationLogger({ publishableKey: 'pk_test_key' })).toThrow(/DSN is required/);
         });
 
-        test('throws when apiKey is missing', () => {
-            expect(() => new ApplicationLogger({ dsn: VALID_CONFIG.dsn })).toThrow(/API Key is required/);
+        test('throws when publishableKey is missing', () => {
+            expect(() => new ApplicationLogger({ dsn: VALID_CONFIG.dsn }))
+                .toThrow(/Publishable Key is required/);
+        });
+
+        test('constructs with publishableKey + dsn and exposes the transport', () => {
+            const logger = new ApplicationLogger({ ...VALID_CONFIG });
+            expect(logger).toBeInstanceOf(ApplicationLogger);
+            expect(logger.transport.publishableKey).toBe(VALID_CONFIG.publishableKey);
+            expect(logger.transport.apiKey).toBeUndefined();
         });
 
         test('constructs successfully with valid config', () => {

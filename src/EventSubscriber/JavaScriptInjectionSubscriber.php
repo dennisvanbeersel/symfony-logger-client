@@ -35,6 +35,14 @@ final class JavaScriptInjectionSubscriber implements EventSubscriberInterface
         private readonly bool $enabled,
         private readonly ApplicationLoggerExtension $twigExtension,
         private readonly ?LoggerInterface $logger = null,
+        /**
+         * Root `application_logger.enabled` master kill-switch. When the bundle is
+         * disabled wholesale, the JS SDK must NOT be auto-injected either — even if
+         * the (separate) `javascript.enabled` flag is left at its default true.
+         * Defaults to true so existing call sites / tests that only pass the JS flag
+         * keep their previous behaviour.
+         */
+        private readonly bool $masterEnabled = true,
     ) {
     }
 
@@ -61,6 +69,13 @@ final class JavaScriptInjectionSubscriber implements EventSubscriberInterface
      */
     public function onKernelResponse(ResponseEvent $event): void
     {
+        // Skip when the bundle is disabled wholesale via the root master kill-switch.
+        // `application_logger.enabled=false` must suppress JS auto-injection too, not
+        // only the server-side error/log pipelines.
+        if (!$this->masterEnabled) {
+            return;
+        }
+
         // Skip if JavaScript SDK is disabled
         if (!$this->enabled) {
             return;

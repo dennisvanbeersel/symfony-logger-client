@@ -34,7 +34,7 @@ class ApplicationLogger {
     /**
      * @param {Object} config Configuration options
      * @param {string} config.dsn Data Source Name (project endpoint URL)
-     * @param {string} config.apiKey API Key for authentication
+     * @param {string} config.publishableKey Publishable key (pk_…) for browser ingest authentication
      * @param {string} [config.release] Application version/release
      * @param {string} [config.environment] Environment (production, staging, etc.)
      * @param {boolean} [config.debug=false] Enable debug logging
@@ -58,7 +58,12 @@ class ApplicationLogger {
      * @param {boolean} [config.exposeApi=true] Expose control API for developers
      *
      * Resilience Configuration (transport layer):
-     * @param {number} [config.circuitBreakerFailureThreshold=5] Failures before circuit opens
+     * @param {number} [config.circuitBreakerFailureThreshold=5] Failures before circuit opens.
+     *   5 is retained for the publishable-key/js-errors route: each opaque CORS/network
+     *   fast-fail (transport.js MF-5) records exactly one breaker failure, so a
+     *   persistently mis-scoped key opens the circuit after 5 attempts and the host
+     *   page stops hammering a route that will never accept it — while a handful of
+     *   transient blips never trip it.
      * @param {number} [config.circuitBreakerTimeoutMs=60000] Circuit breaker timeout (ms)
      * @param {number} [config.storageQueueMaxSize=50] Max errors in offline queue
      * @param {number} [config.storageQueueMaxAgeMs=86400000] Max age for queued errors (24h)
@@ -72,8 +77,11 @@ class ApplicationLogger {
             throw new Error('ApplicationLogger: DSN is required. Expected format: https://host/project-id');
         }
 
-        if (!config.apiKey) {
-            throw new Error('ApplicationLogger: API Key is required for authentication');
+        // Spec 2026-06-25 §6.2: the browser SDK authenticates with the world-readable
+        // publishable key (pk_…), never the server secret. The secret no longer
+        // reaches buildConfig()/ScriptRenderer, so config.apiKey is gone entirely.
+        if (!config.publishableKey) {
+            throw new Error('ApplicationLogger: Publishable Key is required for authentication');
         }
 
         this.config = {
@@ -99,7 +107,7 @@ class ApplicationLogger {
             exposeApi: true,
 
             // Resilience config (transport layer)
-            circuitBreakerFailureThreshold: 5,
+            circuitBreakerFailureThreshold: 5, // see ctor JSDoc: tuned for the MF-5 CORS fast-fail
             circuitBreakerTimeoutMs: 60000, // 60 seconds
             storageQueueMaxSize: 50,
             storageQueueMaxAgeMs: 86400000, // 24 hours

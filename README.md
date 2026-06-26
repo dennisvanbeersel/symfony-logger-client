@@ -75,17 +75,21 @@ If your application uses Symfony Flex, the bundle is registered automatically an
 ```dotenv
 APPLICATION_LOGGER_DSN=https://your-logger-host.com/your-project-id
 APPLICATION_LOGGER_API_KEY=your-api-key-here
+APPLICATION_LOGGER_PUBLISHABLE_KEY=
 APPLICATION_LOGGER_ENABLED=false
 ```
 
-**The bundle ships inert after installation.** Both PHP error tracking and the JavaScript SDK are gated on `APPLICATION_LOGGER_ENABLED`, which the recipe sets to `false`. To start sending telemetry, set your real DSN and API key (preferably in `.env.local`) and flip the flag:
+**The bundle ships inert after installation.** Both PHP error tracking and the JavaScript SDK are gated on `APPLICATION_LOGGER_ENABLED`, which the recipe sets to `false`. To start sending telemetry, set your real credentials (preferably in `.env.local`) and flip the flag:
 
 ```dotenv
 # .env.local
 APPLICATION_LOGGER_DSN=https://<your-host>/<your-project-id>
-APPLICATION_LOGGER_API_KEY=<your-api-key>
+APPLICATION_LOGGER_API_KEY=<your-api-key>              # server-side only — keep secret
+APPLICATION_LOGGER_PUBLISHABLE_KEY=pk_live_<hex>       # browser JS errors — safe to embed
 APPLICATION_LOGGER_ENABLED=true
 ```
+
+> **Two credentials, two purposes.** The `api_key` (format: any string) is your **server-side secret** — it is sent from PHP via `X-Api-Key` and must never appear in browser-facing HTML. The `publishable_key` (format: `pk_live_…`) is a **write-only, browser-safe key** — it is embedded in the auto-injected JS SDK and used exclusively for browser JS error ingest at `/api/v1/js-errors` via `X-Publishable-Key`. Obtain the publishable key from your project's **Settings > Publishable Keys** page on AppLogger.
 
 The recipe also defaults `release` to `%env(default::APP_VERSION)%`, `environment` to `%kernel.environment%`, and `debug` to `%kernel.debug%`.
 
@@ -100,12 +104,13 @@ The recipe also defaults `release` to `%env(default::APP_VERSION)%`, `environmen
    ];
    ```
 
-2. Create `config/packages/application_logger.yaml`. A minimal configuration only needs a DSN and an API key:
+2. Create `config/packages/application_logger.yaml`. A minimal configuration needs a DSN, a server-side API key, and — to enable browser JS error tracking — a publishable key:
 
    ```yaml
    application_logger:
        dsn: '%env(APPLICATION_LOGGER_DSN)%'
-       api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
+       api_key: '%env(APPLICATION_LOGGER_API_KEY)%'         # server-side secret; sent as X-Api-Key
+       publishable_key: '%env(APPLICATION_LOGGER_PUBLISHABLE_KEY)%'  # browser JS; safe to embed
        enabled: '%env(bool:APPLICATION_LOGGER_ENABLED)%'
        environment: '%kernel.environment%'
    ```
@@ -138,10 +143,11 @@ The client-internal parser validates that a project-id path segment exists. **Th
 
 Authentication summary:
 
-| Channel | Header | Destination |
-|---------|--------|-------------|
-| Error & session tracking | `X-Api-Key: <api_key>` | Platform API host (from the DSN) |
-| Log aggregation | `X-Api-Key: <log_token>` (format `sk_log_…`) | `log_endpoint` (the AppLogger log collector) |
+| Channel | Credential | Header | Destination |
+|---------|-----------|--------|-------------|
+| Error & session tracking (server-side PHP) | `api_key` — secret, server only | `X-Api-Key: <api_key>` | Platform API host (from the DSN) |
+| Log aggregation (server-side PHP) | `log_token` (`sk_log_…`) — secret, server only | `X-Api-Key: <log_token>` | `log_endpoint` (the AppLogger log collector) |
+| Browser JS error ingest | `publishable_key` (`pk_live_…`) — write-only, safe to embed | `X-Publishable-Key: <publishable_key>` | `/api/v1/js-errors` on the platform API host |
 
 Inertness rules:
 
@@ -153,8 +159,9 @@ Inertness rules:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `dsn` | string | `''` | Project endpoint URL `https://host/project-id`. Empty = inert. Deliberately not required, so a skipped Flex recipe never breaks `cache:clear`. |
-| `api_key` | string | `''` | Sent as `X-Api-Key`. Empty = inert. |
+| `dsn` | string | `''` | Project endpoint URL `https://host/project-id`. Contains no credentials — safe to appear in browser JS config (the JS SDK also receives it as the `dsn` prop). Empty = inert. Deliberately not required, so a skipped Flex recipe never breaks `cache:clear`. |
+| `api_key` | string | `''` | **Server-side secret.** Sent as `X-Api-Key` from PHP. Empty = inert. Never expose to the browser. |
+| `publishable_key` | string | `''` | **Browser-safe write-only key** (`pk_live_…`). Embedded in the auto-injected JS SDK; sent as `X-Publishable-Key` for browser JS error ingest at `/api/v1/js-errors`. Obtain from your project's Settings > Publishable Keys page. Empty = JS SDK not injected. |
 | `enabled` | bool | `true` | Global error-tracking enable. |
 | `release` | string | `null` | Version / release identifier. |
 | `environment` | string | `'production'` | Environment name reported with telemetry. |
@@ -247,7 +254,8 @@ These values are forwarded to the JavaScript SDK. Replay is **error-triggered on
 # config/packages/application_logger.yaml
 application_logger:
     dsn: '%env(APPLICATION_LOGGER_DSN)%'
-    api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
+    api_key: '%env(APPLICATION_LOGGER_API_KEY)%'             # server-side secret
+    publishable_key: '%env(APPLICATION_LOGGER_PUBLISHABLE_KEY)%'  # browser JS — safe to embed
     enabled: '%env(bool:APPLICATION_LOGGER_ENABLED)%'
     environment: '%kernel.environment%'
     release: '%env(default::APP_VERSION)%'
@@ -358,7 +366,23 @@ Or, with the bundle installed: `php bin/console application-logger:test`.
 
 ### JavaScript SDK
 
-The bundled SDK is shipped pre-built and integrated through AssetMapper automatically. With `javascript.auto_inject` enabled (the default), the SDK is injected into eligible HTML responses — main requests with a `text/html` content type, a status below 400, a `</body>` tag, and a body under 1 MiB. Error pages (4xx/5xx) are deliberately skipped.
+The bundled SDK uses the **publishable key** (`pk_live_…`) for browser error ingest — never the secret `api_key`. The publishable key is write-only and safe to embed in HTML. Obtain it from your project's **Settings > Publishable Keys** page on AppLogger, then set it in `.env.local`:
+
+```dotenv
+# .env.local
+APPLICATION_LOGGER_PUBLISHABLE_KEY=pk_live_<hex>
+```
+
+and declare it in `config/packages/application_logger.yaml`:
+
+```yaml
+application_logger:
+    publishable_key: '%env(APPLICATION_LOGGER_PUBLISHABLE_KEY)%'
+```
+
+When `publishable_key` is non-empty and `javascript.enabled` is `true` (the default), the bundle auto-injects the SDK into eligible HTML responses. The SDK sends browser errors to `/api/v1/js-errors` via `X-Publishable-Key`.
+
+With `javascript.auto_inject` enabled (the default), injection is automatic for main requests with a `text/html` content type, a status below 400, a `</body>` tag, and a body under 1 MiB. Error pages (4xx/5xx) are deliberately skipped.
 
 If you prefer to place the SDK yourself (and Twig is available), disable `auto_inject` and call the Twig function just before `</body>`:
 
@@ -386,7 +410,7 @@ window.appLogger.setTags({ plan: 'pro' });
 window.appLogger.addBreadcrumb({ category: 'ui', message: 'Opened modal' });
 ```
 
-The SDK is resilient on the client side too: a sessionStorage-backed circuit breaker (default threshold 5, 60s open window), a localStorage offline queue (default 50 events, 24h max age), token-bucket rate limiting (default burst of 10, refilling at 1 token/second), and deduplication (default 5s window). On page close it uses the Beacon API to flush queued events. Breadcrumbs are capped at 50 by default.
+The SDK is resilient on the client side too: a sessionStorage-backed circuit breaker (default threshold 5, 60s open window), a localStorage offline queue (default 50 events, 24h max age), token-bucket rate limiting (default burst of 10, refilling at ~10/minute — 0.167 tokens/second), and deduplication (default 5s window). On page close it uses the Beacon API to flush queued events. Breadcrumbs are capped at 50 by default.
 
 ### Session replay (opt-in)
 
@@ -448,9 +472,10 @@ The AppLogger platform itself is EU-hosted with EU data residency. As with any m
 ### Getting a DSN and tokens
 
 1. Sign up at **[applogger.eu](https://applogger.eu)**.
-2. Create a project to obtain its **DSN** and **API key** (used for error and session tracking).
-3. For log aggregation, obtain the project's **log endpoint** and **log token** (`sk_log_…`).
-4. Put these values in your `.env.local` and set `APPLICATION_LOGGER_ENABLED=true`.
+2. Create a project to obtain its **DSN** and **API key** (server-side; used for error and session tracking from PHP).
+3. For browser JS error tracking, obtain the project's **Publishable Key** (`pk_live_…`) from **Settings > Publishable Keys**. This is safe to embed in HTML.
+4. For log aggregation, obtain the project's **log endpoint** and **log token** (`sk_log_…`).
+5. Put these values in your `.env.local` and set `APPLICATION_LOGGER_ENABLED=true`.
 
 ---
 

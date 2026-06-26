@@ -149,6 +149,9 @@ class ApplicationLoggerExtension extends Extension implements PrependExtensionIn
         $container->setParameter('application_logger.enabled', $config['enabled']);
         $container->setParameter('application_logger.dsn', $config['dsn']);
         $container->setParameter('application_logger.api_key', $config['api_key']);
+        // World-readable browser key. SEPARATE from the secret api_key above — this
+        // is the ONLY credential that may reach Twig/buildConfig()/the inline HTML.
+        $container->setParameter('application_logger.publishable_key', $config['publishable_key']);
         $container->setParameter('application_logger.timeout', $config['timeout']);
         $container->setParameter('application_logger.flush_budget', $config['flush_budget']);
         $container->setParameter('application_logger.retry_attempts', $config['retry_attempts']);

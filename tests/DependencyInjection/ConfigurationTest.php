@@ -134,6 +134,28 @@ final class ConfigurationTest extends TestCase
         self::assertSame('my-custom-salt', $config['session_hash_salt']);
     }
 
+    public function testPublishableKeyDefaultsToEmptyString(): void
+    {
+        $config = $this->process([[]]);
+
+        self::assertArrayHasKey('publishable_key', $config);
+        self::assertSame('', $config['publishable_key']);
+    }
+
+    public function testPublishableKeyAcceptsPkValue(): void
+    {
+        $config = $this->process([['publishable_key' => 'pk_live_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4']]);
+
+        self::assertSame('pk_live_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4', $config['publishable_key']);
+    }
+
+    public function testApiKeyStillDefaultsToEmptyString(): void
+    {
+        $config = $this->process([[]]);
+
+        self::assertSame('', $config['api_key']);
+    }
+
     /**
      * A deprecated key like retry_attempts: 2 must still COMPILE (no "unrecognized option"
      * exception) — it just emits a deprecation notice.

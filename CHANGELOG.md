@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - No PHP namespace changes — `ApplicationLogger\Bundle\` is unchanged.
 - No config key changes beyond the deprecated no-ops listed above.
 
-## [Unreleased]
+## [2.1.0] - 2026-06-26
 
 ### Added
 - **`flush_budget` config (default `2.0`s):** bounds the post-response telemetry drain
@@ -48,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `error_tracking_enabled` / `log_aggregation_enabled` config toggles (default true) for logs-only / errors-only operation.
 - `application-logger:test` console command and `ApiClient::sendLogSync()` for collector connectivity smoke-testing.
 - Dedicated `application_logger_internal` Monolog channel for the bundle's own diagnostics (always excluded from aggregation).
+- **Publishable-key browser ingest (2.1.0):** new `publishable_key` config node — the
+  world-readable browser credential. `buildConfig()` now emits `publishableKey` only (never
+  the secret `api_key`). The JS SDK posts browser errors to `/api/v1/js-errors` with
+  `X-Publishable-Key` + `?pk=`, and the unload beacon flushes to the recovery-session
+  endpoint with a `publishableKey` body field.
 
 ### Changed
 - The post-response drain is now bounded by a true **wall-clock** deadline (previously
@@ -64,6 +69,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `min(timeout, flush_budget)` (default ⇒ up to 2.0s; more delivery time on CLI, which
   has no worker pool to saturate).
 - **Default channel exclusions widened** to also exclude `http_client`/`console`/`deprecation`/`doctrine`, stopping log self-amplification at `capture_level: info` in http_client-heavy apps. The bundle's own self-diagnostics now log on the internal channel (JS-config advisories downgraded from error to warning).
+- **`api_key` is now documented SERVER-only (2.1.0):** sent as `X-Api-Key` → `/api/v1/errors`,
+  never injected into the browser. `validateConfiguration()` required fields are now
+  `['dsn', 'publishable_key']`.
+
+### Security
+- **The bundle no longer inlines the secret `api_key` into HTML (2.1.0).** The inline SDK
+  config carries only the write-only publishable key; a hard-strip backstop removes any
+  secret-shaped field (`apiKey`/`api_key`/`logToken`/`log_token`) before `json_encode`.
 
 ### Upgrade notes
 - If you use `capture_level: info` with log aggregation and rely on aggregating
@@ -122,6 +135,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session hashing using SHA-256 for privacy-preserving session tracking
 - Circuit breaker prevents cascade failures
 
-[Unreleased]: https://github.com/dennisvanbeersel/symfony-logger-client/compare/v2.0.0...HEAD
+[2.1.0]: https://github.com/dennisvanbeersel/symfony-logger-client/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/dennisvanbeersel/symfony-logger-client/compare/v0.3.0...v2.0.0
 [0.3.0]: https://github.com/dennisvanbeersel/symfony-logger-client/releases/tag/v0.3.0

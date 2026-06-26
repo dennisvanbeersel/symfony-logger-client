@@ -7,6 +7,7 @@ namespace ApplicationLogger\Bundle\Twig;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Twig\Extension\AbstractExtension;
+use Twig\Extension\GlobalsInterface;
 use Twig\TwigFunction;
 
 /**
@@ -19,7 +20,7 @@ use Twig\TwigFunction;
  * config gating/merge and the session-id lookup, then delegates the actual
  * <script> generation to {@see ScriptRenderer} (single responsibility).
  */
-class ApplicationLoggerExtension extends AbstractExtension
+class ApplicationLoggerExtension extends AbstractExtension implements GlobalsInterface
 {
     /**
      * @param array<string, mixed> $config
@@ -38,6 +39,30 @@ class ApplicationLoggerExtension extends AbstractExtension
             new TwigFunction('application_logger_init', [$this, 'renderInit'], [
                 'is_safe' => ['html'],
             ]),
+        ];
+    }
+
+    /**
+     * Expose bundle config values as Twig globals so manual-include templates
+     * (e.g. init.html.twig) can read them without extra template variables.
+     *
+     * The publishable key is world-readable (pk_…) and safe to inline into HTML;
+     * the secret api_key is deliberately absent here (it is server-side only, G1).
+     *
+     * When the master kill-switch (`application_logger.enabled`) is false the
+     * publishable key is suppressed so the key cannot be observed even through
+     * the Twig global when the bundle is disabled wholesale.
+     *
+     * @return array<string, mixed>
+     */
+    public function getGlobals(): array
+    {
+        if (!($this->config['master_enabled'] ?? true)) {
+            return ['app_logger_publishable_key' => ''];
+        }
+
+        return [
+            'app_logger_publishable_key' => $this->config['publishable_key'] ?? '',
         ];
     }
 
@@ -89,6 +114,14 @@ class ApplicationLoggerExtension extends AbstractExtension
         $empty = ['headStart' => '', 'headEnd' => '', 'bodyEnd' => ''];
 
         try {
+            // Skip if the bundle master kill-switch is off (application_logger.enabled=false).
+            // This gates the manual {{ application_logger_init() }} path the same way
+            // JavaScriptInjectionSubscriber gates the auto-injection path. Default true
+            // for backward compatibility when the key is absent from the config array.
+            if (!($this->config['master_enabled'] ?? true)) {
+                return $empty;
+            }
+
             // Skip if JavaScript SDK is disabled
             if (!isset($this->config['enabled']) || !$this->config['enabled']) {
                 return $empty;
@@ -136,7 +169,10 @@ class ApplicationLoggerExtension extends AbstractExtension
     {
         $defaults = [
             'dsn' => $this->config['dsn'],
-            'apiKey' => $this->config['api_key'],
+            // World-readable browser key ONLY. The secret api_key is server-side and
+            // MUST NOT be present in this Twig $config (see services.yaml swap) nor
+            // reach the browser (G1). publishableKey is the JS SDK config key.
+            'publishableKey' => $this->config['publishable_key'],
             'environment' => $this->config['environment'],
             'release' => $this->config['release'],
             'debug' => $this->config['debug'],
@@ -155,6 +191,14 @@ class ApplicationLoggerExtension extends AbstractExtension
 
         // Merge with custom options
         $config = array_merge($defaults, $options);
+
+        // Hard-strip backstop (G1, MF-7): the browser config must NEVER carry a secret.
+        // Belt-and-suspenders against a future services.yaml regression or a caller-
+        // supplied $options that smuggles one of these in. Drop both snake_case and
+        // camelCase spellings of the server credentials before they can be json_encode'd.
+        foreach (['apiKey', 'api_key', 'logToken', 'log_token'] as $secretKey) {
+            unset($config[$secretKey]);
+        }
 
         // Remove ONLY null values. Legitimate `false` (e.g. sessionReplayEnabled,
         // exposeApi) and `0` must survive so the SDK receives the configured value.
@@ -209,8 +253,9 @@ class ApplicationLoggerExtension extends AbstractExtension
      */
     private function validateConfiguration(): bool
     {
-        // Check required fields
-        $requiredFields = ['dsn', 'api_key'];
+        // Required fields: dsn + the world-readable publishable key. The secret api_key
+        // is deliberately NOT here — it never reaches the Twig path (G1/§6.4).
+        $requiredFields = ['dsn', 'publishable_key'];
 
         foreach ($requiredFields as $field) {
             if (!isset($this->config[$field]) || empty($this->config[$field])) {

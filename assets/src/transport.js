@@ -164,7 +164,10 @@ export class Transport {
         // Debug-gated internal logger: no-op unless config.debug is true, so the
         // SDK never writes to the host page console in production (JSSDK-03/04).
         this.logger = createLogger(config);
-        this.apiKey = config.apiKey; // Store API key separately (not in DSN)
+        // Spec 2026-06-25 §6.2: the browser uses the world-readable publishable key
+        // (pk_<envTag>_<48hex>), never the server secret. Carried separately from the
+        // DSN (header + ?pk= query param), so the DSN stays scheme://host/projectId.
+        this.publishableKey = config.publishableKey;
         this.dsn = this.parseDsn(config.dsn);
         this.queue = [];
         this.sending = false;
@@ -214,7 +217,8 @@ export class Transport {
    * DSN format: {protocol}://{host}/{projectId}
    * Example: https://localhost:8111/b6d8ed85-c0af-4c02-b6bb-bfb0f3609b37
    *
-   * Note: API key is NOT in the DSN. It's passed separately via config.apiKey.
+   * Note: the publishable key (config.publishableKey, world-readable pk_<envTag>_<48hex>)
+   * is NOT in the DSN. It rides as X-Publishable-Key header and ?pk= query param.
    */
     parseDsn(dsn) {
         if (!dsn) {
@@ -233,11 +237,14 @@ export class Transport {
                 protocol: url.protocol.replace(':', ''),
                 host: url.host,
                 projectId: projectId,
-                // JSSDK-01: canonical ingestion route. Matches the platform and the
-                // PHP bundle (ApiClient $errorPath / DsnGenerator::INGEST_PATH).
-                // The legacy /api/errors/ingest route is deprecated (Sunset
-                // 2027-01-01); the JS SDK was the last caller of it.
-                endpoint: `${url.protocol}//${url.host}/api/v1/errors`,
+                // Spec 2026-06-25 §4.3/§6.4-C: browser errors go to the public js-errors
+                // route (ROLE_PUBLIC_INGEST), NOT the secret-only /api/v1/errors. The
+                // publishable key rides as ?pk= so the cross-origin preflight (which
+                // carries no custom header/body) can still resolve the project (§6.3).
+                endpoint: `${url.protocol}//${url.host}/api/v1/js-errors?pk=${encodeURIComponent(this.publishableKey)}`,
+                // Beacon unload target: recovery-session is PUBLIC_ACCESS with body-key
+                // auth (§4.6/§6.5); the publishable key also rides as ?pk=.
+                recoveryEndpoint: `${url.protocol}//${url.host}/api/v1/errors/recovery-session?pk=${encodeURIComponent(this.publishableKey)}`,
             };
         } catch (error) {
             throw new Error(`Invalid DSN format: ${error.message}. Expected: https://host/project-id`);
@@ -321,7 +328,7 @@ export class Transport {
 
         try {
             // Use dedicated recovery session endpoint
-            const endpoint = `${this.dsn.protocol}://${this.dsn.host}/api/v1/errors/recovery-session`;
+            const endpoint = this.dsn.recoveryEndpoint;
 
             // Scrub before sending: the top-level `url` and every nested `event.url`
             // carry raw query strings (?token=...). scrubSensitiveData() applies
@@ -337,10 +344,11 @@ export class Transport {
 
             // Use sendBeacon for page unload (synchronous, guaranteed delivery)
             if (useBeacon && navigator.sendBeacon) {
-                // sendBeacon cannot send custom headers, so include API key in body
+                // sendBeacon cannot send custom headers, so carry the publishable key in
+                // the body (recovery-session is PUBLIC_ACCESS body-auth, §4.6). NEVER a secret.
                 const payloadWithAuth = {
                     ...scrubbedPayload,
-                    apiKey: this.apiKey,
+                    publishableKey: this.publishableKey,
                 };
 
                 const blob = new Blob([JSON.stringify(payloadWithAuth)], {
@@ -365,7 +373,7 @@ export class Transport {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Api-Key': this.apiKey,
+                    'X-Publishable-Key': this.publishableKey,
                     'User-Agent': 'ApplicationLogger-JS-SDK/1.0',
                 },
                 body: JSON.stringify(scrubbedPayload),
@@ -448,7 +456,7 @@ export class Transport {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Api-Key': this.apiKey, // Use separate API key, not from DSN
+                    'X-Publishable-Key': this.publishableKey,
                     'User-Agent': 'ApplicationLogger-JS-SDK/1.0',
                 },
                 body: JSON.stringify(payload),
@@ -478,6 +486,21 @@ export class Transport {
                 this.logger.error('Request timeout');
 
                 this.storageQueue.enqueue(payload);
+                return;
+            }
+
+            // §6.5 (MF-5): a browser fetch to a cross-origin ingest route surfaces a CORS
+            // rejection as an opaque TypeError ("Failed to fetch") with no Response/status.
+            // This class is NOT transient: retrying is pure busy-wait, and enqueuing it
+            // would let flushStoredErrors() re-feed an un-retryable payload on every
+            // subsequent success/init. Fail fast: one breaker failure, no retry, no store.
+            if (error instanceof TypeError) {
+                this.circuitBreaker.recordFailure();
+                this.logger.error(
+                    'Send failed: possible CORS or network failure (check the publishable '
+                    + 'key\'s allowed origins). Not retried.',
+                    error,
+                );
                 return;
             }
 
@@ -763,7 +786,7 @@ export class Transport {
         }
 
         try {
-            const url = `${this.dsn.protocol}://${this.dsn.host}/api/v1/sessions/${sessionId}/events`;
+            const url = `${this.dsn.protocol}://${this.dsn.host}/api/v1/sessions/${sessionId}/events?pk=${encodeURIComponent(this.publishableKey)}`;
 
             // Scrub: session events can carry a `url` with sensitive query values.
             const scrubbedEventData = this.scrubSensitiveData(eventData);
@@ -772,7 +795,7 @@ export class Transport {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Api-Key': this.apiKey,
+                    'X-Publishable-Key': this.publishableKey,
                     'User-Agent': 'ApplicationLogger-JS-SDK/1.0',
                 },
                 body: JSON.stringify(scrubbedEventData),
@@ -798,7 +821,7 @@ export class Transport {
         }
 
         try {
-            const url = `${this.dsn.protocol}://${this.dsn.host}/api/v1/sessions/${sessionId}/replay`;
+            const url = `${this.dsn.protocol}://${this.dsn.host}/api/v1/sessions/${sessionId}/replay?pk=${encodeURIComponent(this.publishableKey)}`;
 
             // Scrub: replay clicks can carry a `url` with sensitive query values.
             const scrubbedBody = this.scrubSensitiveData({ clicks });
@@ -807,7 +830,7 @@ export class Transport {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Api-Key': this.apiKey,
+                    'X-Publishable-Key': this.publishableKey,
                     'User-Agent': 'ApplicationLogger-JS-SDK/1.0',
                 },
                 body: JSON.stringify(scrubbedBody),
@@ -839,12 +862,21 @@ export class Transport {
     }
 
     /**
-     * Flush pending errors using the Beacon API on page unload.
+     * Flush pending QUEUED ERRORS using the Beacon API on page unload.
      *
-     * sendBeacon cannot set request headers, so (like sendRecoverySession) the
-     * API key is carried in the request BODY. The ingestion endpoint accepts a
-     * single flat error payload - NOT a `{dsn, errors:[]}` envelope - so we issue
-     * ONE beacon per queued error (each a flat payload with `apiKey` added),
+     * Targets the js-errors INGEST endpoint (this.dsn.endpoint), NOT the
+     * recovery-session endpoint. The queued items are flat error payloads
+     * ({type, message, file, line, stack_trace, …}); the recovery-session route
+     * (/api/v1/errors/recovery-session) validates `{sessionId, events[]}` and
+     * 400-drops anything else, so beaconing flat errors there silently LOST them
+     * (JS-RUNTIME-01). The js-errors route (ROLE_PUBLIC_INGEST) accepts the flat
+     * payload and resolves the project from the `?pk=<publishableKey>` query param
+     * already baked into this.dsn.endpoint — which is exactly what sendBeacon needs,
+     * since sendBeacon cannot set the X-Publishable-Key header. Recovery sessions
+     * have their own beacon path (sendRecoverySession(useBeacon=true)).
+     *
+     * The ingest endpoint accepts a single flat error payload - NOT a
+     * `{dsn, errors:[]}` envelope - so we issue ONE beacon per queued error,
      * bounded to a small batch so unload stays fast and we don't exceed the
      * browser's sendBeacon size budget. Only payloads the browser accepts are
      * removed from the queues; anything not transmitted (beacon refused or batch
@@ -867,12 +899,17 @@ export class Transport {
             let sentCount = 0;
             for (let i = 0; i < maxBeacons; i++) {
                 const payload = allErrors[i];
-                const beaconPayload = { ...payload, apiKey: this.apiKey };
 
-                const blob = new Blob([JSON.stringify(beaconPayload)], {
+                const blob = new Blob([JSON.stringify(payload)], {
                     type: 'application/json',
                 });
 
+                // JS-RUNTIME-01: queued items are FLAT error payloads, so the beacon
+                // goes to the js-errors INGEST endpoint (this.dsn.endpoint), which
+                // accepts them — NOT recovery-session, which 400-drops anything
+                // without {sessionId, events[]}. this.dsn.endpoint already carries
+                // ?pk=<publishableKey>, so the project resolves without the
+                // X-Publishable-Key header sendBeacon cannot set; no secret is sent.
                 const sent = navigator.sendBeacon(this.dsn.endpoint, blob);
                 if (!sent) {
                     // Browser refused (queue full / too large). Stop here and

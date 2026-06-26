@@ -7,9 +7,17 @@ application_logger:
     # Format: https://your-host.com/project-id
     dsn: '%env(APPLICATION_LOGGER_DSN)%'
 
-    # REQUIRED: API Key for authentication
+    # REQUIRED: Secret API Key for server-side authentication
+    # Sent as X-Api-Key from PHP — keep this secret, never expose to the browser.
     # Get this from your ApplicationLogger dashboard (Project Settings > API Keys)
     api_key: '%env(APPLICATION_LOGGER_API_KEY)%'
+
+    # Publishable Key for browser-side JS error tracking (pk_live_...)
+    # Write-only, safe to embed in HTML. Used by the auto-injected JS SDK for
+    # browser error ingest at /api/v1/js-errors (sent as X-Publishable-Key).
+    # Obtain from: Project Settings > Publishable Keys on AppLogger.
+    # Leave empty to disable JS SDK auto-injection.
+    publishable_key: '%env(APPLICATION_LOGGER_PUBLISHABLE_KEY)%'
 
     # Enable/disable error tracking globally
     enabled: true
@@ -25,12 +33,15 @@ application_logger:
     # Maximum timeout for API requests in seconds (default: 2s for fast failure)
     timeout: 2.0
 
-    # Number of retry attempts (0 = fail fast, recommended for resilience)
-    retry_attempts: 0
+    # Number of retry attempts — DEPRECATED v2.0 no-op; the SDK core owns retries.
+    # Accepted without error but has no effect. Remove to silence deprecation notices.
+    # retry_attempts: 0
 
     # Circuit Breaker - prevents cascade failures when API is down
+    # Note: in v2.0 the circuit breaker is owned by sdk-core and is always-on.
+    # The `enabled` key is a DEPRECATED no-op — accepted but has no effect.
     circuit_breaker:
-        enabled: true
+        # enabled: true   # DEPRECATED v2.0 no-op — circuit breaker is always-on
         failure_threshold: 5  # Open circuit after 5 consecutive failures
         timeout: 60           # Keep circuit open for 60 seconds
         half_open_attempts: 1 # Allow 1 test request in half-open state
@@ -47,12 +58,11 @@ application_logger:
     #   Auth: X-Api-Key: {log_token}   (token format: sk_log_...)
     log_endpoint: null    # e.g. 'https://your-slug.logs.applogger.eu' or '%env(APPLICATION_LOGGER_LOG_ENDPOINT)%'
     log_token: null       # e.g. '%env(APPLICATION_LOGGER_LOG_TOKEN)%'  (sk_log_...)
-    log_path: '/v1/logs'  # collector ingestion path (single; batch is this + "/batch")
-    log_batch_size: 50    # buffer this many records before flushing one batch request (max 1000)
-    max_log_buffer: 1000  # hard cap on buffered records; oldest are dropped beyond this
+    # log_path: '/v1/logs'       # DEPRECATED v2.0 no-op; sdk-core owns ingestion paths
+    # log_batch_size: 50         # DEPRECATED v2.0 no-op; sdk-core owns batching
+    # max_log_buffer: 1000       # DEPRECATED v2.0 no-op; sdk-core owns buffering
 
-    # Error ingestion path on the platform API (versioned, non-deprecated route)
-    endpoint_path: '/api/v1/errors'
+    # endpoint_path: '/api/v1/errors'  # DEPRECATED v2.0 no-op; sdk-core owns this path
 
     # Capture Settings
     # Minimum Monolog level handled by the auto-wired handler. Records at/above this
@@ -188,22 +198,16 @@ application_logger:
 
         # Expose API to developers for user control
         # Allows developers to let users disable session replay via UI
-        # Methods available: window.ApplicationLogger.sessionReplay.disable()
-        #                   window.ApplicationLogger.sessionReplay.enable()
-        #                   window.ApplicationLogger.sessionReplay.isEnabled()
+        # Methods available: window.appLogger.sessionReplay.disable()
+        #                   window.appLogger.sessionReplay.enable()
+        #                   window.appLogger.sessionReplay.isEnabled()
         # Default: true
         expose_api: true
 
     # Advanced Options
-    # Use async HTTP client (fire-and-forget for maximum resilience).
-    # When true (default), the outbound send is INITIATED during the request
-    # (adding ~0ms) and COMPLETED after the response is sent to the client, via a
-    # kernel.terminate listener — so the host request is never blocked, yet delivery
-    # stays reliable even under per-request SAPIs (PHP-FPM, FrankenPHP non-worker).
-    # CLI/Messenger contexts fall back to a bounded __destruct drain on shutdown.
-    # Set to false only if you need synchronous, in-request delivery (this blocks
-    # the host request up to `timeout` per attempt and is NOT recommended).
-    async: true
+    # async: true   # DEPRECATED v2.0 no-op — the SDK core always delivers
+    #               # asynchronously (fire-and-forget, completed on kernel.terminate).
+    #               # This key is accepted without error but has no effect.
 
     # Enable PHP debug logging
     debug: false
@@ -212,4 +216,5 @@ application_logger:
 # Add these to your .env.local file (do not commit!):
 #
 # APPLICATION_LOGGER_DSN=https://your-host.com/your-project-id
-# APPLICATION_LOGGER_API_KEY=your-api-key
+# APPLICATION_LOGGER_API_KEY=your-api-key            # server-side only — keep secret
+# APPLICATION_LOGGER_PUBLISHABLE_KEY=pk_live_...     # browser JS errors — safe to embed

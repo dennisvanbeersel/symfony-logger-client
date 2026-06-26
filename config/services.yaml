@@ -138,9 +138,17 @@ services:
     ApplicationLogger\Bundle\Twig\ApplicationLoggerExtension:
         arguments:
             $config:
+                # Root master kill-switch: when the bundle is disabled wholesale,
+                # the manual {{ application_logger_init() }} call must also be a
+                # no-op — consistent with what JavaScriptInjectionSubscriber does
+                # for auto-injection. Defaults to true when absent (BC).
+                master_enabled: '%application_logger.enabled%'
                 enabled: '%application_logger.javascript.enabled%'
                 dsn: '%application_logger.dsn%'
-                api_key: '%application_logger.api_key%'
+                # World-readable browser key ONLY. The secret api_key is SERVER-side
+                # and is deliberately NOT wired here so it can never reach the inline
+                # HTML SDK config (G1/§6.4). Do NOT re-add api_key to this block.
+                publishable_key: '%application_logger.publishable_key%'
                 environment: '%application_logger.javascript.environment%'
                 release: '%application_logger.javascript.release%'
                 debug: '%application_logger.javascript.debug%'
@@ -182,6 +190,9 @@ services:
             $autoInject: '%application_logger.javascript.auto_inject%'
             $enabled: '%application_logger.javascript.enabled%'
             $twigExtension: '@ApplicationLogger\Bundle\Twig\ApplicationLoggerExtension'
+            # Root master kill-switch: when the bundle is disabled wholesale, JS
+            # auto-injection must be suppressed too (not just the server pipelines).
+            $masterEnabled: '%application_logger.enabled%'
         tags:
             - { name: kernel.event_subscriber }
 

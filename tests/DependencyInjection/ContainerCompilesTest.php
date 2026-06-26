@@ -96,8 +96,9 @@ final class ContainerCompilesTest extends TestCase
         $container->addCompilerPass(
             new class(self::KEY_SERVICES) implements CompilerPassInterface {
                 /** @param list<string> $serviceIds */
-                public function __construct(private readonly array $serviceIds)
-                {
+                public function __construct(
+                    private readonly array $serviceIds,
+                ) {
                 }
 
                 public function process(ContainerBuilder $container): void

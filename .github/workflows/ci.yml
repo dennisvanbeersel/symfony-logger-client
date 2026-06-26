@@ -71,6 +71,12 @@ jobs:
       - name: Run ESLint
         run: npm run lint
 
+      - name: Verify committed JS dist is up to date with source
+        run: |
+          npm run build
+          git diff --exit-code assets/dist/ \
+            || { echo "::error::assets/dist is stale. Run 'npm run build' and commit the four assets/dist/* artifacts."; exit 1; }
+
   phpunit-tests:
     name: PHPUnit Tests (PHP ${{ matrix.php-version }}, ${{ matrix.dependency-version }} deps)
     runs-on: ubuntu-latest

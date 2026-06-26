@@ -52,6 +52,51 @@ class JavaScriptInjectionSubscriberTest extends TestCase
         $this->assertSame('<html><body></body></html>', $event->getResponse()->getContent());
     }
 
+    public function testOnKernelResponseSkipsWhenMasterDisabled(): void
+    {
+        // Root `application_logger.enabled=false` master kill-switch must suppress
+        // JS auto-injection even when the JS-specific `javascript.enabled` flag is
+        // left at its default true. renderFragments() must not even be invoked.
+        $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
+        $twigExtension->expects($this->never())->method('renderFragments');
+
+        $subscriber = new JavaScriptInjectionSubscriber(
+            autoInject: true,
+            enabled: true, // JS SDK flag on...
+            twigExtension: $twigExtension,
+            logger: null,
+            masterEnabled: false, // ...but the bundle is disabled wholesale.
+        );
+
+        $event = $this->createResponseEvent('<html><body></body></html>');
+        $subscriber->onKernelResponse($event);
+
+        // Content should not be modified
+        $this->assertSame('<html><body></body></html>', $event->getResponse()->getContent());
+    }
+
+    public function testOnKernelResponseInjectsWhenMasterEnabled(): void
+    {
+        // Explicit positive control: with masterEnabled=true (and JS enabled +
+        // auto-inject), behaviour is unchanged — the SDK IS injected.
+        $twigExtension = $this->createMock(ApplicationLoggerExtension::class);
+        $twigExtension->method('renderFragments')
+            ->willReturn(['headStart' => '', 'headEnd' => '', 'bodyEnd' => '<script>test</script>']);
+
+        $subscriber = new JavaScriptInjectionSubscriber(
+            autoInject: true,
+            enabled: true,
+            twigExtension: $twigExtension,
+            logger: null,
+            masterEnabled: true,
+        );
+
+        $event = $this->createResponseEvent('<html><body></body></html>');
+        $subscriber->onKernelResponse($event);
+
+        $this->assertStringContainsString('<script>test</script>', (string) $event->getResponse()->getContent());
+    }
+
     public function testOnKernelResponseSkipsWhenAutoInjectDisabled(): void
     {
         $twigExtension = $this->createMock(ApplicationLoggerExtension::class);

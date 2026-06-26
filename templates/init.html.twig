@@ -2,41 +2,36 @@
 /**
  * ApplicationLogger JavaScript SDK Initialization
  *
- * Include this template in your base layout (e.g., base.html.twig) to automatically
- * initialize the JavaScript error tracking.
+ * Include this template in your base layout (e.g., base.html.twig) to initialize
+ * the JavaScript error tracking SDK.
  *
  * Usage:
  *   {% include '@ApplicationLogger/init.html.twig' %}
  *
- * Optional: Pass custom configuration
- *   {% include '@ApplicationLogger/init.html.twig' with {
- *       debug: true,
- *       scrubFields: ['password', 'creditCard']
- *   } %}
+ * This template delegates to the `application_logger_init()` Twig function provided
+ * by ApplicationLoggerExtension, which is the single supported path for SDK injection.
+ * The function reads all required config from the bundle's PHP configuration and
+ * emits the nuclear error trap, early error buffer, SDK init module, and (when
+ * authenticated) user context as a concatenated HTML string.
+ *
+ * SECURITY (2.1.0):
+ * - The browser SDK authenticates with the PUBLISHABLE key (`pk_live_…`), which is
+ *   world-readable and safe to embed in HTML. It is exposed as the Twig global
+ *   `app_logger_publishable_key` by ApplicationLoggerExtension::getGlobals().
+ * - The SECRET api_key is server-side only and is deliberately absent from all
+ *   Twig globals and from the output of application_logger_init(). Never pass it
+ *   to a Twig template or inline it in HTML.
+ * - If publishable_key is empty, application_logger_init() returns an empty string
+ *   and no SDK is injected.
+ *
+ * Configuration:
+ * - Enable and configure the JS SDK via the `publishable_key` and `javascript`
+ *   config nodes in config/packages/application_logger.yaml.
+ * - Set APPLICATION_LOGGER_PUBLISHABLE_KEY in .env.local (obtain the pk_live_…
+ *   value from your project's Settings > Publishable Keys page on AppLogger).
+ *
+ * Optional: pass overrides directly to application_logger_init() instead:
+ *   {{ application_logger_init({ debug: true }) }}
  */
 #}
-<script type="module">
-    import ApplicationLogger from '@application-logger/logger';
-
-    // Initialize ApplicationLogger
-    const logger = new ApplicationLogger({
-        dsn: '{{ app_logger_dsn }}',
-        release: '{{ app_logger_release|default('') }}',
-        environment: '{{ app_logger_environment|default('production') }}',
-        debug: {{ debug|default(app_logger_debug|default(false)) ? 'true' : 'false' }},
-        {% if scrubFields is defined %}
-        scrubFields: {{ scrubFields|json_encode|raw }},
-        {% endif %}
-    });
-
-    // Start capturing errors
-    logger.init();
-
-    // Note: User context is intentionally NOT set here for GDPR compliance.
-    // Session tracking uses anonymized session hashes instead of user identifiers.
-    // If you need to track custom context, use tags or extra data:
-    // logger.setTags({ userRole: 'admin', subscription: 'premium' });
-
-    // Make logger available globally for manual error reporting
-    window.appLogger = logger;
-</script>
+{{ application_logger_init() }}
